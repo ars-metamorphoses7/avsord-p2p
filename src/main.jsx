@@ -8,7 +8,6 @@ import {
   Camera,
   ChevronDown,
   CircleHelp,
-  Command,
   Copy,
   CopyCheck,
   Download,
@@ -29,7 +28,6 @@ import {
   Search,
   Send,
   Settings2,
-  Share2,
   Sparkles,
   Users,
   Video,
@@ -43,7 +41,9 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-const DEFAULT_ROOM_ID = new URLSearchParams(window.location.search).get('room') || 'jump-house';
+const INITIAL_QUERY = new URLSearchParams(window.location.search);
+const DEFAULT_ROOM_ID = INITIAL_QUERY.get('room') || 'jump-house';
+const SIGNAL_ORIGIN = INITIAL_QUERY.get('signal') || '';
 const TONES = ['yellow', 'mint', 'violet', 'coral', 'blue'];
 const MAX_ROOM_MESSAGES = 500;
 const MESSAGE_DB_NAME = 'jump-p2p-local';
@@ -489,6 +489,15 @@ function App() {
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    let signalUrl = `${protocol}://${window.location.host}/signal`;
+    if (SIGNAL_ORIGIN) {
+      try {
+        const signalOrigin = new URL(SIGNAL_ORIGIN);
+        signalUrl = `${signalOrigin.protocol === 'https:' ? 'wss' : 'ws'}://${signalOrigin.host}/signal`;
+      } catch {
+        setSignalStatus('offline');
+      }
+    }
     let disposed = false;
     let retryTimer = 0;
     let socket;
@@ -502,7 +511,7 @@ function App() {
     const connect = () => {
       if (disposed) return;
       try {
-        socket = new WebSocket(`${protocol}://${window.location.host}/signal`);
+        socket = new WebSocket(signalUrl);
         wsRef.current = socket;
         socket.onopen = () => {
           setSignalStatus('connected');
@@ -938,11 +947,6 @@ function App() {
               </section>
             </div>
 
-            <aside className="right-column">
-              <section className="side-card connection-card"><div className="side-card-heading"><span className="card-kicker">transporte</span><span className={`live-label ${signalStatus === 'connected' ? 'is-green' : ''}`}><span /> {signalStatus === 'connected' ? 'online' : 'offline'}</span></div><h3>mídia e histórico sem servidor central.</h3><p>Áudio, câmera, tela e mensagens seguem entre os peers. Cada navegador guarda uma cópia local do histórico.</p><div className="transport-grid"><div><small>sinalização</small><strong>{signalStatus === 'connected' ? 'WebSocket ativa' : 'aguardando servidor'}</strong></div><div><small>dados</small><strong>DataChannel + IndexedDB</strong></div></div></section>
-              <section className="side-card members-card"><div className="side-card-heading"><span className="card-kicker">nesta sala · {peerCount}</span><button type="button" className="tiny-link" onClick={copyInvite}>{copied ? 'copiado' : 'convidar'} <Share2 size={12} /></button></div><div className="member-list">{participants.map((person) => <div className="member-line" key={person.peerId}><Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="sm" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} /><div><strong>{person.self ? `${person.name} (você)` : person.name}</strong><small>{person.self ? (inCall ? 'no palco' : 'online') : remoteStreams[person.peerId] ? 'em chamada' : 'online'}</small></div>{remoteStreams[person.peerId] && <AudioLines size={14} className="person-wave" />}</div>)}</div><button type="button" className="invite-row" onClick={copyInvite}><Link2 size={15} /> copiar convite desta sala <ArrowUpRight size={13} /></button></section>
-              <section className="side-card room-details-card"><div className="side-card-heading"><span className="card-kicker">identidade da sala</span><Command size={15} /></div><div className="room-detail-line"><span>nome</span><strong>{roomName}</strong></div><div className="room-detail-line"><span>id</span><strong className="mono-value">{roomId}</strong></div><div className="room-detail-line"><span>atualização</span><strong><span className="online-status" /> em tempo real</strong></div></section>
-            </aside>
           </div>
         </div>
       </main>

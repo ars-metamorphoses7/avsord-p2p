@@ -7,6 +7,8 @@ const { autoUpdater } = require('electron-updater');
 let mainWindow;
 let signalingServer;
 let signalingPort = Number(process.env.PORT || 8787);
+let pendingDeepLink = process.argv.find((argument) => argument.startsWith('jump://')) || '';
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 function publishUpdateState(state) {
   mainWindow?.webContents.send('update:state', state);
@@ -20,8 +22,32 @@ function preferredNetworkAddress() {
   return addresses[0]?.address || '127.0.0.1';
 }
 
+function parseDeepLink(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'jump:') return null;
+    return {
+      room: parsed.searchParams.get('room') || 'jump-house',
+      signal: parsed.searchParams.get('signal') || '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function openDeepLink(value) {
+  const invite = parseDeepLink(value);
+  if (!invite || !mainWindow) return;
+  const query = new URLSearchParams({ room: invite.room });
+  if (invite.signal) query.set('signal', invite.signal);
+  await mainWindow.loadURL(`http://127.0.0.1:${signalingPort}/?${query.toString()}`);
+}
+
 function setupUpdater() {
-  ipcMain.handle('invite:url', (_event, roomId) => `http://${preferredNetworkAddress()}:${signalingPort}/?room=${encodeURIComponent(String(roomId || 'jump-house'))}`);
+  ipcMain.handle('invite:url', (_event, roomId) => {
+    const signal = `http://${preferredNetworkAddress()}:${signalingPort}`;
+    return `jump://join?signal=${encodeURIComponent(signal)}&room=${encodeURIComponent(String(roomId || 'jump-house'))}`;
+  });
 
   ipcMain.handle('update:check', async () => {
     if (!app.isPackaged) {
@@ -94,25 +120,56 @@ async function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
-  await mainWindow.loadURL(`http://127.0.0.1:${signalingPort}/?room=jump-house`);
+  const invite = parseDeepLink(pendingDeepLink);
+  const query = new URLSearchParams({ room: invite?.room || 'jump-house' });
+  if (invite?.signal) query.set('signal', invite.signal);
+  await mainWindow.loadURL(`http://127.0.0.1:${signalingPort}/?${query.toString()}`);
+  pendingDeepLink = '';
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-app.whenReady().then(async () => {
-  setupUpdater();
-  await createWindow();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-}).catch((error) => {
-  console.error('JUMP desktop failed to start:', error);
+if (!hasSingleInstanceLock) {
   app.quit();
-});
+} else {
+  if (process.platform === 'win32') {
+    if (app.isPackaged) app.setAsDefaultProtocolClient('jump');
+    else app.setAsDefaultProtocolClient('jump', process.execPath, [path.resolve(__dirname, '..')]);
+  }
 
-app.on('before-quit', () => {
-  signalingServer?.close();
-});
+  app.on('second-instance', (_event, commandLine) => {
+    const deepLink = commandLine.find((argument) => argument.startsWith('jump://'));
+    if (deepLink) {
+      pendingDeepLink = deepLink;
+      void openDeepLink(deepLink);
+    }
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    pendingDeepLink = url;
+    void openDeepLink(url);
+  });
+
+  app.whenReady().then(async () => {
+    setupUpdater();
+    await createWindow();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  }).catch((error) => {
+    console.error('JUMP desktop failed to start:', error);
+    app.quit();
+  });
+
+  app.on('before-quit', () => {
+    signalingServer?.close();
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+}

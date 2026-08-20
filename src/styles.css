@@ -330,11 +330,21 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--yellow); ou
 @media (min-width: 1121px) {
   .hero-intro, .content-grid { max-width: 1450px; }
   .content-grid { grid-template-columns: minmax(0, 1fr); }
-  .content-column { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+  .main-content { height: 100vh; overflow: hidden; }
+  .dashboard-scroll { display: flex; flex-direction: column; height: calc(100vh - 80px); overflow: hidden; padding: 28px 30px 22px; }
+  .hero-intro { flex: 0 0 auto; margin-bottom: 18px; }
+  .content-grid { display: grid; flex: 1 1 auto; width: 100%; min-height: 0; }
+  .content-column { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; align-items: stretch; height: 100%; min-height: 0; }
   .stage-card { grid-column: 1; grid-row: 1; }
   .notice-bar { grid-column: 1 / -1; grid-row: 2; }
-  .chat-card { grid-column: 2; grid-row: 1 / span 2; min-height: 620px; }
-  .message-list { min-height: 470px; }
+  .stage-card, .chat-card { height: 100%; min-height: 0; }
+  .stage-card { display: flex; flex-direction: column; }
+  .stage-body { flex: 1 1 auto; min-height: 0; }
+  .spotlight-tile { min-height: 0; }
+  .stage-side-tiles { min-height: 0; grid-template-rows: repeat(3, minmax(0, 1fr)); }
+  .small-stage-tile { min-height: 0; }
+  .chat-card { grid-column: 2; grid-row: 1; }
+  .message-list { min-height: 0; }
   .right-column { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
   .right-column .side-card { padding: 13px; }
   .right-column .connection-card h3 { margin: 10px 0 6px; font-size: 16px; }
