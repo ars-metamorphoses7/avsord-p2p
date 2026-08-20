@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, desktopCapturer, ipcMain, session } = require('electron');
 const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -12,6 +12,26 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 function publishUpdateState(state) {
   mainWindow?.webContents.send('update:state', state);
+}
+
+function setupMediaCapture() {
+  const allowedPermissions = new Set(['media', 'display-capture']);
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => allowedPermissions.has(permission));
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => callback(allowedPermissions.has(permission)));
+  session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 0, height: 0 },
+        fetchWindowIcons: false,
+      });
+      const source = sources.find((candidate) => candidate.id.startsWith('screen:')) || sources[0];
+      callback(source ? { video: source } : {});
+    } catch (error) {
+      console.error('JUMP screen capture failed:', error);
+      callback({});
+    }
+  }, { useSystemPicker: true });
 }
 
 function preferredNetworkAddress() {
@@ -156,6 +176,7 @@ if (!hasSingleInstanceLock) {
 
   app.whenReady().then(async () => {
     setupUpdater();
+    setupMediaCapture();
     await createWindow();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

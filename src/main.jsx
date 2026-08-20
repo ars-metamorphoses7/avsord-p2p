@@ -25,6 +25,7 @@ import {
   PhoneCall,
   Plus,
   Radio,
+  RefreshCw,
   Search,
   Send,
   Settings2,
@@ -46,12 +47,34 @@ const DEFAULT_ROOM_ID = INITIAL_QUERY.get('room') || 'jump-house';
 const SIGNAL_ORIGIN = INITIAL_QUERY.get('signal') || '';
 const TONES = ['yellow', 'mint', 'violet', 'coral', 'blue'];
 const MAX_ROOM_MESSAGES = 500;
+const MAX_DATA_PACKET_SIZE = 120_000;
 const MESSAGE_DB_NAME = 'jump-p2p-local';
 const MESSAGE_STORE_NAME = 'room-messages';
 let messageDbPromise;
 
 function messageId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function sendDataChannelPacket(channel, payload) {
+  if (!channel || channel.readyState !== 'open') return;
+  const encoded = JSON.stringify(payload);
+  if (encoded.length <= MAX_DATA_PACKET_SIZE) {
+    channel.send(encoded);
+    return;
+  }
+  const transferId = messageId();
+  const total = Math.ceil(encoded.length / MAX_DATA_PACKET_SIZE);
+  for (let index = 0; index < total; index += 1) {
+    channel.send(JSON.stringify({
+      type: 'data-chunk',
+      roomId: payload.roomId,
+      transferId,
+      index,
+      total,
+      data: encoded.slice(index * MAX_DATA_PACKET_SIZE, (index + 1) * MAX_DATA_PACKET_SIZE),
+    }));
+  }
 }
 
 function openMessageDb() {
@@ -177,6 +200,63 @@ function resizeProfilePhoto(file) {
   });
 }
 
+function audioConstraints(deviceId = '') {
+  const audio = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  if (deviceId) audio.deviceId = { exact: deviceId };
+  return { audio, video: false };
+}
+
+function resizeChatImage(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      const render = (maxSize, quality) => {
+        const scale = Math.min(maxSize / image.width, maxSize / image.height, 1);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(image.width * scale));
+        canvas.height = Math.max(1, Math.round(image.height * scale));
+        const context = canvas.getContext('2d');
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL('image/jpeg', quality);
+      };
+
+      let dataUrl = render(1280, 0.8);
+      if (dataUrl.length > 1_200_000) dataUrl = render(960, 0.68);
+      if (dataUrl.length > 1_200_000) dataUrl = render(768, 0.56);
+      URL.revokeObjectURL(objectUrl);
+      if (dataUrl.length > 1_200_000) {
+        reject(new Error('image-too-large'));
+        return;
+      }
+      resolve(dataUrl);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('invalid-image'));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function mediaErrorMessage(error, fallback) {
+  if (error?.name === 'NotAllowedError' || error?.name === 'PermissionDeniedError') {
+    return 'A permissão foi bloqueada. Libere câmera, microfone ou captura de tela nas configurações do aplicativo e tente novamente.';
+  }
+  if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError') {
+    return 'Nenhum dispositivo compatível foi encontrado.';
+  }
+  if (error?.name === 'NotReadableError' || error?.name === 'TrackStartError') {
+    return 'O dispositivo está sendo usado por outro aplicativo.';
+  }
+  if (error?.name === 'AbortError') return 'A operação foi cancelada.';
+  return fallback;
+}
+
 function Avatar({ initials, tone = 'yellow', size = 'md', live = false, src = '', alt = '' }) {
   return (
     <span className={`avatar avatar-${size} avatar-${tone}`}>
@@ -201,15 +281,17 @@ function IconButton({ label, children, className = '', onClick, active = false, 
   );
 }
 
-function MediaElement({ stream, muted = false, className = '' }) {
+function MediaElement({ stream, muted = false, sinkId = '', className = '' }) {
   const mediaRef = useRef(null);
   const hasVideo = Boolean(stream?.getVideoTracks?.().length);
 
   useEffect(() => {
     if (!mediaRef.current || !stream) return;
-    mediaRef.current.srcObject = stream;
-    mediaRef.current.play?.().catch(() => {});
-  }, [stream, hasVideo]);
+    const media = mediaRef.current;
+    media.srcObject = stream;
+    if (sinkId && typeof media.setSinkId === 'function') media.setSinkId(sinkId).catch(() => {});
+    media.play?.().catch(() => {});
+  }, [stream, hasVideo, sinkId]);
 
   if (!stream) return null;
   return (
@@ -252,6 +334,11 @@ function App() {
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
   const [inCall, setInCall] = useState(false);
+  const [audioInputDevices, setAudioInputDevices] = useState([]);
+  const [audioOutputDevices, setAudioOutputDevices] = useState([]);
+  const [selectedAudioInputId, setSelectedAudioInputId] = useState(() => localStorage.getItem('jump-audio-input') || '');
+  const [selectedAudioOutputId, setSelectedAudioOutputId] = useState(() => localStorage.getItem('jump-audio-output') || '');
+  const [showDeviceSettings, setShowDeviceSettings] = useState(false);
   const [signalStatus, setSignalStatus] = useState('connecting');
   const [remoteStreams, setRemoteStreams] = useState({});
   const [permissionError, setPermissionError] = useState('');
@@ -261,6 +348,7 @@ function App() {
 
   const wsRef = useRef(null);
   const profilePhotoInputRef = useRef(null);
+  const imageInputRef = useRef(null);
   const messagesRef = useRef(messages);
   const peerIdRef = useRef('');
   const roomIdRef = useRef(DEFAULT_ROOM_ID);
@@ -270,16 +358,19 @@ function App() {
   const peerConnectionsRef = useRef(new Map());
   const remoteStreamsRef = useRef(new Map());
   const pendingCandidatesRef = useRef(new Map());
+  const dataChunksRef = useRef(new Map());
   const audioStreamRef = useRef(null);
   const cameraStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const inCallRef = useRef(false);
   const isMutedRef = useRef(isMuted);
+  const audioInputIdRef = useRef(selectedAudioInputId);
   const makeOfferRef = useRef(null);
 
   useEffect(() => { displayNameRef.current = displayName; }, [displayName]);
   useEffect(() => { profileAvatarRef.current = profileAvatar; }, [profileAvatar]);
   useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
+  useEffect(() => { audioInputIdRef.current = selectedAudioInputId; }, [selectedAudioInputId]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => {
     const unsubscribe = globalThis.jumpDesktop?.onUpdateState((state) => setUpdateState(state));
@@ -296,6 +387,7 @@ function App() {
     slot?.pc.close();
     peerConnectionsRef.current.delete(peerId);
     pendingCandidatesRef.current.delete(peerId);
+    [...dataChunksRef.current.keys()].filter((key) => key.startsWith(`${peerId}:`)).forEach((key) => dataChunksRef.current.delete(key));
     remoteStreamsRef.current.delete(peerId);
     setRemoteStreams((current) => {
       const next = { ...current };
@@ -305,10 +397,9 @@ function App() {
   }, []);
 
   const broadcastRoomData = useCallback((payload, exceptPeerId = '') => {
-    const packet = JSON.stringify(payload);
     peerConnectionsRef.current.forEach((slot, peerId) => {
       if (peerId === exceptPeerId || slot.dataChannel?.readyState !== 'open') return;
-      try { slot.dataChannel.send(packet); } catch { /* The peer may be closing. */ }
+      try { sendDataChannelPacket(slot.dataChannel, payload); } catch { /* The peer may be closing. */ }
     });
   }, []);
 
@@ -350,27 +441,44 @@ function App() {
 
     const requestSync = () => {
       if (channel.readyState !== 'open') return;
-      channel.send(JSON.stringify({
+      sendDataChannelPacket(channel, {
         type: 'sync-request',
         roomId: roomIdRef.current,
         knownIds: messagesRef.current.map((message) => message.id),
-      }));
+      });
+    };
+
+    const handlePayload = (payload) => {
+      if (payload.roomId !== roomIdRef.current) return;
+      if (payload.type === 'sync-request') {
+        const knownIds = new Set(payload.knownIds || []);
+        const missing = messagesRef.current.filter((message) => !knownIds.has(message.id));
+        for (let index = 0; index < missing.length; index += 40) {
+          sendDataChannelPacket(channel, { type: 'messages', roomId: roomIdRef.current, messages: missing.slice(index, index + 40) });
+        }
+        return;
+      }
+      if (payload.type === 'messages') mergeMessages(payload.messages, peerId);
     };
 
     channel.onopen = requestSync;
     channel.onmessage = (event) => {
       try {
         const payload = JSON.parse(typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data));
-        if (payload.roomId !== roomIdRef.current) return;
-        if (payload.type === 'sync-request') {
-          const knownIds = new Set(payload.knownIds || []);
-          const missing = messagesRef.current.filter((message) => !knownIds.has(message.id));
-          for (let index = 0; index < missing.length; index += 40) {
-            channel.send(JSON.stringify({ type: 'messages', roomId: roomIdRef.current, messages: missing.slice(index, index + 40) }));
+        if (payload.type === 'data-chunk') {
+          if (payload.roomId !== roomIdRef.current || !Number.isInteger(payload.index) || !Number.isInteger(payload.total) || payload.index < 0 || payload.index >= payload.total) return;
+          const chunkKey = `${peerId}:${payload.transferId}`;
+          const current = dataChunksRef.current.get(chunkKey) || { total: payload.total, parts: [] };
+          if (current.total !== payload.total) return;
+          current.parts[payload.index] = payload.data;
+          dataChunksRef.current.set(chunkKey, current);
+          if (current.parts.length === current.total && current.parts.every((part) => typeof part === 'string')) {
+            dataChunksRef.current.delete(chunkKey);
+            handlePayload(JSON.parse(current.parts.join('')));
           }
           return;
         }
-        if (payload.type === 'messages') mergeMessages(payload.messages, peerId);
+        handlePayload(payload);
       } catch {
         setPermissionError('Não foi possível sincronizar o histórico desta sala.');
       }
@@ -547,6 +655,37 @@ function App() {
     void loadRoomMessages(roomIdRef.current);
   }, [loadRoomMessages]);
 
+  const refreshAudioDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const inputs = devices.filter((device) => device.kind === 'audioinput');
+      const outputs = devices.filter((device) => device.kind === 'audiooutput');
+      setAudioInputDevices(inputs);
+      setAudioOutputDevices(outputs);
+      setSelectedAudioInputId((current) => {
+        if (!current || inputs.some((device) => device.deviceId === current)) return current;
+        audioInputIdRef.current = '';
+        localStorage.removeItem('jump-audio-input');
+        return '';
+      });
+      setSelectedAudioOutputId((current) => {
+        if (!current || outputs.some((device) => device.deviceId === current)) return current;
+        localStorage.removeItem('jump-audio-output');
+        return '';
+      });
+    } catch {
+      setPermissionError('Não foi possível listar os dispositivos de áudio.');
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAudioDevices();
+    const mediaDevices = navigator.mediaDevices;
+    mediaDevices?.addEventListener?.('devicechange', refreshAudioDevices);
+    return () => mediaDevices?.removeEventListener?.('devicechange', refreshAudioDevices);
+  }, [refreshAudioDevices]);
+
   const startCall = useCallback(async () => {
     if (inCallRef.current) return true;
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -555,19 +694,41 @@ function App() {
     }
     try {
       setPermissionError('');
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioStreamRef.current = stream;
+      const stream = await navigator.mediaDevices.getUserMedia(audioConstraints(audioInputIdRef.current));
       const track = stream.getAudioTracks()[0];
+      if (!track) throw new Error('no-audio-track');
+      audioStreamRef.current = stream;
       track.enabled = !isMutedRef.current;
       peerConnectionsRef.current.forEach(({ audioSender }) => audioSender.replaceTrack(track));
       inCallRef.current = true;
       setInCall(true);
+      void refreshAudioDevices();
       return true;
-    } catch {
-      setPermissionError('Permita o microfone para entrar na chamada.');
+    } catch (error) {
+      setPermissionError(mediaErrorMessage(error, 'Permita o microfone para entrar na chamada.'));
       return false;
     }
-  }, []);
+  }, [refreshAudioDevices]);
+
+  const switchAudioInput = useCallback(async (deviceId) => {
+    if (!inCallRef.current) return true;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(audioConstraints(deviceId));
+      const track = stream.getAudioTracks()[0];
+      if (!track) throw new Error('no-audio-track');
+      track.enabled = !isMutedRef.current;
+      const previousStream = audioStreamRef.current;
+      audioStreamRef.current = stream;
+      await Promise.allSettled([...peerConnectionsRef.current.values()].map(({ audioSender }) => audioSender.replaceTrack(track)));
+      previousStream?.getTracks().forEach((oldTrack) => oldTrack.stop());
+      void refreshAudioDevices();
+      setPermissionError('');
+      return true;
+    } catch (error) {
+      setPermissionError(mediaErrorMessage(error, 'Não foi possível trocar o microfone.'));
+      return false;
+    }
+  }, [refreshAudioDevices]);
 
   const leaveCall = useCallback(() => {
     audioStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -596,6 +757,7 @@ function App() {
     peerConnectionsRef.current.clear();
     remoteStreamsRef.current.clear();
     pendingCandidatesRef.current.clear();
+    dataChunksRef.current.clear();
     setRemoteStreams({});
     setPeers([]);
     messagesRef.current = [];
@@ -621,6 +783,28 @@ function App() {
 
   const toggleDeafen = useCallback(() => setIsDeafened((value) => !value), []);
 
+  const handleAudioInputChange = useCallback(async (event) => {
+    const nextId = event.target.value;
+    const previousId = audioInputIdRef.current;
+    audioInputIdRef.current = nextId;
+    setSelectedAudioInputId(nextId);
+    if (nextId) localStorage.setItem('jump-audio-input', nextId);
+    else localStorage.removeItem('jump-audio-input');
+    if (inCallRef.current && !(await switchAudioInput(nextId))) {
+      audioInputIdRef.current = previousId;
+      setSelectedAudioInputId(previousId);
+      if (previousId) localStorage.setItem('jump-audio-input', previousId);
+      else localStorage.removeItem('jump-audio-input');
+    }
+  }, [switchAudioInput]);
+
+  const handleAudioOutputChange = useCallback((event) => {
+    const nextId = event.target.value;
+    setSelectedAudioOutputId(nextId);
+    if (nextId) localStorage.setItem('jump-audio-output', nextId);
+    else localStorage.removeItem('jump-audio-output');
+  }, []);
+
   const toggleCamera = useCallback(async () => {
     if (!inCallRef.current && !(await startCall())) return;
     if (cameraStreamRef.current) {
@@ -636,8 +820,8 @@ function App() {
       const track = stream.getVideoTracks()[0];
       peerConnectionsRef.current.forEach(({ videoSender }) => videoSender.replaceTrack(track));
       setIsCameraOn(true);
-    } catch {
-      setPermissionError('Permita a câmera para ligar seu vídeo.');
+    } catch (error) {
+      setPermissionError(mediaErrorMessage(error, 'Permita a câmera para ligar seu vídeo.'));
     }
   }, [startCall]);
 
@@ -660,32 +844,63 @@ function App() {
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-      screenStreamRef.current = stream;
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 30, max: 60 } },
+        audio: false,
+      });
       const track = stream.getVideoTracks()[0];
+      if (!track) throw new Error('no-screen-track');
+      screenStreamRef.current = stream;
       peerConnectionsRef.current.forEach(({ videoSender }) => videoSender.replaceTrack(track));
       track.onended = stopScreenShare;
       setIsSharing(true);
-    } catch {
-      setPermissionError('Compartilhamento cancelado.');
+    } catch (error) {
+      setPermissionError(mediaErrorMessage(error, 'Não foi possível iniciar o compartilhamento de tela.'));
     }
   }, [startCall, stopScreenShare]);
 
-  const sendMessage = useCallback((event) => {
-    event.preventDefault();
-    const cleanDraft = draft.trim();
-    if (!cleanDraft) return;
+  const publishMessage = useCallback((payload) => {
+    const text = String(payload?.text || '').trim();
+    if (!text && !payload?.image) return;
     mergeMessages([{
       id: messageId(),
       roomId: roomIdRef.current,
       senderId: peerIdRef.current || 'local',
       senderName: displayNameRef.current,
       senderAvatar: profileAvatarRef.current,
-      text: cleanDraft,
+      text,
+      image: payload?.image || '',
+      imageName: String(payload?.imageName || '').slice(0, 120),
       timestamp: Date.now(),
     }]);
+  }, [mergeMessages]);
+
+  const sendMessage = useCallback((event) => {
+    event.preventDefault();
+    const cleanDraft = draft.trim();
+    if (!cleanDraft) return;
+    publishMessage({ text: cleanDraft });
     setDraft('');
-  }, [draft, mergeMessages]);
+  }, [draft, publishMessage]);
+
+  const handleImageFile = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/') || file.size > 12 * 1024 * 1024) {
+      setPermissionError('Escolha uma imagem de até 12 MB.');
+      return;
+    }
+    try {
+      setPermissionError('');
+      const image = await resizeChatImage(file);
+      publishMessage({ image, imageName: file.name });
+    } catch (error) {
+      setPermissionError(error?.message === 'image-too-large'
+        ? 'Essa imagem ficou grande demais para enviar pela conexão P2P.'
+        : 'Não foi possível preparar essa imagem.');
+    }
+  }, [publishMessage]);
 
   const saveName = useCallback((event) => {
     event?.preventDefault();
@@ -895,7 +1110,7 @@ function App() {
                 <div className="stage-body">
                   <div className={`spotlight-tile ${firstRemoteVideo || isSharing || isCameraOn ? 'has-remote' : ''} ${isSharing ? 'is-sharing' : ''} ${hasActiveCall ? '' : 'is-idle'}`}>
                     {firstRemoteVideo ? (
-                      <MediaElement stream={firstRemoteVideo.stream} muted={isDeafened} className="stage-media" />
+                      <MediaElement stream={firstRemoteVideo.stream} muted={isDeafened} sinkId={selectedAudioOutputId} className="stage-media" />
                     ) : isSharing ? (
                       <MediaElement stream={screenStreamRef.current} muted className="stage-media" />
                     ) : isCameraOn ? (
@@ -911,12 +1126,15 @@ function App() {
                   <div className="stage-side-tiles">
                     {activeCallParticipants.length ? activeCallParticipants.slice(0, 4).map((person) => (
                       <div className={`small-stage-tile participant-tile ${person.self ? 'is-self' : ''}`} key={person.peerId}>
-                        {remoteStreams[person.peerId]?.stream?.getVideoTracks?.().length ? <MediaElement stream={remoteStreams[person.peerId].stream} muted={isDeafened} className="participant-media" /> : <Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="lg" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} />}
+                        {remoteStreams[person.peerId]?.stream?.getVideoTracks?.().length ? <MediaElement stream={remoteStreams[person.peerId].stream} muted={isDeafened} sinkId={selectedAudioOutputId} className="participant-media" /> : <Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="lg" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} />}
                         <div><strong>{person.self ? `${person.name} (você)` : person.name}</strong><small>{person.self ? (inCall ? 'no palco' : 'online') : remoteStreams[person.peerId] ? 'em chamada' : 'online'}</small></div>
                         {person.self && <span className="participant-tag">você</span>}
                       </div>
                     )) : <div className="small-stage-tile tile-join call-empty-tile"><div className="plus-orb"><PhoneCall size={17} /></div><div><strong>chamada aberta</strong><small>ninguém está ao vivo</small></div></div>}
                   </div>
+                </div>
+                <div className="remote-audio-streams" aria-hidden="true">
+                  {remoteEntries.filter(([, value]) => !value.stream?.getVideoTracks?.().length).map(([peerId, value]) => <MediaElement key={peerId} stream={value.stream} muted={isDeafened} sinkId={selectedAudioOutputId} className="remote-audio-element" />)}
                 </div>
                 <div className="stage-controls">
                   <div className="stage-control-hint">{inCall ? <><span className="control-live" /> mídia P2P ativa</> : 'entre na sala para habilitar áudio e tela'}</div>
@@ -925,10 +1143,19 @@ function App() {
                     <IconButton label={isDeafened ? 'Ativar áudio' : 'Desativar áudio'} className={isDeafened ? 'control-off' : ''} active={inCall && !isDeafened} onClick={toggleDeafen}>{isDeafened ? <VolumeX size={18} /> : <Headphones size={18} />}</IconButton>
                     <IconButton label={isCameraOn ? 'Desligar câmera' : 'Ligar câmera'} className={isCameraOn ? 'control-on' : ''} active={isCameraOn} onClick={toggleCamera}>{isCameraOn ? <Video size={18} /> : <VideoOff size={18} />}</IconButton>
                     <IconButton label={isSharing ? 'Parar compartilhamento' : 'Compartilhar tela'} className={isSharing ? 'control-on' : ''} active={isSharing} onClick={toggleScreenShare}><MonitorUp size={18} /></IconButton>
+                    <IconButton label="Configurar dispositivos de áudio" className={showDeviceSettings ? 'control-on' : ''} active={showDeviceSettings} onClick={() => setShowDeviceSettings((value) => !value)}><Settings2 size={17} /></IconButton>
                     <span className="controls-divider" />
                     {inCall ? <button type="button" className="leave-button" onClick={leaveCall}><PhoneCall size={17} /> sair</button> : <button type="button" className="join-call-button" onClick={startCall}><PhoneCall size={17} /> entrar na chamada</button>}
                   </div>
                 </div>
+                {showDeviceSettings && (
+                  <div className="device-settings-popover" role="dialog" aria-label="Configurações de áudio">
+                    <div className="device-settings-heading"><div><span className="card-kicker">dispositivos</span><strong>áudio da chamada</strong></div><button type="button" onClick={refreshAudioDevices} aria-label="Atualizar dispositivos" title="Atualizar dispositivos"><RefreshCw size={14} /></button></div>
+                    <label className="device-field"><span><Mic size={14} /> microfone</span><select value={selectedAudioInputId} onChange={handleAudioInputChange}><option value="">microfone padrão</option>{audioInputDevices.map((device, index) => <option key={device.deviceId || `input-${index}`} value={device.deviceId}>{device.label || `microfone ${index + 1}`}</option>)}</select></label>
+                    <label className="device-field"><span><Volume2 size={14} /> saída</span><select value={selectedAudioOutputId} onChange={handleAudioOutputChange}><option value="">saída padrão do sistema</option>{audioOutputDevices.map((device, index) => <option key={device.deviceId || `output-${index}`} value={device.deviceId}>{device.label || `saída ${index + 1}`}</option>)}</select></label>
+                    <small className="device-settings-hint">A troca do microfone vale imediatamente. A saída usa o seletor do sistema quando o navegador oferece suporte.</small>
+                  </div>
+                )}
               </section>
 
               {(permissionError || signalStatus !== 'connected') && <div className={`notice-bar ${permissionError ? 'is-warning' : ''}`}><span>{permissionError || 'Sinalização offline: peers conectados continuam conversando; novas entradas precisam do servidor.'}</span><IconButton label="Fechar aviso" onClick={() => setPermissionError('')}><X size={15} /></IconButton></div>}
@@ -939,11 +1166,12 @@ function App() {
                   {messages.length === 0 ? <div className="empty-chat"><MessageCircle size={18} /><strong>Nenhuma mensagem ainda.</strong><span>Seja a primeira pessoa a escrever nesta sala.</span></div> : messages.map((message) => (
                     <article className="message" key={message.id}>
                       <Avatar initials={message.initials} tone={message.tone} size="md" src={message.avatar} alt={message.senderName} />
-                      <div className="message-content"><div className="message-meta"><strong>{message.senderName}</strong><time>{message.time}</time></div><p>{message.text}</p></div>
+                      <div className="message-content"><div className="message-meta"><strong>{message.senderName}</strong><time>{message.time}</time></div>{message.text && <p>{message.text}</p>}{message.image && <div className="message-attachment"><img src={message.image} alt={message.imageName ? `Imagem enviada: ${message.imageName}` : 'Imagem enviada'} loading="lazy" />{message.imageName && <small>{message.imageName}</small>}</div>}</div>
                     </article>
                   ))}
                 </div>
-                <form className="message-composer" onSubmit={sendMessage}><button type="button" className="composer-add" aria-label="Adicionar anexo"><Plus size={18} /></button><input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="escreva para esta sala" /><button type="button" className="composer-emoji" aria-label="Adicionar emoji">☺</button><button type="submit" className="composer-send" aria-label="Enviar mensagem"><Send size={16} /></button></form>
+                <input ref={imageInputRef} className="hidden-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={handleImageFile} />
+                <form className="message-composer" onSubmit={sendMessage}><button type="button" className="composer-add" aria-label="Enviar imagem" title="Enviar imagem" onClick={() => imageInputRef.current?.click()}><Plus size={18} /></button><input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="escreva para esta sala" /><button type="button" className="composer-emoji" aria-label="Adicionar emoji">☺</button><button type="submit" className="composer-send" aria-label="Enviar mensagem"><Send size={16} /></button></form>
               </section>
             </div>
 

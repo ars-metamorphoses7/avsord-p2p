@@ -149,7 +149,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--yellow); ou
 .content-column, .right-column { min-width: 0; }
 .content-column { display: flex; flex-direction: column; gap: 18px; }
 .stage-card, .chat-card, .side-card { border: 1px solid var(--line); border-radius: 13px; background: rgba(28, 27, 33, .82); box-shadow: 0 18px 45px rgba(0,0,0,.09); }
-.stage-card { overflow: hidden; }
+.stage-card { position: relative; overflow: hidden; }
 .stage-header, .stage-controls { display: flex; align-items: center; justify-content: space-between; }
 .stage-header { height: 47px; padding: 0 16px 0 18px; border-bottom: 1px solid var(--line); }
 .stage-title, .stage-meta { display: flex; align-items: center; gap: 9px; }
@@ -209,6 +209,19 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--yellow); ou
 .join-call-button:hover { background: var(--yellow-bright); }
 .leave-button { color: #ffb1a9; background: rgba(255,118,106,.13); }
 .leave-button:hover { background: rgba(255,118,106,.22); }
+.remote-audio-streams { position: absolute; z-index: -1; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.remote-audio-element { width: 1px; height: 1px; }
+.device-settings-popover { position: absolute; z-index: 8; right: 16px; bottom: 57px; width: min(330px, calc(100% - 32px)); padding: 14px; border: 1px solid rgba(245,202,98,.22); border-radius: 10px; background: #242229; box-shadow: 0 18px 40px rgba(0,0,0,.42); }
+.device-settings-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.device-settings-heading strong { display: block; margin-top: 5px; color: var(--ink); font: 600 13px var(--display); }
+.device-settings-heading button { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid var(--line); border-radius: 7px; color: var(--yellow); background: rgba(245,202,98,.08); cursor: pointer; }
+.device-settings-heading button:hover { background: rgba(245,202,98,.15); }
+.device-field { display: grid; gap: 6px; margin-top: 10px; }
+.device-field > span { display: flex; align-items: center; gap: 6px; color: #aba5ad; font: 9px var(--mono); text-transform: uppercase; }
+.device-field > span svg { color: var(--yellow); }
+.device-field select { width: 100%; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid rgba(255,255,255,.1); border-radius: 7px; outline: 0; color: var(--ink); background: #1c1b21; font-size: 10px; }
+.device-field select:focus { border-color: rgba(245,202,98,.45); }
+.device-settings-hint { display: block; margin-top: 12px; color: #77727c; font-size: 9px; line-height: 1.4; }
 .notice-bar { display: flex; align-items: center; justify-content: space-between; gap: 15px; min-height: 35px; padding: 0 10px 0 14px; border: 1px solid rgba(158,231,196,.15); border-radius: 8px; color: #92c9af; background: rgba(158,231,196,.05); font-size: 10px; }
 .notice-bar.is-warning { border-color: rgba(245,202,98,.19); color: #d7b46a; background: rgba(245,202,98,.06); }
 .notice-bar .icon-button { width: 24px; height: 24px; }
@@ -227,6 +240,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--yellow); ou
 .message-meta strong { color: #e3dfe1; font: 600 12px var(--display); }
 .message-meta time { color: #6f6a73; font: 9px var(--mono); }
 .message p { margin: 5px 0 0; color: #a9a4ac; font-size: 12px; line-height: 1.45; }
+.message-attachment { display: inline-flex; flex-direction: column; gap: 6px; max-width: min(430px, 100%); margin-top: 8px; }
+.message-attachment img { display: block; max-width: 100%; max-height: 300px; border: 1px solid rgba(255,255,255,.1); border-radius: 9px; object-fit: contain; background: #141319; }
+.message-attachment small { overflow: hidden; color: #77727c; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .reactions { display: flex; gap: 5px; margin-top: 8px; }
 .reactions button { padding: 4px 7px; border: 1px solid rgba(255,255,255,.09); border-radius: 6px; color: #a7a1aa; background: rgba(255,255,255,.04); font-size: 10px; cursor: pointer; }
 .reactions button:hover { border-color: rgba(245,202,98,.28); color: var(--yellow); }
