@@ -1,0 +1,22 @@
+appId: com.jumpnetwork.app
+productName: JUMP
+asar: true
+directories:
+  output: release
+files:
+  - dist/**/*
+  - electron/**/*
+  - server.mjs
+  - package.json
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+publish:
+  provider: github
+  owner: ars-metamorphoses7
+  repo: avsord-p2p
+  releaseType: release
