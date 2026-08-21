@@ -38,7 +38,6 @@ import {
   Wifi,
   WifiOff,
   X,
-  Zap,
 } from 'lucide-react';
 import './styles.css';
 
@@ -1091,15 +1090,6 @@ function App() {
         </header>
 
         <div className="dashboard-scroll">
-          <section className="hero-intro">
-            <div>
-              <div className="hero-kicker"><span className="live-dot" /> sala em tempo real · {peerCount} conectado{peerCount === 1 ? '' : 's'}</div>
-              <h2>{roomName} <em>ao vivo.</em></h2>
-              <p>áudio, tela e histórico ponto a ponto. O servidor só ajuda a descobrir participantes; mídia e mensagens seguem direto entre os navegadores.</p>
-            </div>
-            <div className="hero-sticker"><Zap size={17} fill="currentColor" /><span>WebRTC<br />P2P media</span></div>
-          </section>
-
           <div className="content-grid">
             <div className="content-column">
               <section className="stage-card">
