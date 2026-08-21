@@ -8,6 +8,11 @@ files:
   - electron/**/*
   - server.mjs
   - package.json
+artifactName: JUMP-${version}-${os}-${arch}.${ext}
+protocols:
+  - name: JUMP invite
+    schemes:
+      - jump
 win:
   target:
     - nsis
@@ -15,6 +20,25 @@ nsis:
   oneClick: true
   perMachine: false
   allowToChangeInstallationDirectory: false
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Network
+  synopsis: Salas P2P com áudio, tela e chat
+  description: Salas ponto a ponto com áudio, compartilhamento de tela e mensagens sem servidor central.
+  maintainer: JUMP <jump@localhost>
+  protocols:
+    - name: JUMP invite
+      schemes:
+        - jump
+  desktop:
+    entry:
+      Name: JUMP
+      Comment: Salas P2P com áudio, tela e chat
+      Categories: Network;
+      MimeType: x-scheme-handler/jump;
+      Terminal: false
 publish:
   provider: github
   owner: ars-metamorphoses7

@@ -39,22 +39,30 @@ Para gerar o instalador Windows:
 npm run desktop:build
 ```
 
+Para gerar os pacotes Linux do Mint:
+
+```bash
+npm run desktop:build:linux
+```
+
+O Linux recebe um `AppImage` (recomendado para atualização automática e sem root) e um `.deb` (instalação integrada no Mint/Ubuntu/Debian). O `.deb` pode pedir autenticação do sistema ao instalar uma atualização; o botão `atualizar` dispara essa instalação explicitamente.
+
 Para um teste rápido sem gerar instalador, `npm run desktop:dir` cria o aplicativo em `release/win-unpacked/JUMP.exe`; a pasta pode ser compactada e enviada ao amigo.
 
-O botão `atualizar` aparece dentro do aplicativo desktop. Ele usa o `electron-updater` para consultar uma Release pública do GitHub, baixar a nova versão e reiniciar o aplicativo. Os usuários não precisam de conta no GitHub; somente quem publica as Releases precisa configurar o repositório.
+O botão `atualizar` aparece dentro do aplicativo desktop. Ele usa o `electron-updater` para consultar uma Release pública do GitHub, baixar o artefato correto para Windows ou Linux e reiniciar o aplicativo. Os usuários não precisam de conta no GitHub; somente quem publica as Releases precisa configurar o repositório.
 
-Antes de publicar, crie uma Release nesse repositório e incremente a versão no `package.json` a cada lançamento. O workflow de GitHub Actions pode gerar o instalador automaticamente quando uma tag `v*` for enviada.
+Antes de publicar, incremente a versão no `package.json` e no `package-lock.json`, crie uma tag `v*` e envie-a ao repositório. O workflow de GitHub Actions gera em paralelo o instalador Windows, o AppImage e o `.deb`, publicando também os metadados usados pelo updater.
 
 ## Primeiro teste com um amigo
 
 Para testar áudio, tela e chat pela Radmin:
 
 1. Conecte os dois computadores à mesma rede Radmin VPN.
-2. No computador de cada pessoa, abra o JUMP pelo instalador ou execute `npm run desktop`.
+2. No computador de cada pessoa, abra o JUMP pelo instalador Windows, pelo AppImage ou pelo `.deb`.
 3. No host, clique em `copiar convite` e envie o link `jump://` para o amigo.
 4. Com o JUMP instalado/aberto no computador do amigo, abra o convite. O app dele continuará usando `localhost` para liberar microfone/câmera e conectará a sinalização ao IP Radmin do host.
 5. Permita o JUMP no Windows Firewall quando solicitado, especialmente a porta TCP `8787` no host.
 
 Durante o teste, entre na chamada antes de conferir o microfone. Use o ícone de ajustes nos controles para trocar entrada/saída e o ícone de monitor para compartilhar a tela. O chat aceita PNG, JPG, WebP e GIF; imagens muito grandes são reduzidas para caber na conexão P2P.
 
-O convite `jump://` é feito para o aplicativo desktop. O link HTTP do modo web serve para testar o chat, mas o desktop é o caminho recomendado para testar chamadas e compartilhamento de tela pela Radmin.
+O convite `jump://` é registrado pelo instalador nos dois sistemas. O link HTTP do modo web serve para testar o chat, mas o desktop é o caminho recomendado para testar chamadas e compartilhamento de tela pela Radmin.

@@ -96,14 +96,16 @@ function setupUpdater() {
 
   ipcMain.handle('update:install', () => {
     if (!app.isPackaged) return { status: 'dev' };
-    autoUpdater.quitAndInstall();
+    autoUpdater.quitAndInstall(false, true);
     return { status: 'installing' };
   });
 
   if (!app.isPackaged) return;
 
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // A instalação é disparada pelo botão da interface. Isso evita que um
+  // pacote Linux peça autenticação inesperadamente ao fechar o aplicativo.
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.on('checking-for-update', () => publishUpdateState({ status: 'checking' }));
   autoUpdater.on('update-available', (_event, info) => publishUpdateState({ status: 'available', version: info.version }));
   autoUpdater.on('update-not-available', () => publishUpdateState({ status: 'not-available' }));
@@ -154,6 +156,8 @@ if (!hasSingleInstanceLock) {
   if (process.platform === 'win32') {
     if (app.isPackaged) app.setAsDefaultProtocolClient('jump');
     else app.setAsDefaultProtocolClient('jump', process.execPath, [path.resolve(__dirname, '..')]);
+  } else if (process.platform === 'linux' && app.isPackaged) {
+    app.setAsDefaultProtocolClient('jump');
   }
 
   app.on('second-instance', (_event, commandLine) => {
