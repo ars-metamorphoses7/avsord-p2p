@@ -1,6 +1,6 @@
 {
   "name": "jump-p2p",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "JUMP — salas P2P com chat, áudio e compartilhamento de tela",
@@ -10,12 +10,15 @@
     "url": "https://github.com/ars-metamorphoses7/avsord-p2p.git"
   },
   "main": "electron/main.cjs",
+  "desktopName": "com.jumpnetwork.app",
   "scripts": {
     "dev": "concurrently -k \"node server.mjs\" \"vite\"",
     "build": "vite build",
     "desktop": "electron .",
     "desktop:dir": "npm run build && electron-builder --dir",
-    "desktop:build": "npm run build && electron-builder --win nsis",
+    "desktop:build:win": "npm run build && electron-builder --win nsis",
+    "desktop:build:linux": "npm run build && electron-builder --linux AppImage deb",
+    "desktop:build": "npm run desktop:build:win",
     "start": "node server.mjs",
     "preview": "vite preview"
   },
