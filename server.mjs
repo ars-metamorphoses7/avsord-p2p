@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +29,21 @@ function cleanText(value, maxLength) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
 }
 
+function cleanPassword(value) {
+  return String(value || '').trim().slice(0, 128);
+}
+
+function passwordHash(value) {
+  return createHash('sha256').update(cleanPassword(value)).digest('hex');
+}
+
+function passwordMatches(expectedHash, value) {
+  if (!expectedHash) return true;
+  const candidate = Buffer.from(passwordHash(value), 'utf8');
+  const expected = Buffer.from(expectedHash, 'utf8');
+  return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+}
+
 function cleanAvatar(value) {
   const avatar = String(value || '');
   return avatar.startsWith('data:image/') ? avatar.slice(0, 180000) : '';
@@ -44,7 +59,7 @@ function roomLabel(roomId) {
 
 function roomList() {
   return [...rooms.values()]
-    .map((room) => ({ id: room.id, name: room.name, count: room.members.size }))
+    .map((room) => ({ id: room.id, name: room.name, count: room.members.size, protected: Boolean(room.passwordHash) }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
@@ -122,9 +137,22 @@ wss.on('connection', (socket) => {
       const name = cleanText(message.name, 32) || 'Você';
       const avatar = cleanAvatar(message.avatar);
       const requestedLabel = cleanText(message.roomName, 48);
+      const requestedPassword = cleanPassword(message.password);
+      const existingRoom = rooms.get(roomId);
 
-      if (socket.roomId === roomId) {
-        const room = rooms.get(roomId);
+      if (existingRoom?.passwordHash && !passwordMatches(existingRoom.passwordHash, requestedPassword)) {
+        send(socket, {
+          type: 'room-error',
+          roomId,
+          name: existingRoom.name,
+          code: 'invalid-password',
+          message: 'Essa sala exige uma senha válida.',
+        });
+        return;
+      }
+
+      if (socket.roomId === roomId && existingRoom) {
+        const room = existingRoom;
         socket.name = name;
         socket.avatar = avatar;
         if (requestedLabel) room.name = requestedLabel;
@@ -132,6 +160,7 @@ wss.on('connection', (socket) => {
           type: 'room-state',
           roomId,
           name: room.name,
+          protected: Boolean(room.passwordHash),
           peerId: socket.peerId,
           peers: [...room.members.values()]
             .filter((peer) => peer.peerId !== socket.peerId)
@@ -143,10 +172,11 @@ wss.on('connection', (socket) => {
       }
 
       leaveRoom(socket);
-      const room = rooms.get(roomId) || {
+      const room = existingRoom || {
         id: roomId,
         name: requestedLabel || roomLabel(roomId),
         members: new Map(),
+        passwordHash: requestedPassword ? passwordHash(requestedPassword) : '',
       };
       if (requestedLabel) room.name = requestedLabel;
       socket.roomId = roomId;
@@ -159,6 +189,7 @@ wss.on('connection', (socket) => {
         type: 'room-state',
         roomId,
         name: room.name,
+        protected: Boolean(room.passwordHash),
         peerId: socket.peerId,
         peers: [...room.members.values()]
           .filter((peer) => peer.peerId !== socket.peerId)

@@ -20,8 +20,12 @@ O Vite e o servidor de sinalização escutam nas interfaces de rede, então o li
 - O botão de tela abre a captura no Electron; no Windows ele compartilha o monitor principal e a captura é interrompida quando a fonte é encerrada.
 - O botão de configurações ao lado dos controles permite escolher microfone e saída de áudio. A troca do microfone durante a chamada é imediata.
 - O botão `+` do chat envia imagens comprimidas e fragmentadas pelo DataChannel, sem upload para o servidor.
+- A navegação lateral separa `salas` e `amigos`; o chat fica em tela cheia e a chamada aparece ao clicar no telefone do header.
+- Salas personalizadas podem ser criadas com nome e senha. A senha nunca é enviada na lista pública: o sinalizador guarda apenas um hash enquanto a sala está ativa, e o convite continua sendo compartilhado separadamente.
 
 O servidor não guarda o histórico. Ele mantém apenas presença, lista de salas e sinalização inicial para formar os canais WebRTC. Por isso, ele precisa estar acessível quando alguém novo entrar ou quando um participante voltar depois de ficar offline; peers que já estão conectados continuam trocando mensagens mesmo se a sinalização cair.
+
+As salas são instâncias independentes dentro do sinalizador em execução. A sala pública padrão pode ser usada sem senha; para criar uma sala privada, abra a aba `salas`, clique no `+`, informe nome e senha e envie o convite. Como a lista de salas fica em memória, uma sala desaparece quando todos saem ou quando o processo do sinalizador reinicia.
 
 ## Aplicativo desktop e atualizações
 

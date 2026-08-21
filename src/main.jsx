@@ -13,7 +13,6 @@ import {
   Download,
   Headphones,
   Home,
-  Inbox,
   Link2,
   LockKeyhole,
   MessageCircle,
@@ -29,7 +28,6 @@ import {
   Search,
   Send,
   Settings2,
-  Sparkles,
   Users,
   Video,
   VideoOff,
@@ -325,7 +323,9 @@ function App() {
   const [profileAvatar, setProfileAvatar] = useState(() => localStorage.getItem('jump-avatar') || '');
   const [editingName, setEditingName] = useState(false);
   const [roomDraft, setRoomDraft] = useState('');
+  const [roomPasswordDraft, setRoomPasswordDraft] = useState('');
   const [showRoomCreator, setShowRoomCreator] = useState(false);
+  const [roomAccess, setRoomAccess] = useState(null);
   const [roomSearch, setRoomSearch] = useState('');
   const [draft, setDraft] = useState('');
   const [isMuted, setIsMuted] = useState(false);
@@ -343,6 +343,9 @@ function App() {
   const [permissionError, setPermissionError] = useState('');
   const [copied, setCopied] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState('rooms');
+  const [callPanelOpen, setCallPanelOpen] = useState(false);
+  const [roomProtected, setRoomProtected] = useState(false);
   const [updateState, setUpdateState] = useState({ status: 'idle' });
 
   const wsRef = useRef(null);
@@ -352,6 +355,7 @@ function App() {
   const peerIdRef = useRef('');
   const roomIdRef = useRef(DEFAULT_ROOM_ID);
   const roomNameRef = useRef(prettyRoomName(DEFAULT_ROOM_ID));
+  const roomPasswordRef = useRef('');
   const displayNameRef = useRef(displayName);
   const profileAvatarRef = useRef(profileAvatar);
   const peerConnectionsRef = useRef(new Map());
@@ -543,12 +547,18 @@ function App() {
       setRooms(message.rooms || []);
       return;
     }
+    if (message.type === 'room-error') {
+      setPermissionError(message.message || 'Não foi possível entrar nesta sala.');
+      setRoomAccess({ roomId: message.roomId, name: message.name || prettyRoomName(message.roomId), password: '' });
+      return;
+    }
     if (message.type === 'room-state') {
       const nextPeers = Array.isArray(message.peers) ? message.peers : [];
       roomIdRef.current = message.roomId;
       roomNameRef.current = message.name || prettyRoomName(message.roomId);
       setRoomId(message.roomId);
       setRoomName(roomNameRef.current);
+      setRoomProtected(Boolean(message.protected));
       setPeers(nextPeers);
       void loadRoomMessages(message.roomId);
       nextPeers.forEach((peer) => createPeerConnection(peer.peerId, true));
@@ -622,7 +632,7 @@ function App() {
         wsRef.current = socket;
         socket.onopen = () => {
           setSignalStatus('connected');
-          sendSignal({ type: 'join', roomId: roomIdRef.current, roomName: roomNameRef.current, name: displayNameRef.current, avatar: profileAvatarRef.current });
+          sendSignal({ type: 'join', roomId: roomIdRef.current, roomName: roomNameRef.current, password: roomPasswordRef.current, name: displayNameRef.current, avatar: profileAvatarRef.current });
         };
         socket.onmessage = (event) => {
           try { handleSignalMessage(JSON.parse(event.data)); } catch { /* Ignore malformed packets. */ }
@@ -701,6 +711,7 @@ function App() {
       peerConnectionsRef.current.forEach(({ audioSender }) => audioSender.replaceTrack(track));
       inCallRef.current = true;
       setInCall(true);
+      setCallPanelOpen(true);
       void refreshAudioDevices();
       return true;
     } catch (error) {
@@ -746,11 +757,13 @@ function App() {
     setIsCameraOn(false);
     setIsSharing(false);
     setIsMuted(false);
+    setCallPanelOpen(false);
   }, []);
 
-  const joinRoom = useCallback((nextRoomId, nextRoomName = '') => {
+  const joinRoom = useCallback((nextRoomId, nextRoomName = '', nextRoomPassword = '') => {
     const normalizedId = slugify(nextRoomId);
     const normalizedName = String(nextRoomName || prettyRoomName(normalizedId)).trim().slice(0, 48);
+    const normalizedPassword = String(nextRoomPassword || '').trim().slice(0, 128);
     leaveCall();
     peerConnectionsRef.current.forEach(({ pc }) => pc.close());
     peerConnectionsRef.current.clear();
@@ -764,11 +777,13 @@ function App() {
     setPermissionError('');
     roomIdRef.current = normalizedId;
     roomNameRef.current = normalizedName;
+    roomPasswordRef.current = normalizedPassword;
     setRoomId(normalizedId);
     setRoomName(normalizedName);
+    setRoomProtected(Boolean(normalizedPassword));
     void loadRoomMessages(normalizedId);
     window.history.replaceState({}, '', `${window.location.pathname}?room=${encodeURIComponent(normalizedId)}`);
-    sendSignal({ type: 'join', roomId: normalizedId, roomName: normalizedName, name: displayNameRef.current, avatar: profileAvatarRef.current });
+    sendSignal({ type: 'join', roomId: normalizedId, roomName: normalizedName, password: normalizedPassword, name: displayNameRef.current, avatar: profileAvatarRef.current });
     setMobileSidebarOpen(false);
   }, [leaveCall, loadRoomMessages, sendSignal]);
 
@@ -933,11 +948,37 @@ function App() {
   const createRoom = useCallback((event) => {
     event.preventDefault();
     const label = roomDraft.trim();
-    if (!label) return;
-    joinRoom(slugify(label), label);
+    const password = roomPasswordDraft.trim();
+    if (!label || !password) {
+      setPermissionError('Defina um nome e uma senha para criar a sala.');
+      return;
+    }
+    joinRoom(slugify(label), label, password);
     setRoomDraft('');
+    setRoomPasswordDraft('');
     setShowRoomCreator(false);
-  }, [joinRoom, roomDraft]);
+  }, [joinRoom, roomDraft, roomPasswordDraft]);
+
+  const openRoom = useCallback((room) => {
+    if (room.protected) {
+      setPermissionError('Digite a senha para entrar nesta sala.');
+      setRoomAccess({ roomId: room.id, name: room.name, password: '' });
+      return;
+    }
+    joinRoom(room.id, room.name);
+  }, [joinRoom]);
+
+  const submitRoomAccess = useCallback((event) => {
+    event.preventDefault();
+    const password = roomAccess?.password?.trim() || '';
+    if (!roomAccess || !password) {
+      setPermissionError('Digite a senha desta sala.');
+      return;
+    }
+    joinRoom(roomAccess.roomId, roomAccess.name, password);
+    setRoomAccess(null);
+    setPermissionError('');
+  }, [joinRoom, roomAccess]);
 
   const copyInvite = useCallback(async () => {
     const invite = globalThis.jumpDesktop?.getInviteUrl
@@ -991,15 +1032,15 @@ function App() {
   const activeCallParticipants = useMemo(() => participants.filter((person) => person.self ? inCall : Boolean(remoteStreams[person.peerId])), [inCall, participants, remoteStreams]);
   const hasActiveCall = Boolean(inCall || remoteEntries.length);
   const filteredRooms = rooms.filter((room) => `${room.name} ${room.id}`.toLowerCase().includes(roomSearch.toLowerCase()));
+  const filteredFriends = peers.filter((person) => `${person.name} ${person.peerId}`.toLowerCase().includes(roomSearch.toLowerCase()));
 
   return (
     <div className="app-shell">
       <nav className="server-rail" aria-label="Navegação principal">
         <div className="rail-brand">J<span>.</span></div>
         <div className="rail-divider" />
-        <IconButton label="Início" className="rail-button is-selected"><Home size={19} /></IconButton>
-        <IconButton label="Salas públicas"><Sparkles size={19} /></IconButton>
-        <IconButton label="Mensagens"><Inbox size={19} /><span className="rail-dot" /></IconButton>
+        <IconButton label="Salas" className={`rail-button ${sidebarTab === 'rooms' ? 'is-selected' : ''}`} active={sidebarTab === 'rooms'} onClick={() => setSidebarTab('rooms')}><Home size={19} /></IconButton>
+        <IconButton label="Amigos" className={`rail-button ${sidebarTab === 'friends' ? 'is-selected' : ''}`} active={sidebarTab === 'friends'} onClick={() => setSidebarTab('friends')}><Users size={19} /></IconButton>
         <div className="rail-spacer" />
         <IconButton label="Ajuda"><CircleHelp size={18} /></IconButton>
         <IconButton label="Configurações"><Settings2 size={18} /></IconButton>
@@ -1016,49 +1057,53 @@ function App() {
         </div>
         <div className="search-box">
           <Search size={16} />
-          <input value={roomSearch} onChange={(event) => setRoomSearch(event.target.value)} placeholder="Buscar uma sala" aria-label="Buscar uma sala" />
+          <input value={roomSearch} onChange={(event) => setRoomSearch(event.target.value)} placeholder={sidebarTab === 'rooms' ? 'Buscar uma sala' : 'Buscar um amigo'} aria-label={sidebarTab === 'rooms' ? 'Buscar uma sala' : 'Buscar um amigo'} />
           <span className="search-shortcut">⌘ K</span>
         </div>
 
         <div className="side-scroll">
-          <div className="channel-section">
-            <div className="section-label"><span>canais</span><MessageCircle size={14} /></div>
-            <button type="button" className="channel-row is-current" onClick={() => setMobileSidebarOpen(false)}>
-              <MessageCircle size={17} />
-              <span>geral</span>
-              <small>{messages.length}</small>
-            </button>
-          </div>
-
-          <div className="channel-section voice-section">
-            <div className="section-label"><span>salas online · {rooms.length}</span><Plus size={14} onClick={() => setShowRoomCreator((value) => !value)} /></div>
-            {filteredRooms.map((room) => (
-              <button type="button" className={`channel-row voice-row ${room.id === roomId ? 'is-current' : ''}`} key={room.id} onClick={() => joinRoom(room.id, room.name)}>
-                <Radio size={17} />
-                <span>{room.name}</span>
-                <small>{room.count}</small>
-                {room.id === roomId && <span className="live-mini">aqui</span>}
+          {sidebarTab === 'rooms' ? <>
+            <div className="channel-section">
+              <div className="section-label"><span>canais</span><MessageCircle size={14} /></div>
+              <button type="button" className="channel-row is-current" onClick={() => setMobileSidebarOpen(false)}>
+                <MessageCircle size={17} />
+                <span>geral</span>
+                <small>{messages.length}</small>
               </button>
-            ))}
-            {filteredRooms.length === 0 && <div className="room-empty"><WifiOff size={14} />{signalStatus === 'connected' ? 'nenhuma sala encontrada' : 'conectando à rede...'}</div>}
-            {showRoomCreator && (
-              <form className="room-creator" onSubmit={createRoom}>
-                <input autoFocus value={roomDraft} onChange={(event) => setRoomDraft(event.target.value)} placeholder="nome da nova sala" aria-label="Nome da nova sala" />
-                <button type="submit" aria-label="Criar sala"><ArrowUpRight size={14} /></button>
-              </form>
-            )}
-          </div>
+            </div>
 
-          <div className="channel-section people-section">
-            <div className="section-label"><span>nesta sala · {peerCount}</span><Users size={14} /></div>
-            {participants.map((person) => (
-              <div className="person-row" key={person.peerId}>
-                <Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="sm" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} />
-                <div><strong>{person.self ? `${person.name} (você)` : person.name}</strong><small>{person.self ? (inCall ? 'no palco' : 'online') : (remoteStreams[person.peerId] ? 'em chamada' : 'online')}</small></div>
-                {remoteStreams[person.peerId] && <AudioLines size={15} className="person-wave" />}
-              </div>
-            ))}
-          </div>
+            <div className="channel-section voice-section">
+              <div className="section-label"><span>salas online · {rooms.length}</span><Plus size={14} onClick={() => setShowRoomCreator((value) => !value)} /></div>
+              {filteredRooms.map((room) => (
+                <button type="button" className={`channel-row voice-row ${room.id === roomId ? 'is-current' : ''}`} key={room.id} onClick={() => openRoom(room)}>
+                  {room.protected ? <LockKeyhole size={17} /> : <Radio size={17} />}
+                  <span>{room.name}</span>
+                  <small>{room.count}</small>
+                  {room.id === roomId && <span className="live-mini">aqui</span>}
+                </button>
+              ))}
+              {filteredRooms.length === 0 && <div className="room-empty"><WifiOff size={14} />{signalStatus === 'connected' ? 'nenhuma sala encontrada' : 'conectando à rede...'}</div>}
+              {showRoomCreator && (
+                <form className="room-creator" onSubmit={createRoom}>
+                  <input autoFocus value={roomDraft} onChange={(event) => setRoomDraft(event.target.value)} placeholder="nome da sala" aria-label="Nome da sala" />
+                  <input type="password" value={roomPasswordDraft} onChange={(event) => setRoomPasswordDraft(event.target.value)} placeholder="senha" aria-label="Senha da sala" />
+                  <button type="submit" aria-label="Criar sala"><ArrowUpRight size={14} /></button>
+                </form>
+              )}
+            </div>
+          </> : (
+            <div className="channel-section friends-section">
+              <div className="section-label"><span>amigos online · {filteredFriends.length}</span><Users size={14} /></div>
+              {filteredFriends.length ? filteredFriends.map((person) => (
+                <div className="person-row" key={person.peerId}>
+                  <Avatar initials={initialsFor(person.name)} tone={toneFor(person.peerId)} size="sm" src={person.avatar} alt={person.name} live={Boolean(remoteStreams[person.peerId])} />
+                  <div><strong>{person.name}</strong><small>{remoteStreams[person.peerId] ? 'em chamada' : 'nesta sala'}</small></div>
+                  {remoteStreams[person.peerId] && <AudioLines size={15} className="person-wave" />}
+                </div>
+              )) : <div className="room-empty"><Users size={14} />nenhum amigo conectado</div>}
+              <button type="button" className="friend-invite-button" onClick={copyInvite}><Link2 size={14} /> copiar convite da sala</button>
+            </div>
+          )}
         </div>
 
         <div className="profile-strip">
@@ -1083,6 +1128,7 @@ function App() {
           <div className="topbar-actions">
             {isDesktop && <button type="button" className={`update-button ${updateState.status === 'downloaded' ? 'is-ready' : ''}`} onClick={handleUpdate} disabled={updateBusy}><Download size={14} /> {updateLabel}</button>}
             <SignalBadge status={signalStatus} peerCount={peerCount} />
+            <IconButton label={callPanelOpen ? 'Fechar chamada' : 'Abrir chamada'} className={`call-header-button ${hasActiveCall ? 'has-call' : ''}`} active={callPanelOpen} onClick={() => setCallPanelOpen((value) => !value)}><PhoneCall size={17} />{hasActiveCall && <span className="call-header-dot" />}</IconButton>
             <button type="button" className="invite-button" onClick={copyInvite}>{copied ? <CopyCheck size={15} /> : <Link2 size={15} />}{copied ? 'link copiado' : 'copiar convite'}</button>
             <IconButton label="Notificações"><Bell size={17} /></IconButton>
             <IconButton label="Ajuda"><CircleHelp size={17} /></IconButton>
@@ -1090,11 +1136,11 @@ function App() {
         </header>
 
         <div className="dashboard-scroll">
-          <div className="content-grid">
-            <div className="content-column">
-              <section className="stage-card">
+          <div className={`content-grid ${callPanelOpen ? 'is-call-open' : 'is-chat-only'}`}>
+            <div className={`content-column ${callPanelOpen ? 'is-call-visible' : 'is-chat-visible'}`}>
+              {callPanelOpen && <section className="stage-card">
                 <div className="stage-header">
-                  <div className="stage-title"><span className={`recording-pill ${hasActiveCall ? '' : 'is-idle'}`}><span /> {hasActiveCall ? 'AO VIVO' : 'SALA ABERTA'}</span><strong>{roomName}</strong><span className="stage-lock"><LockKeyhole size={12} /> sala pública</span></div>
+                  <div className="stage-title"><span className={`recording-pill ${hasActiveCall ? '' : 'is-idle'}`}><span /> {hasActiveCall ? 'AO VIVO' : 'SALA ABERTA'}</span><strong>{roomName}</strong><span className="stage-lock"><LockKeyhole size={12} /> {roomProtected ? 'sala privada' : 'sala pública'}</span></div>
                   <div className="stage-meta"><Activity size={14} /> sinalização: {signalStatus === 'connected' ? 'ativa' : 'offline'}</div>
                 </div>
                 <div className="stage-body">
@@ -1146,7 +1192,7 @@ function App() {
                     <small className="device-settings-hint">A troca do microfone vale imediatamente. A saída usa o seletor do sistema quando o navegador oferece suporte.</small>
                   </div>
                 )}
-              </section>
+              </section>}
 
               {(permissionError || signalStatus !== 'connected') && <div className={`notice-bar ${permissionError ? 'is-warning' : ''}`}><span>{permissionError || 'Sinalização offline: peers conectados continuam conversando; novas entradas precisam do servidor.'}</span><IconButton label="Fechar aviso" onClick={() => setPermissionError('')}><X size={15} /></IconButton></div>}
 
@@ -1168,6 +1214,19 @@ function App() {
           </div>
         </div>
       </main>
+
+      {roomAccess && (
+        <div className="room-dialog-backdrop" role="presentation">
+          <form className="room-dialog" onSubmit={submitRoomAccess} role="dialog" aria-modal="true" aria-labelledby="room-dialog-title">
+            <button type="button" className="room-dialog-close" onClick={() => { setRoomAccess(null); setPermissionError(''); }} aria-label="Fechar"><X size={16} /></button>
+            <span className="card-kicker">acesso à sala</span>
+            <h2 id="room-dialog-title">{roomAccess.name}</h2>
+            <p>Esta sala é protegida. Digite a senha para entrar.</p>
+            <label className="room-dialog-field"><span>senha</span><input autoFocus type="password" value={roomAccess.password} onChange={(event) => setRoomAccess((current) => current ? { ...current, password: event.target.value } : current)} placeholder="senha da sala" /></label>
+            <div className="room-dialog-actions"><button type="button" className="dialog-secondary" onClick={() => { setRoomAccess(null); setPermissionError(''); }}>cancelar</button><button type="submit" className="dialog-primary"><LockKeyhole size={14} /> entrar</button></div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
