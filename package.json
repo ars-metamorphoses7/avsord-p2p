@@ -1,6 +1,6 @@
 {
   "name": "jump-p2p",
-  "version": "1.0.3",
+  "version": "1.0.9",
   "private": true,
   "type": "module",
   "description": "JUMP — salas P2P com chat, áudio e compartilhamento de tela",
@@ -11,6 +11,53 @@
   },
   "main": "electron/main.cjs",
   "desktopName": "com.jumpnetwork.app",
+  "build": {
+    "appId": "com.jumpnetwork.app",
+    "productName": "JUMP",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "server.mjs",
+      "package.json",
+      "src/assets/**/*"
+    ],
+    "artifactName": "JUMP-${version}-${os}-${arch}.${ext}",
+    "protocols": [
+      {
+        "name": "JUMP invite",
+        "schemes": [
+          "jump"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "src/assets/win98/jump-app-icon.png",
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "icon": "src/assets/win98/jump-app-icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network",
+      "synopsis": "Salas P2P com áudio, tela e chat",
+      "description": "Salas ponto a ponto com áudio, compartilhamento de tela e mensagens sem servidor central.",
+      "maintainer": "JUMP <jump@localhost>"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "ars-metamorphoses7",
+      "repo": "avsord-p2p",
+      "releaseType": "release"
+    }
+  },
   "scripts": {
     "dev": "concurrently -k \"node server.mjs\" \"vite\"",
     "build": "vite build",

@@ -14,10 +14,47 @@ function publishUpdateState(state) {
   mainWindow?.webContents.send('update:state', state);
 }
 
+function publishWindowState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('window:state', { maximized: mainWindow.isMaximized() });
+}
+
+function setupWindowControls() {
+  ipcMain.handle('window:state', () => ({ maximized: Boolean(mainWindow?.isMaximized()) }));
+  ipcMain.on('window:minimize', () => mainWindow?.minimize());
+  ipcMain.handle('window:toggle-maximize', () => {
+    if (!mainWindow) return { maximized: false };
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+    return { maximized: mainWindow.isMaximized() };
+  });
+  ipcMain.on('window:close', () => mainWindow?.close());
+}
+
 function setupMediaCapture() {
   const allowedPermissions = new Set(['media', 'display-capture']);
   session.defaultSession.setPermissionCheckHandler((_webContents, permission) => allowedPermissions.has(permission));
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => callback(allowedPermissions.has(permission)));
+  ipcMain.handle('desktop:sources', async () => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 320, height: 180 },
+        fetchWindowIcons: true,
+      });
+      return sources.map((source) => ({
+        id: source.id,
+        name: source.name,
+        type: source.id.startsWith('window:') ? 'window' : 'screen',
+        displayId: source.display_id || '',
+        thumbnail: source.thumbnail?.toDataURL?.() || '',
+        appIcon: source.appIcon?.toDataURL?.() || '',
+      }));
+    } catch (error) {
+      console.error('JUMP desktop sources failed:', error);
+      return [];
+    }
+  });
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
     try {
       const sources = await desktopCapturer.getSources({
@@ -134,7 +171,9 @@ async function createWindow() {
     height: 920,
     minWidth: 980,
     minHeight: 680,
-    backgroundColor: '#121116',
+    icon: path.join(app.getAppPath(), 'src', 'assets', 'win98', 'jump-app-icon.png'),
+    backgroundColor: '#030604',
+    frame: false,
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
@@ -142,6 +181,8 @@ async function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
+  mainWindow.on('maximize', publishWindowState);
+  mainWindow.on('unmaximize', publishWindowState);
   const invite = parseDeepLink(pendingDeepLink);
   const query = new URLSearchParams({ room: invite?.room || 'jump-house' });
   if (invite?.signal) query.set('signal', invite.signal);
@@ -180,6 +221,7 @@ if (!hasSingleInstanceLock) {
 
   app.whenReady().then(async () => {
     setupUpdater();
+    setupWindowControls();
     setupMediaCapture();
     await createWindow();
     app.on('activate', () => {
