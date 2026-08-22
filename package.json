@@ -1,6 +1,6 @@
 {
   "name": "jump-p2p",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "private": true,
   "type": "module",
   "description": "JUMP — salas P2P com chat, áudio e compartilhamento de tela",

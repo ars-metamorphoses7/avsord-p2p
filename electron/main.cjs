@@ -144,10 +144,15 @@ function setupUpdater() {
   // pacote Linux peça autenticação inesperadamente ao fechar o aplicativo.
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.on('checking-for-update', () => publishUpdateState({ status: 'checking' }));
-  autoUpdater.on('update-available', (_event, info) => publishUpdateState({ status: 'available', version: info.version }));
+  // electron-updater v6 emits the update info as the first (and only)
+  // argument. Treat it defensively so an updater event can never crash the
+  // IPC request or leave the renderer with an opaque TypeError.
+  autoUpdater.on('update-available', (info) => publishUpdateState({ status: 'available', version: info?.version || '' }));
   autoUpdater.on('update-not-available', () => publishUpdateState({ status: 'not-available' }));
   autoUpdater.on('download-progress', (progress) => publishUpdateState({ status: 'downloading', percent: Math.round(progress.percent) }));
-  autoUpdater.on('update-downloaded', (_event, _releaseNotes, _releaseName, _releaseDate, updateUrl) => publishUpdateState({ status: 'downloaded', url: updateUrl }));
+  // v6 emits a single UpdateDownloadedEvent containing the version and the
+  // downloaded file path (the old multi-argument signature is obsolete).
+  autoUpdater.on('update-downloaded', (info) => publishUpdateState({ status: 'downloaded', version: info?.version || '', url: info?.downloadedFile || '' }));
   autoUpdater.on('error', (error) => publishUpdateState({ status: 'error', message: error.message }));
 
 }
