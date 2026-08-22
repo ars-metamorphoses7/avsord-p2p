@@ -10,6 +10,7 @@ import {
   Download,
   Headphones,
   Info,
+  Link2,
   LockKeyhole,
   MessageCircle,
   Mic,
@@ -950,6 +951,7 @@ function App() {
   const [pendingRoomFallback, setPendingRoomFallback] = useState(null);
   const [updateState, setUpdateState] = useState({ status: 'idle' });
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [inviteCopied, setInviteCopied] = useState(false);
 
   const wsRef = useRef(null);
   const profilePhotoInputRef = useRef(null);
@@ -1061,6 +1063,43 @@ function App() {
     } catch {
       // Audio notifications are optional; browsers may reject a context before
       // the first user gesture, so a failure must never affect chat delivery.
+    }
+  }, []);
+
+  const copyRoomInvite = useCallback(async () => {
+    const room = roomIdRef.current || DEFAULT_ROOM_ID;
+    let invite = '';
+    try {
+      invite = await globalThis.jumpDesktop?.getInviteUrl?.(room);
+    } catch {
+      invite = '';
+    }
+    if (!invite) {
+      const url = new URL(window.location.href);
+      url.search = '';
+      url.hash = '';
+      url.searchParams.set('room', room);
+      invite = url.toString();
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(invite);
+      } else {
+        const helper = document.createElement('textarea');
+        helper.value = invite;
+        helper.setAttribute('readonly', '');
+        helper.style.position = 'fixed';
+        helper.style.opacity = '0';
+        document.body.appendChild(helper);
+        helper.select();
+        const copied = document.execCommand('copy');
+        helper.remove();
+        if (!copied) throw new Error('clipboard-unavailable');
+      }
+      setInviteCopied(true);
+      window.setTimeout(() => setInviteCopied(false), 1800);
+    } catch {
+      setPermissionError('Não foi possível copiar o convite. Selecione e copie o link manualmente.');
     }
   }, []);
 
@@ -2897,6 +2936,7 @@ function App() {
           <div className="topbar-actions">
             {isDesktop && <button type="button" className={`update-button ${updateState.status === 'downloaded' ? 'is-ready' : ''} ${isDevelopmentDesktopBuild ? 'is-dev' : ''}`} onClick={isDevelopmentDesktopBuild ? undefined : handleUpdate} disabled={isDevelopmentDesktopBuild || updateBusy} aria-disabled={isDevelopmentDesktopBuild} title={isDevelopmentDesktopBuild ? 'Versão de desenvolvimento — atualizações desativadas' : 'Verificar atualizações'}><WinIcon name={isDevelopmentDesktopBuild ? 'app' : 'update'} size={20} /> {updateLabel}</button>}
             <SignalBadge status={signalStatus} peerCount={peerCount} />
+            <button type="button" className="invite-button" onClick={copyRoomInvite} disabled={!roomId} title="Copiar convite da sala"><Link2 size={17} /> {inviteCopied ? 'copiado' : 'copiar convite'}</button>
             <IconButton label={callPanelOpen ? 'Fechar chamada' : 'Abrir chamada'} className={`call-header-button ${hasActiveCall ? 'has-call' : ''}`} active={callPanelOpen} onClick={() => setCallPanelOpen((value) => !value)}><WinIcon name="phone" size={22} />{hasActiveCall && <span className="call-header-dot" />}</IconButton>
             <IconButton label={callPanelOpen ? (chatPanelOpen ? 'Ocultar chat' : 'Mostrar chat') : 'Chat da sala'} className="chat-toggle-button" active={callPanelOpen && chatPanelOpen} disabled={!callPanelOpen} onClick={() => setChatPanelOpen((value) => !value)}><MessageCircle size={20} /></IconButton>
             <IconButton label="Notificações"><WinIcon name="bell" size={21} /></IconButton>
