@@ -61,6 +61,7 @@ const CLIENT_ID_KEY = 'jump-client-id';
 const CONTACTS_KEY = 'jump-contacts';
 const UNREAD_COUNTS_KEY = 'jump-unread-counts';
 const PROFILE_STATUS_KEY = 'jump-profile-status';
+const MESSAGE_CLOCK_KEY = 'jump-message-clock';
 const MAX_CONTACTS = 100;
 const PRESENCE_STATUSES = ['online', 'dnd', 'offline'];
 const WIN_ICONS = {
@@ -229,11 +230,25 @@ function messageStorageBytes(message) {
   return metadataBytes + legacyImageBytes + attachmentBytes;
 }
 
+function messageOrderValue(message) {
+  const value = Number(message?.logicalClock);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function compareMessages(a, b) {
+  const aClock = messageOrderValue(a);
+  const bClock = messageOrderValue(b);
+  if (aClock !== null && bClock !== null && aClock !== bClock) return aClock - bClock;
+  const time = Number(a?.timestamp || 0) - Number(b?.timestamp || 0);
+  if (time) return time;
+  if (aClock !== null && bClock === null) return -1;
+  if (aClock === null && bClock !== null) return 1;
+  const sender = String(a?.senderId || '').localeCompare(String(b?.senderId || ''));
+  return sender || String(a?.id || '').localeCompare(String(b?.id || ''));
+}
+
 function trimMessagesToBudget(messages, byteBudget = MAX_CONVERSATION_BYTES, maxMessages = MAX_ROOM_MESSAGES) {
-  const ordered = [...(messages || [])].sort((a, b) => {
-    const time = Number(a?.timestamp || 0) - Number(b?.timestamp || 0);
-    return time || String(a?.id || '').localeCompare(String(b?.id || ''));
-  });
+  const ordered = [...(messages || [])].sort(compareMessages);
   const retained = [];
   let total = 0;
   for (let index = ordered.length - 1; index >= 0 && retained.length < maxMessages; index -= 1) {
@@ -631,8 +646,7 @@ function isRoomCreatedSystemMessage(message) {
 function sortRoomMessages(messages) {
   const createdRooms = new Set();
   return [...messages].sort((a, b) => {
-    const time = Number(a.timestamp || 0) - Number(b.timestamp || 0);
-    return time || String(a.id).localeCompare(String(b.id));
+    return compareMessages(a, b);
   }).filter((message) => {
     if (!isRoomCreatedSystemMessage(message)) return true;
     const key = String(message.roomId || 'unknown');
@@ -643,10 +657,7 @@ function sortRoomMessages(messages) {
 }
 
 function sortDirectMessages(messages) {
-  return [...messages].sort((a, b) => {
-    const time = Number(a.timestamp || 0) - Number(b.timestamp || 0);
-    return time || String(a.id).localeCompare(String(b.id));
-  }).slice(-MAX_DIRECT_MESSAGES);
+  return [...messages].sort(compareMessages).slice(-MAX_DIRECT_MESSAGES);
 }
 
 function resizeProfilePhoto(file) {
@@ -963,6 +974,7 @@ function App() {
   const notificationAudioContextRef = useRef(null);
   const notificationSoundLastPlayedRef = useRef(0);
   const appStartedAtRef = useRef(Date.now());
+  const logicalMessageClockRef = useRef(Number.parseInt(localStorage.getItem(MESSAGE_CLOCK_KEY) || '0', 10) || 0);
   const messagesRef = useRef(messages);
   const peersRef = useRef(peers);
   const directMessagesRef = useRef(directMessages);
@@ -995,6 +1007,7 @@ function App() {
   const isDeafenedRef = useRef(isDeafened);
   const audioInputIdRef = useRef(selectedAudioInputId);
   const makeOfferRef = useRef(null);
+  const requestPeerNegotiationRef = useRef(null);
 
   const updateComposerCursor = useCallback(() => {
     const input = composerInputRef.current;
@@ -1064,6 +1077,22 @@ function App() {
       // Audio notifications are optional; browsers may reject a context before
       // the first user gesture, so a failure must never affect chat delivery.
     }
+  }, []);
+
+  const nextMessageClock = useCallback(() => {
+    logicalMessageClockRef.current += 1;
+    try { localStorage.setItem(MESSAGE_CLOCK_KEY, String(logicalMessageClockRef.current)); } catch { /* Best effort only. */ }
+    return logicalMessageClockRef.current;
+  }, []);
+
+  const observeMessageClocks = useCallback((incoming = []) => {
+    const highest = (incoming || []).reduce((current, message) => {
+      const clock = messageOrderValue(message);
+      return clock === null ? current : Math.max(current, clock);
+    }, logicalMessageClockRef.current);
+    if (highest === logicalMessageClockRef.current) return;
+    logicalMessageClockRef.current = highest;
+    try { localStorage.setItem(MESSAGE_CLOCK_KEY, String(highest)); } catch { /* Best effort only. */ }
   }, []);
 
   const copyRoomInvite = useCallback(async () => {
@@ -1353,6 +1382,7 @@ function App() {
   }, [broadcastRoomData]);
 
   const mergeMessages = useCallback((incoming, sourcePeerId = '') => {
+    observeMessageClocks(incoming);
     const current = messagesRef.current;
     const byId = new Map(current.map((message) => [message.id, message]));
     const added = [];
@@ -1388,7 +1418,7 @@ function App() {
     if (unreadIncoming && activeContactIdRef.current) incrementUnread(roomUnreadKey(roomIdRef.current), unreadIncoming);
     broadcastRoomData({ type: 'messages', roomId: roomIdRef.current, messages: added }, sourcePeerId);
     return added;
-  }, [broadcastRoomData, incrementUnread, playMessageNotification, requestAttachmentFromPeer]);
+  }, [broadcastRoomData, incrementUnread, observeMessageClocks, playMessageNotification, requestAttachmentFromPeer]);
 
   const addRoomEvent = useCallback((message) => {
     if (!message?.roomId || message.roomId !== roomIdRef.current) return;
@@ -1397,6 +1427,7 @@ function App() {
 
   const loadRoomMessages = useCallback(async (targetRoomId) => {
     const stored = (await readRoomMessages(targetRoomId)).map(formatMessage);
+    observeMessageClocks(stored);
     if (roomIdRef.current !== targetRoomId) return;
     const byId = new Map(messagesRef.current.map((message) => [message.id, message]));
     stored.forEach((message) => byId.set(message.id, message));
@@ -1404,10 +1435,11 @@ function App() {
     messagesRef.current = ordered;
     setMessages(ordered);
     void writeRoomMessages(targetRoomId, ordered);
-  }, []);
+  }, [observeMessageClocks]);
 
   const mergeDirectMessages = useCallback(async (conversationId, incoming, sourcePeerId = '') => {
     if (!conversationId || !Array.isArray(incoming) || !incoming.length) return [];
+    observeMessageClocks(incoming);
     const current = directConversationRef.current === conversationId
       ? directMessagesRef.current
       : (await readDirectMessages(conversationId)).map(formatMessage);
@@ -1448,7 +1480,7 @@ function App() {
       setDirectMessages(merged);
     }
     return added;
-  }, [incrementUnread, playMessageNotification, rememberContact, requestAttachmentFromPeer]);
+  }, [incrementUnread, observeMessageClocks, playMessageNotification, rememberContact, requestAttachmentFromPeer]);
 
   const requestDirectSync = useCallback((peerId = directPeerIdRef.current, conversationId = directConversationRef.current, knownIds = directMessagesRef.current.map((message) => message.id)) => {
     if (!peerId || !conversationId) return;
@@ -1476,6 +1508,7 @@ function App() {
     directMessagesRef.current = [];
     markUnreadAsRead(directUnreadKey(contactId));
     const stored = trimMessagesToBudget(sortDirectMessages((await readDirectMessages(conversationId)).map(formatMessage)), MAX_CONVERSATION_BYTES, MAX_DIRECT_MESSAGES);
+    observeMessageClocks(stored);
     if (directConversationRef.current !== conversationId) return;
     directMessagesRef.current = stored;
     setDirectMessages(stored);
@@ -1483,7 +1516,7 @@ function App() {
     stored.forEach((message) => {
       if (message.attachment?.id) requestAttachmentFromPeer(peer.peerId, message.attachment.id);
     });
-  }, [markUnreadAsRead, requestAttachmentFromPeer, requestDirectSync]);
+  }, [markUnreadAsRead, observeMessageClocks, requestAttachmentFromPeer, requestDirectSync]);
 
   const openDirectChat = useCallback((peer) => {
     if (!peer) return;
@@ -1639,7 +1672,22 @@ function App() {
         return;
       }
       if (payload.type === 'call-state') {
+        const slot = peerConnectionsRef.current.get(peerId);
+        const previousMediaState = slot?.remoteMediaState || null;
+        const nextMediaState = {
+          inCall: Boolean(payload.inCall),
+          camera: Boolean(payload.camera),
+          sharing: Boolean(payload.sharing),
+        };
+        const mediaChanged = !previousMediaState
+          || previousMediaState.inCall !== nextMediaState.inCall
+          || previousMediaState.camera !== nextMediaState.camera
+          || previousMediaState.sharing !== nextMediaState.sharing;
+        if (slot) slot.remoteMediaState = nextMediaState;
         if (!payload.inCall) clearRemoteCallMedia(peerId);
+        const mediaWasActive = previousMediaState && (previousMediaState.inCall || previousMediaState.camera || previousMediaState.sharing);
+        const mediaIsActive = nextMediaState.inCall || nextMediaState.camera || nextMediaState.sharing;
+        if (mediaChanged && (mediaWasActive || mediaIsActive)) requestPeerNegotiationRef.current?.(peerId);
         setRemoteCallStates((current) => ({
           ...current,
           [peerId]: {
@@ -1751,6 +1799,8 @@ function App() {
       void makeOffer(peerId);
     }, 0);
   }, [makeOffer]);
+
+  requestPeerNegotiationRef.current = requestPeerNegotiation;
 
   const replacePeerTrack = useCallback(async (senderKey, track) => {
     const entries = [...peerConnectionsRef.current.entries()];
@@ -2445,9 +2495,10 @@ function App() {
       image: payload?.image || '',
       imageName: String(payload?.imageName || '').slice(0, 120),
       attachment: payload?.attachment || undefined,
+      logicalClock: nextMessageClock(),
       timestamp: Date.now(),
     }]);
-  }, [mergeMessages]);
+  }, [mergeMessages, nextMessageClock]);
 
   const publishDirectMessage = useCallback(async (payload) => {
     const peer = peers.find((candidate) => contactIdFor(candidate) === activeContactIdRef.current);
@@ -2471,6 +2522,7 @@ function App() {
       image: payload?.image || '',
       imageName: String(payload?.imageName || '').slice(0, 120),
       attachment: payload?.attachment || undefined,
+      logicalClock: nextMessageClock(),
       timestamp: Date.now(),
     };
     if (!message.text && !message.image && !message.attachment) return;
@@ -2488,7 +2540,7 @@ function App() {
     } catch {
       setPermissionError('Não foi possível enviar esta mensagem P2P.');
     }
-  }, [contacts, mergeDirectMessages, peers, sendAttachmentToPeer]);
+  }, [contacts, mergeDirectMessages, nextMessageClock, peers, sendAttachmentToPeer]);
 
   const sendMessage = useCallback((event) => {
     event.preventDefault();
