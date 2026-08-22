@@ -14,12 +14,14 @@ O Vite e o servidor de sinalização escutam nas interfaces de rede, então o li
 ## O que é descentralizado
 
 - Mensagens são salvas no navegador em IndexedDB e enviadas aos peers pelo WebRTC DataChannel.
+- Cada conversa mantém até aproximadamente 500 MB (ou 50 mil mensagens), descartando os itens mais antigos quando o limite é atingido.
+- O botão de anexo aceita qualquer tipo de arquivo. Os arquivos ficam no IndexedDB local e são enviados sob demanda em blocos P2P de 64 KB; o limite atual é 200 MB por arquivo.
 - Cada peer repassa mensagens que ainda não conhece, eliminando duplicatas por ID.
 - Ao entrar novamente, o peer pede aos participantes conectados as mensagens que faltam.
 - Áudio, câmera e compartilhamento de tela continuam sendo WebRTC P2P.
 - O botão de tela abre a captura no Electron; no Windows ele compartilha o monitor principal e a captura é interrompida quando a fonte é encerrada.
 - O botão de configurações ao lado dos controles permite escolher microfone e saída de áudio. A troca do microfone durante a chamada é imediata.
-- O botão `+` do chat envia imagens comprimidas e fragmentadas pelo DataChannel, sem upload para o servidor.
+- O servidor nunca armazena mensagens nem arquivos: ele mantém apenas presença e sinalização inicial. A sincronização acontece quando os computadores estão conectados.
 - A navegação lateral separa `salas` e `amigos`; o chat fica em tela cheia e a chamada aparece ao clicar no telefone do header.
 - Salas personalizadas podem ser criadas com nome e senha. A senha nunca é enviada na lista pública: o sinalizador guarda apenas um hash enquanto a sala está ativa, e o convite continua sendo compartilhado separadamente.
 
@@ -35,7 +37,7 @@ O Electron abre o frontend e o servidor local juntos, então cada computador pod
 npm run desktop
 ```
 
-No desktop, `copiar convite` prioriza automaticamente o IP de uma interface Radmin/VPN; se ela não existir, usa o primeiro IP da rede local.
+No desktop, a sinalização local escuta na porta `8787`. Para uma conexão pela Radmin/VPN, use o endereço `jump://join?signal=http%3A%2F%2FIP-RADMIN%3A8787&room=ID-DA-SALA` como convite. O instalador registra o protocolo `jump://` no Windows.
 
 Para gerar o instalador Windows:
 
@@ -59,14 +61,14 @@ Antes de publicar, incremente a versão no `package.json` e no `package-lock.jso
 
 ## Primeiro teste com um amigo
 
-Para testar áudio, tela e chat pela Radmin:
+Para testar chat, arquivos, áudio e tela pela Radmin:
 
 1. Conecte os dois computadores à mesma rede Radmin VPN.
 2. No computador de cada pessoa, abra o JUMP pelo instalador Windows, pelo AppImage ou pelo `.deb`.
-3. No host, clique em `copiar convite` e envie o link `jump://` para o amigo.
+3. No host, descubra o IPv4 da interface Radmin e monte o convite `jump://join?signal=http%3A%2F%2FIP-RADMIN%3A8787&room=ID-DA-SALA` (o ID é o nome da sala normalizado, por exemplo `jump-house`).
 4. Com o JUMP instalado/aberto no computador do amigo, abra o convite. O app dele continuará usando `localhost` para liberar microfone/câmera e conectará a sinalização ao IP Radmin do host.
 5. Permita o JUMP no Windows Firewall quando solicitado, especialmente a porta TCP `8787` no host.
 
-Durante o teste, entre na chamada antes de conferir o microfone. Use o ícone de ajustes nos controles para trocar entrada/saída e o ícone de monitor para compartilhar a tela. O chat aceita PNG, JPG, WebP e GIF; imagens muito grandes são reduzidas para caber na conexão P2P.
+Durante o teste, envie primeiro uma mensagem curta, depois um arquivo pequeno e reabra a sala para confirmar a sincronização. Em seguida entre na chamada, permita o microfone e use o ícone de monitor para compartilhar a tela. Se o Windows Firewall perguntar, permita a porta TCP `8787` no host.
 
 O convite `jump://` é registrado pelo instalador nos dois sistemas. O link HTTP do modo web serve para testar o chat, mas o desktop é o caminho recomendado para testar chamadas e compartilhamento de tela pela Radmin.
