@@ -4059,6 +4059,29 @@ body,
   }
 }
 
+/* Indicador de fala: o anel só aparece enquanto o analisador de áudio mede
+   voz acima do limiar. Mantemos o avatar circular e não adicionamos um estado
+   permanente ao participante. */
+.avatar.is-speaking {
+  outline: 2px solid #008000;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px rgba(0, 128, 0, .24) !important;
+}
+
+.call-stream-viewport.is-speaking {
+  position: relative;
+}
+
+.call-stream-viewport.is-speaking::after {
+  position: absolute;
+  z-index: 2;
+  inset: 3px;
+  border: 2px solid #008000;
+  outline: 1px solid rgba(255, 255, 255, .45);
+  pointer-events: none;
+  content: '';
+}
+
 /* Atualização: caixa modal centralizada, com a animação discreta do shell Win98. */
 .update-overlay {
   position: fixed;

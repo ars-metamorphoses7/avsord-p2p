@@ -739,9 +739,9 @@ function PresenceDot({ status = 'online' }) {
   return <span className={`presence-dot presence-dot-${normalized}`} aria-label={presenceLabel(normalized)} title={presenceLabel(normalized)} />;
 }
 
-function Avatar({ initials, tone = 'yellow', size = 'md', live = false, presence = '', src = '', alt = '' }) {
+function Avatar({ initials, tone = 'yellow', size = 'md', live = false, presence = '', speaking = false, src = '', alt = '' }) {
   return (
-    <span className={`avatar avatar-${size} avatar-${tone} ${presence ? 'has-presence' : ''}`}>
+    <span className={`avatar avatar-${size} avatar-${tone} ${presence ? 'has-presence' : ''} ${speaking ? 'is-speaking' : ''}`}>
       {src ? <img src={src} alt={alt} /> : initials}
       {presence ? <PresenceDot status={presence} /> : live && <span className="avatar-live" />}
     </span>
@@ -937,6 +937,7 @@ function App() {
   const [signalStatus, setSignalStatus] = useState('connecting');
   const [remoteStreams, setRemoteStreams] = useState({});
   const [remoteCallStates, setRemoteCallStates] = useState({});
+  const [speakingPeers, setSpeakingPeers] = useState({});
   const [permissionError, setPermissionError] = useState('');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [callPanelOpen, setCallPanelOpen] = useState(false);
@@ -954,6 +955,12 @@ function App() {
   const profilePhotoInputRef = useRef(null);
   const imageInputRef = useRef(null);
   const composerInputRef = useRef(null);
+  const messageListRef = useRef(null);
+  const messageListStickToBottomRef = useRef(true);
+  const messageListContextRef = useRef('');
+  const notificationAudioContextRef = useRef(null);
+  const notificationSoundLastPlayedRef = useRef(0);
+  const appStartedAtRef = useRef(Date.now());
   const messagesRef = useRef(messages);
   const peersRef = useRef(peers);
   const directMessagesRef = useRef(directMessages);
@@ -1005,6 +1012,62 @@ function App() {
     const rawLeft = paddingLeft + textWidth - (input.scrollLeft || 0);
     const maxLeft = Math.max(2, shell.clientWidth - 7);
     setComposerCursorLeft(Math.max(2, Math.min(rawLeft, maxLeft)));
+  }, []);
+
+  const updateMessageListStickiness = useCallback(() => {
+    const list = messageListRef.current;
+    if (!list) return;
+    const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+    messageListStickToBottomRef.current = distanceFromBottom <= 96;
+  }, []);
+
+  const scrollMessageListToBottom = useCallback((behavior = 'auto') => {
+    messageListStickToBottomRef.current = true;
+    const list = messageListRef.current;
+    if (!list) return;
+    window.requestAnimationFrame(() => {
+      const currentList = messageListRef.current;
+      if (!currentList) return;
+      if (typeof currentList.scrollTo === 'function') {
+        currentList.scrollTo({ top: currentList.scrollHeight, behavior });
+      } else {
+        currentList.scrollTop = currentList.scrollHeight;
+      }
+    });
+  }, []);
+
+  const playMessageNotification = useCallback(() => {
+    const now = Date.now();
+    if (now - notificationSoundLastPlayedRef.current < 120) return;
+    notificationSoundLastPlayedRef.current = now;
+    try {
+      const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextConstructor) return;
+      const context = notificationAudioContextRef.current || new AudioContextConstructor();
+      notificationAudioContextRef.current = context;
+      if (context.state === 'suspended') void context.resume().catch(() => {});
+      const startAt = context.currentTime + 0.01;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = 'triangle';
+      oscillator.frequency.setValueAtTime(740, startAt);
+      oscillator.frequency.exponentialRampToValueAtTime(540, startAt + 0.1);
+      gain.gain.setValueAtTime(0.0001, startAt);
+      gain.gain.exponentialRampToValueAtTime(0.028, startAt + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.14);
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.15);
+    } catch {
+      // Audio notifications are optional; browsers may reject a context before
+      // the first user gesture, so a failure must never affect chat delivery.
+    }
+  }, []);
+
+  useEffect(() => () => {
+    const context = notificationAudioContextRef.current;
+    notificationAudioContextRef.current = null;
+    if (context && context.state !== 'closed') void context.close().catch(() => {});
   }, []);
 
   useEffect(() => { displayNameRef.current = displayName; }, [displayName]);
@@ -1277,10 +1340,16 @@ function App() {
     const unreadIncoming = sourcePeerId
       ? added.filter((message) => message.kind !== 'system' && message.senderId !== clientIdRef.current).length
       : 0;
+    const hasRecentIncomingMessage = sourcePeerId && added.some((message) => (
+      message.kind !== 'system'
+      && message.senderId !== clientIdRef.current
+      && Number(message.timestamp) >= appStartedAtRef.current
+    ));
+    if (hasRecentIncomingMessage) playMessageNotification();
     if (unreadIncoming && activeContactIdRef.current) incrementUnread(roomUnreadKey(roomIdRef.current), unreadIncoming);
     broadcastRoomData({ type: 'messages', roomId: roomIdRef.current, messages: added }, sourcePeerId);
     return added;
-  }, [broadcastRoomData, incrementUnread, requestAttachmentFromPeer]);
+  }, [broadcastRoomData, incrementUnread, playMessageNotification, requestAttachmentFromPeer]);
 
   const addRoomEvent = useCallback((message) => {
     if (!message?.roomId || message.roomId !== roomIdRef.current) return;
@@ -1320,6 +1389,9 @@ function App() {
     const merged = trimMessagesToBudget(sortDirectMessages([...byId.values()]), MAX_CONVERSATION_BYTES, MAX_DIRECT_MESSAGES);
     void writeDirectMessages(conversationId, merged);
     const remoteMessages = added.filter((message) => message.senderId && message.senderId !== clientIdRef.current);
+    if (sourcePeerId && remoteMessages.some((message) => Number(message.timestamp) >= appStartedAtRef.current)) {
+      playMessageNotification();
+    }
     const remoteContactId = otherConversationParty(conversationId, clientIdRef.current);
     if (remoteMessages.length) {
       const latest = remoteMessages.at(-1);
@@ -1337,7 +1409,7 @@ function App() {
       setDirectMessages(merged);
     }
     return added;
-  }, [incrementUnread, rememberContact, requestAttachmentFromPeer]);
+  }, [incrementUnread, playMessageNotification, rememberContact, requestAttachmentFromPeer]);
 
   const requestDirectSync = useCallback((peerId = directPeerIdRef.current, conversationId = directConversationRef.current, knownIds = directMessagesRef.current.map((message) => message.id)) => {
     if (!peerId || !conversationId) return;
@@ -1988,6 +2060,88 @@ function App() {
     return () => mediaDevices?.removeEventListener?.('devicechange', refreshAudioDevices);
   }, [refreshAudioDevices]);
 
+  // Measure each active microphone stream locally. The analyser is connected
+  // only to an AnalyserNode (never to the destination), so it cannot create an
+  // echo; it merely drives the small green speaking ring in the call UI.
+  useEffect(() => {
+    const remoteEntries = Object.entries(remoteStreams).filter(([peerId, entry]) => (
+      remoteCallStates[peerId]?.inCall === true
+      && remoteCallStates[peerId]?.muted !== true
+      && entry?.stream?.getAudioTracks?.().some((track) => track.readyState !== 'ended')
+    ));
+    const localStream = inCall && !isMuted ? audioStreamRef.current : null;
+    if (!localStream && !remoteEntries.length) {
+      setSpeakingPeers((current) => (Object.keys(current).length ? {} : current));
+      return undefined;
+    }
+    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextConstructor) return undefined;
+    let context;
+    try {
+      context = new AudioContextConstructor();
+    } catch {
+      return undefined;
+    }
+    if (context.state === 'suspended') void context.resume().catch(() => {});
+    const monitors = [];
+    const addMonitor = (id, stream) => {
+      if (!stream?.getAudioTracks?.().length) return;
+      try {
+        const source = context.createMediaStreamSource(stream);
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 512;
+        analyser.smoothingTimeConstant = 0.72;
+        source.connect(analyser);
+        monitors.push({ id, source, analyser, data: new Uint8Array(analyser.fftSize), speaking: false });
+      } catch {
+        // A stream can disappear while a peer is leaving; ignore that frame.
+      }
+    };
+    addMonitor('self', localStream);
+    remoteEntries.forEach(([peerId, entry]) => addMonitor(peerId, entry.stream));
+    if (!monitors.length) {
+      void context.close().catch(() => {});
+      return undefined;
+    }
+    let frame = 0;
+    let stopped = false;
+    const updateSpeaking = () => {
+      if (stopped) return;
+      const next = {};
+      monitors.forEach((monitor) => {
+        monitor.analyser.getByteTimeDomainData(monitor.data);
+        let energy = 0;
+        monitor.data.forEach((sample) => {
+          const normalized = (sample - 128) / 128;
+          energy += normalized * normalized;
+        });
+        const level = Math.sqrt(energy / monitor.data.length);
+        // Hysteresis keeps the ring stable around quiet syllables and room
+        // noise instead of flickering every animation frame.
+        if (monitor.speaking ? level < 0.032 : level > 0.052) monitor.speaking = !monitor.speaking;
+        if (monitor.speaking) next[monitor.id] = true;
+      });
+      setSpeakingPeers((current) => {
+        const currentKeys = Object.keys(current);
+        const nextKeys = Object.keys(next);
+        if (currentKeys.length === nextKeys.length && nextKeys.every((key) => current[key] === next[key])) return current;
+        return next;
+      });
+      frame = window.requestAnimationFrame(updateSpeaking);
+    };
+    updateSpeaking();
+    return () => {
+      stopped = true;
+      window.cancelAnimationFrame(frame);
+      monitors.forEach(({ source, analyser }) => {
+        try { source.disconnect(); } catch { /* Stream already ended. */ }
+        try { analyser.disconnect(); } catch { /* Stream already ended. */ }
+      });
+      void context.close().catch(() => {});
+      setSpeakingPeers((current) => (Object.keys(current).length ? {} : current));
+    };
+  }, [inCall, isMuted, remoteCallStates, remoteStreams]);
+
   const startCall = useCallback(async () => {
     if (inCallRef.current) return true;
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -2305,10 +2459,14 @@ function App() {
       setPermissionError('Crie ou selecione uma sala antes de enviar mensagens.');
       return;
     }
-    if (activeContactIdRef.current) void publishDirectMessage({ text: cleanDraft });
-    else publishMessage({ text: cleanDraft });
+    if (activeContactIdRef.current) {
+      void publishDirectMessage({ text: cleanDraft }).finally(() => scrollMessageListToBottom('smooth'));
+    } else {
+      publishMessage({ text: cleanDraft });
+      scrollMessageListToBottom('smooth');
+    }
     setDraft('');
-  }, [draft, publishDirectMessage, publishMessage]);
+  }, [draft, publishDirectMessage, publishMessage, scrollMessageListToBottom]);
 
   const handleAttachmentFile = useCallback(async (event) => {
     const file = event.target.files?.[0];
@@ -2338,12 +2496,16 @@ function App() {
         setPermissionError('Não foi possível guardar o arquivo neste computador. Verifique o espaço disponível.');
         return;
       }
-      if (activeContactIdRef.current) await publishDirectMessage({ attachment });
-      else publishMessage({ attachment });
+      if (activeContactIdRef.current) {
+        await publishDirectMessage({ attachment });
+      } else {
+        publishMessage({ attachment });
+      }
+      scrollMessageListToBottom('smooth');
     } catch (error) {
       setPermissionError(error?.message === 'image-too-large' ? 'Esse arquivo ficou grande demais para enviar pela conexão P2P.' : 'Não foi possível preparar esse arquivo.');
     }
-  }, [publishDirectMessage, publishMessage]);
+  }, [publishDirectMessage, publishMessage, scrollMessageListToBottom]);
 
   const saveProfile = useCallback((event) => {
     event?.preventDefault();
@@ -2600,6 +2762,21 @@ function App() {
   const isDirectChat = Boolean(activeContactId && directPeer);
   const hasActiveRoom = Boolean(roomId);
   const visibleMessages = isDirectChat ? directMessages : messages;
+  const visibleMessageContext = isDirectChat ? `direct:${directConversationRef.current}` : `room:${roomId}`;
+  useEffect(() => {
+    const contextChanged = messageListContextRef.current !== visibleMessageContext;
+    if (contextChanged) {
+      messageListContextRef.current = visibleMessageContext;
+      messageListStickToBottomRef.current = true;
+    }
+    if (!messageListStickToBottomRef.current) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const list = messageListRef.current;
+      if (!list || !messageListStickToBottomRef.current) return;
+      list.scrollTop = list.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [isDirectChat, visibleMessageContext, visibleMessages.length]);
   const directoryRooms = useMemo(() => {
     if (!roomId) return rooms;
     if (rooms.some((room) => room.id === roomId)) return rooms;
@@ -2667,7 +2844,7 @@ function App() {
                           const muted = Boolean(callState.muted);
                           return (
                             <div className="voice-member" key={person.peerId}>
-                              <Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xs" src={person.avatar} alt={person.name} live />
+                              <Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xs" src={person.avatar} alt={person.name} live speaking={Boolean(speakingPeers[person.self ? 'self' : person.peerId])} />
                               <span><strong>{person.self ? `${person.name} (você)` : person.name}</strong><small>{muted ? 'mutado' : 'conectado'}</small></span>
                               <span className="voice-member-status" aria-label="Estados da chamada">
                                 {muted && <MicOff size={13} className="voice-member-mic is-muted" />}
@@ -2742,17 +2919,18 @@ function App() {
                         ? (isSharing ? screenStreamRef.current : isCameraOn ? cameraStreamRef.current : null)
                         : remoteStreams[person.peerId]?.stream;
                       const hasVideo = Boolean(personStream?.getVideoTracks?.().some((track) => track.readyState !== 'ended'));
+                      const personIsSpeaking = Boolean(speakingPeers[person.self ? 'self' : person.peerId]);
                       const personLabel = person.self ? `${person.name} (você)` : person.name;
                       const stateLabel = person.self
                         ? (isSharing ? 'compartilhando a tela' : isCameraOn ? 'câmera ativa' : 'no palco')
                         : 'em chamada';
                       return (
                         <article className={`call-stream-card ${person.self ? 'is-self' : ''}`} key={person.peerId}>
-                          <div className="call-stream-viewport">
+                          <div className={`call-stream-viewport ${hasVideo && personIsSpeaking ? 'is-speaking' : ''}`}>
                             {hasVideo ? (
                               <MediaElement stream={personStream} muted={person.self || isDeafened} sinkId={selectedAudioOutputId} className="call-stream-media" />
                             ) : (
-                              <Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xl" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} />
+                              <Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xl" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} speaking={personIsSpeaking} />
                             )}
                           </div>
                           <div className="call-stream-caption"><strong>{personLabel}</strong><small>{stateLabel}</small></div>
@@ -2853,7 +3031,7 @@ function App() {
                     </div>
                   </div>
                 )}
-                <div className="message-list">
+                <div className="message-list" ref={messageListRef} onScroll={updateMessageListStickiness}>
                   {visibleMessages.length === 0 ? (isDirectChat ? <div className="empty-chat direct-empty-chat"><MessageCircle size={18} /><strong>Nenhuma mensagem ainda.</strong></div> : <div className="empty-chat"><MessageCircle size={18} /><strong>Nenhuma mensagem ainda.</strong><span>Seja a primeira pessoa a escrever nesta sala.</span></div>) : visibleMessages.map((message, index) => {
                     const previousMessage = visibleMessages[index - 1];
                     const currentSender = message.senderId || message.senderName;
