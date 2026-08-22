@@ -771,20 +771,24 @@ function MediaElement({ stream, muted = false, sinkId = '', className = '' }) {
     if (!mediaRef.current || !stream) return;
     const media = mediaRef.current;
     media.srcObject = stream;
+    media.muted = Boolean(muted);
+    media.volume = muted ? 0 : 1;
     if (sinkId && typeof media.setSinkId === 'function') media.setSinkId(sinkId).catch(() => {});
-    media.play?.().catch(() => {});
-  }, [stream, hasVideo, sinkId]);
+    const play = () => media.play?.().catch(() => {});
+    media.addEventListener('loadedmetadata', play);
+    play();
+    return () => media.removeEventListener('loadedmetadata', play);
+  }, [stream, hasVideo, muted, sinkId]);
 
   if (!stream) return null;
-  return (
-    <video
-      ref={mediaRef}
-      className={`${className} ${hasVideo ? 'media-visible' : 'media-audio-only'}`}
-      autoPlay
-      playsInline
-      muted={muted}
-    />
-  );
+  const props = {
+    ref: mediaRef,
+    className: `${className} ${hasVideo ? 'media-visible' : 'media-audio-only'}`,
+    autoPlay: true,
+    playsInline: true,
+    muted,
+  };
+  return hasVideo ? <video {...props} /> : <audio {...props} />;
 }
 
 function MessageAttachment({ message }) {
@@ -1601,17 +1605,58 @@ function App() {
 
   const makeOffer = useCallback(async (peerId) => {
     const slot = peerConnectionsRef.current.get(peerId);
-    if (!slot || slot.pc.signalingState !== 'stable') return;
+    if (!slot) return false;
+    if (slot.makingOffer) return false;
+    if (slot.pc.signalingState !== 'stable') {
+      slot.needsNegotiation = true;
+      return false;
+    }
+    slot.makingOffer = true;
+    slot.needsNegotiation = false;
     try {
       const offer = await slot.pc.createOffer();
       await slot.pc.setLocalDescription(offer);
       sendSignal({ type: 'signal', target: peerId, data: { type: 'offer', sdp: slot.pc.localDescription } });
+      return true;
     } catch {
+      slot.needsNegotiation = true;
       setPermissionError('Não foi possível iniciar esta conexão P2P.');
+      return false;
+    } finally {
+      slot.makingOffer = false;
     }
   }, [sendSignal]);
 
   makeOfferRef.current = makeOffer;
+
+  const requestPeerNegotiation = useCallback((peerId) => {
+    const slot = peerConnectionsRef.current.get(peerId);
+    if (!slot) return;
+    slot.needsNegotiation = true;
+    if (slot.pc.signalingState !== 'stable' || slot.makingOffer) return;
+    window.setTimeout(() => {
+      const current = peerConnectionsRef.current.get(peerId);
+      if (!current || current.pc !== slot.pc || current.pc.signalingState !== 'stable' || current.makingOffer) return;
+      void makeOffer(peerId);
+    }, 0);
+  }, [makeOffer]);
+
+  const replacePeerTrack = useCallback(async (senderKey, track) => {
+    const entries = [...peerConnectionsRef.current.entries()];
+    const failed = [];
+    await Promise.all(entries.map(async ([peerId, slot]) => {
+      const sender = slot?.[senderKey];
+      if (!sender || ['closed', 'failed'].includes(slot.pc.connectionState)) return;
+      try {
+        await sender.replaceTrack(track || null);
+        requestPeerNegotiation(peerId);
+      } catch {
+        failed.push(peerId);
+      }
+    }));
+    if (failed.length) setPermissionError('A mídia não pôde ser anexada a um dos participantes. Tente entrar na chamada novamente.');
+    return failed.length === 0;
+  }, [requestPeerNegotiation]);
 
   const createPeerConnection = useCallback((peerId, initiator = false) => {
     const existing = peerConnectionsRef.current.get(peerId);
@@ -1620,7 +1665,19 @@ function App() {
     const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
     const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
     const videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
-    const slot = { pc, audioSender: audioTransceiver.sender, videoSender: videoTransceiver.sender, dataChannel: null };
+    const slot = {
+      pc,
+      audioSender: audioTransceiver.sender,
+      videoSender: videoTransceiver.sender,
+      dataChannel: null,
+      makingOffer: false,
+      needsNegotiation: false,
+      // One side is polite during an offer collision. The deterministic
+      // choice prevents both peers from keeping a stale local offer when
+      // they enter the call at nearly the same time.
+      polite: String(peerIdRef.current).localeCompare(String(peerId)) > 0,
+      ignoreOffer: false,
+    };
     peerConnectionsRef.current.set(peerId, slot);
 
     pc.onicecandidate = (event) => {
@@ -1628,10 +1685,17 @@ function App() {
     };
 
     pc.ontrack = (event) => {
-      const incoming = event.streams?.[0] || remoteStreamsRef.current.get(peerId) || new MediaStream();
-      if (!event.streams?.[0] && !incoming.getTracks().includes(event.track)) incoming.addTrack(event.track);
+      // Keep one stable stream per peer. Browsers are allowed to provide a
+      // different event.streams[0] for audio and video; replacing the stream
+      // here can make the second track disappear from the renderer.
+      const incoming = remoteStreamsRef.current.get(peerId) || new MediaStream();
+      const tracks = event.streams?.[0]?.getTracks?.() || [];
+      [...tracks, event.track].forEach((track) => {
+        if (track && !incoming.getTracks().includes(track)) incoming.addTrack(track);
+      });
       event.track.addEventListener('ended', () => {
-        const currentStream = remoteStreamsRef.current.get(peerId)?.getTracks?.() || [];
+        if (incoming.getTracks().includes(event.track)) incoming.removeTrack(event.track);
+        const currentStream = incoming.getTracks();
         if (!currentStream.length || currentStream.every((track) => track.readyState === 'ended')) clearRemoteCallMedia(peerId);
       }, { once: true });
       remoteStreamsRef.current.set(peerId, incoming);
@@ -1642,11 +1706,21 @@ function App() {
       if (['failed', 'closed'].includes(pc.connectionState) && peerConnectionsRef.current.get(peerId)?.pc === pc) closePeer(peerId);
     };
 
+    pc.onsignalingstatechange = () => {
+      if (pc.signalingState === 'stable' && slot.needsNegotiation && !slot.makingOffer) {
+        window.setTimeout(() => {
+          const current = peerConnectionsRef.current.get(peerId);
+          if (!current || current.pc !== pc || current.pc.signalingState !== 'stable' || current.makingOffer) return;
+          void makeOfferRef.current?.(peerId);
+        }, 0);
+      }
+    };
+
     pc.ondatachannel = (event) => attachDataChannel(peerId, event.channel);
 
-    if (audioStreamRef.current?.getAudioTracks()[0]) slot.audioSender.replaceTrack(audioStreamRef.current.getAudioTracks()[0]);
-    if (cameraStreamRef.current?.getVideoTracks()[0]) slot.videoSender.replaceTrack(cameraStreamRef.current.getVideoTracks()[0]);
-    if (screenStreamRef.current?.getVideoTracks()[0]) slot.videoSender.replaceTrack(screenStreamRef.current.getVideoTracks()[0]);
+    if (audioStreamRef.current?.getAudioTracks()[0]) void slot.audioSender.replaceTrack(audioStreamRef.current.getAudioTracks()[0]);
+    if (cameraStreamRef.current?.getVideoTracks()[0]) void slot.videoSender.replaceTrack(cameraStreamRef.current.getVideoTracks()[0]);
+    if (screenStreamRef.current?.getVideoTracks()[0]) void slot.videoSender.replaceTrack(screenStreamRef.current.getVideoTracks()[0]);
     if (initiator) attachDataChannel(peerId, pc.createDataChannel('room-data', { ordered: true }));
     if (initiator) window.setTimeout(() => makeOfferRef.current?.(peerId), 80);
     return slot;
@@ -1793,6 +1867,12 @@ function App() {
     const slot = createPeerConnection(from, false);
     try {
       if (data.type === 'offer') {
+        const offerCollision = slot.makingOffer || slot.pc.signalingState !== 'stable';
+        slot.ignoreOffer = !slot.polite && offerCollision;
+        if (slot.ignoreOffer) return;
+        if (offerCollision && slot.polite && slot.pc.signalingState === 'have-local-offer') {
+          await slot.pc.setLocalDescription({ type: 'rollback' });
+        }
         await slot.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
         const pending = pendingCandidatesRef.current.get(from) || [];
         await Promise.all(pending.map((candidate) => slot.pc.addIceCandidate(candidate)));
@@ -1806,6 +1886,7 @@ function App() {
         await Promise.all(pending.map((candidate) => slot.pc.addIceCandidate(candidate)));
         pendingCandidatesRef.current.delete(from);
       } else if (data.type === 'candidate') {
+        if (slot.ignoreOffer) return;
         if (slot.pc.remoteDescription) await slot.pc.addIceCandidate(data.candidate);
         else pendingCandidatesRef.current.set(from, [...(pendingCandidatesRef.current.get(from) || []), data.candidate]);
       }
@@ -1920,7 +2001,7 @@ function App() {
       if (!track) throw new Error('no-audio-track');
       audioStreamRef.current = stream;
       track.enabled = !isMutedRef.current;
-      peerConnectionsRef.current.forEach(({ audioSender }) => audioSender.replaceTrack(track));
+      await replacePeerTrack('audioSender', track);
       inCallRef.current = true;
       callStartedAtRef.current = Date.now();
       setCallDurationSeconds(0);
@@ -1933,7 +2014,7 @@ function App() {
       setPermissionError(mediaErrorMessage(error, 'Permita o microfone para entrar na chamada.'));
       return false;
     }
-  }, [announceCallState, refreshAudioDevices]);
+  }, [announceCallState, refreshAudioDevices, replacePeerTrack]);
 
   const switchAudioInput = useCallback(async (deviceId) => {
     if (!inCallRef.current) return true;
@@ -1944,7 +2025,7 @@ function App() {
       track.enabled = !isMutedRef.current;
       const previousStream = audioStreamRef.current;
       audioStreamRef.current = stream;
-      await Promise.allSettled([...peerConnectionsRef.current.values()].map(({ audioSender }) => audioSender.replaceTrack(track)));
+      await replacePeerTrack('audioSender', track);
       previousStream?.getTracks().forEach((oldTrack) => oldTrack.stop());
       void refreshAudioDevices();
       setPermissionError('');
@@ -1953,7 +2034,7 @@ function App() {
       setPermissionError(mediaErrorMessage(error, 'Não foi possível trocar o microfone.'));
       return false;
     }
-  }, [refreshAudioDevices]);
+  }, [refreshAudioDevices, replacePeerTrack]);
 
   const leaveCall = useCallback(() => {
     audioStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -1962,10 +2043,8 @@ function App() {
     audioStreamRef.current = null;
     cameraStreamRef.current = null;
     screenStreamRef.current = null;
-    peerConnectionsRef.current.forEach(({ audioSender, videoSender }) => {
-      audioSender.replaceTrack(null);
-      videoSender.replaceTrack(null);
-    });
+    void replacePeerTrack('audioSender', null);
+    void replacePeerTrack('videoSender', null);
     inCallRef.current = false;
     isMutedRef.current = false;
     isDeafenedRef.current = false;
@@ -1976,7 +2055,7 @@ function App() {
     setIsMuted(false);
     setIsDeafened(false);
     setCallPanelOpen(false);
-  }, [announceCallState]);
+  }, [announceCallState, replacePeerTrack]);
 
   const joinRoom = useCallback((nextRoomId, nextRoomName = '', nextRoomPassword = '') => {
     const normalizedId = slugify(nextRoomId);
@@ -2054,7 +2133,7 @@ function App() {
     if (cameraStreamRef.current) {
       cameraStreamRef.current.getTracks().forEach((track) => track.stop());
       cameraStreamRef.current = null;
-      peerConnectionsRef.current.forEach(({ videoSender }) => videoSender.replaceTrack(null));
+      await replacePeerTrack('videoSender', null);
       setIsCameraOn(false);
       announceCallState({ camera: false });
       return;
@@ -2063,13 +2142,13 @@ function App() {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
       cameraStreamRef.current = stream;
       const track = stream.getVideoTracks()[0];
-      peerConnectionsRef.current.forEach(({ videoSender }) => videoSender.replaceTrack(track));
+      await replacePeerTrack('videoSender', track);
       setIsCameraOn(true);
       announceCallState({ camera: true });
     } catch (error) {
       setPermissionError(mediaErrorMessage(error, 'Permita a câmera para ligar seu vídeo.'));
     }
-  }, [announceCallState, startCall]);
+  }, [announceCallState, replacePeerTrack, startCall]);
 
   const stopScreenShare = useCallback(() => {
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -2078,10 +2157,10 @@ function App() {
     setScreenShareSources([]);
     setScreenShareSourcesLoading(false);
     const fallbackTrack = cameraStreamRef.current?.getVideoTracks()[0] || null;
-    peerConnectionsRef.current.forEach(({ videoSender }) => videoSender.replaceTrack(fallbackTrack));
+    void replacePeerTrack('videoSender', fallbackTrack);
     setIsSharing(false);
     announceCallState({ sharing: false });
-  }, [announceCallState]);
+  }, [announceCallState, replacePeerTrack]);
 
   const startScreenShare = useCallback(async (source = null) => {
     const desktopCapture = source?.id && globalThis.jumpDesktop?.isDesktop;
@@ -2115,7 +2194,7 @@ function App() {
       const track = stream.getVideoTracks()[0];
       if (!track) throw new Error('no-screen-track');
       screenStreamRef.current = stream;
-      peerConnectionsRef.current.forEach(({ videoSender }) => videoSender.replaceTrack(track));
+      await replacePeerTrack('videoSender', track);
       track.onended = stopScreenShare;
       setIsSharing(true);
       announceCallState({ sharing: true });
@@ -2125,7 +2204,7 @@ function App() {
       setPermissionError(mediaErrorMessage(error, 'Não foi possível iniciar o compartilhamento de tela.'));
       return false;
     }
-  }, [announceCallState, stopScreenShare]);
+  }, [announceCallState, replacePeerTrack, stopScreenShare]);
 
   const selectScreenShareSource = useCallback((source) => {
     void startScreenShare(source);
@@ -2484,10 +2563,6 @@ function App() {
     { peerId: 'self', name: displayName, avatar: profileAvatar, self: true },
     ...peers,
   ], [displayName, peers, profileAvatar]);
-  const remoteEntries = useMemo(
-    () => Object.entries(remoteStreams).filter(([peerId]) => remoteCallStates[peerId]?.inCall === true),
-    [remoteCallStates, remoteStreams],
-  );
   const activeCallParticipants = useMemo(() => participants.filter((person) => person.self ? inCall : remoteCallStates[person.peerId]?.inCall === true), [inCall, participants, remoteCallStates]);
   const hasActiveCall = Boolean(inCall || Object.values(remoteCallStates).some((state) => state.inCall === true));
   const chatVisible = !callPanelOpen || chatPanelOpen;
@@ -2694,9 +2769,6 @@ function App() {
                       </div>
                     )}
                   </div>
-                </div>
-                <div className="remote-audio-streams" aria-hidden="true">
-                  {remoteEntries.filter(([, value]) => !value.stream?.getVideoTracks?.().length).map(([peerId, value]) => <MediaElement key={peerId} stream={value.stream} muted={isDeafened} sinkId={selectedAudioOutputId} className="remote-audio-element" />)}
                 </div>
                 <div className="stage-controls">
                   <div className="stage-control-hint">{inCall ? 'mídia P2P ativa' : 'entre na sala para habilitar áudio e tela'}</div>
