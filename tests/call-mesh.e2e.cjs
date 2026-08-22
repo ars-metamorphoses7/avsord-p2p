@@ -109,6 +109,7 @@ async function run() {
   session.defaultSession.setPermissionCheckHandler(() => true);
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(true));
   ipcMain.handle('window:state', () => ({ maximized: false }));
+  ipcMain.handle('update:state', () => ({ status: 'dev', revision: 0 }));
   ipcMain.handle('desktop:sources', async () => {
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],

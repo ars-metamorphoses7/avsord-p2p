@@ -1192,7 +1192,14 @@ function App() {
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [screenSharePickerOpen]);
   useEffect(() => {
-    const unsubscribe = globalThis.jumpDesktop?.onUpdateState((state) => setUpdateState(state));
+    const applyUpdateState = (nextState) => setUpdateState((current) => {
+      if (!nextState?.status) return current;
+      if ((nextState.revision || 0) < (current.revision || 0)) return current;
+      return { ...current, ...nextState };
+    });
+    const desktop = globalThis.jumpDesktop;
+    const unsubscribe = desktop?.onUpdateState(applyUpdateState);
+    desktop?.getUpdateState?.().then(applyUpdateState).catch(() => {});
     return () => unsubscribe?.();
   }, []);
   useEffect(() => {
@@ -2629,18 +2636,14 @@ function App() {
     try {
       let result;
       if (updateState.status === 'available') {
-        setUpdateState((current) => ({ ...current, status: 'downloading', percent: 0 }));
         result = await desktop.downloadUpdate();
       } else if (updateState.status === 'downloaded') {
         result = await desktop.installUpdate();
       } else {
-        // O evento do autoUpdater pode levar alguns instantes; o estado
-        // otimista garante que a janela mostre a busca imediatamente.
-        setUpdateState({ status: 'checking' });
         result = await desktop.checkForUpdates();
       }
-      if (result?.status && result.status !== 'checking') {
-        setUpdateState((current) => ({ ...current, ...result }));
+      if (result?.status) {
+        setUpdateState((current) => (result.revision || 0) < (current.revision || 0) ? current : { ...current, ...result });
       }
     } catch (error) {
       setUpdateState({ status: 'error', message: error?.message || 'Não foi possível consultar atualizações.' });
@@ -2650,13 +2653,15 @@ function App() {
   const isDesktop = Boolean(globalThis.jumpDesktop?.isDesktop);
   const isOfficialDesktopBuild = isDesktop && globalThis.jumpDesktop?.isPackaged === true;
   const isDevelopmentDesktopBuild = isDesktop && !isOfficialDesktopBuild;
-  const updateBusy = ['checking', 'downloading'].includes(updateState.status);
+  const updateBusy = ['checking', 'downloading', 'installing'].includes(updateState.status);
   const updateDialogHeading = isDevelopmentDesktopBuild || updateState.status === 'dev'
     ? 'versão de desenvolvimento'
     : updateState.status === 'checking'
     ? 'procurando atualizações...'
     : updateState.status === 'downloading'
       ? `baixando atualização ${updateState.percent || 0}%`
+      : updateState.status === 'installing'
+        ? 'instalando atualização...'
       : updateState.status === 'available'
         ? 'atualização encontrada'
         : updateState.status === 'downloaded'
@@ -2674,6 +2679,8 @@ function App() {
     ? 'consultando o servidor de atualizações'
     : updateState.status === 'downloading'
       ? 'aguarde enquanto o pacote é baixado'
+      : updateState.status === 'installing'
+        ? 'o JUMP será fechado e reaberto automaticamente'
       : updateState.message || (updateState.status === 'available'
         ? `versão ${updateState.version || 'nova'} disponível`
         : updateState.status === 'downloaded'
@@ -2692,6 +2699,8 @@ function App() {
       ? 'reiniciar e atualizar'
       : updateState.status === 'downloading'
         ? `baixando ${updateState.percent || 0}%`
+        : updateState.status === 'installing'
+          ? 'instalando'
         : updateState.status === 'checking'
           ? 'verificando'
           : updateState.status === 'not-available'

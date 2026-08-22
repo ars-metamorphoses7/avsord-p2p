@@ -3,16 +3,13 @@ const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { autoUpdater } = require('electron-updater');
+const { createUpdateController } = require('./update-controller.cjs');
 
 let mainWindow;
 let signalingServer;
 let signalingPort = Number(process.env.PORT || 8787);
 let pendingDeepLink = process.argv.find((argument) => argument.startsWith('jump://')) || '';
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
-
-function publishUpdateState(state) {
-  mainWindow?.webContents.send('update:state', state);
-}
 
 function publishWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -106,55 +103,22 @@ function setupUpdater() {
     return `jump://join?signal=${encodeURIComponent(signal)}&room=${encodeURIComponent(String(roomId || 'jump-house'))}`;
   });
 
-  ipcMain.handle('update:check', async () => {
-    if (!app.isPackaged) {
-      publishUpdateState({ status: 'dev', message: 'Atualizações só funcionam no aplicativo empacotado.' });
-      return { status: 'dev' };
-    }
-    try {
-      await autoUpdater.checkForUpdates();
-      return { status: 'checking' };
-    } catch (error) {
-      publishUpdateState({ status: 'error', message: error.message });
-      return { status: 'error', message: error.message };
-    }
-  });
-
-  ipcMain.handle('update:download', async () => {
-    if (!app.isPackaged) return { status: 'dev' };
-    try {
-      await autoUpdater.downloadUpdate();
-      return { status: 'downloading' };
-    } catch (error) {
-      publishUpdateState({ status: 'error', message: error.message });
-      return { status: 'error', message: error.message };
-    }
-  });
-
-  ipcMain.handle('update:install', () => {
-    if (!app.isPackaged) return { status: 'dev' };
-    autoUpdater.quitAndInstall(false, true);
-    return { status: 'installing' };
-  });
-
-  if (!app.isPackaged) return;
-
   autoUpdater.autoDownload = false;
   // A instalação é disparada pelo botão da interface. Isso evita que um
   // pacote Linux peça autenticação inesperadamente ao fechar o aplicativo.
   autoUpdater.autoInstallOnAppQuit = false;
-  autoUpdater.on('checking-for-update', () => publishUpdateState({ status: 'checking' }));
-  // electron-updater v6 emits the update info as the first (and only)
-  // argument. Treat it defensively so an updater event can never crash the
-  // IPC request or leave the renderer with an opaque TypeError.
-  autoUpdater.on('update-available', (info) => publishUpdateState({ status: 'available', version: info?.version || '' }));
-  autoUpdater.on('update-not-available', () => publishUpdateState({ status: 'not-available' }));
-  autoUpdater.on('download-progress', (progress) => publishUpdateState({ status: 'downloading', percent: Math.round(progress.percent) }));
-  // v6 emits a single UpdateDownloadedEvent containing the version and the
-  // downloaded file path (the old multi-argument signature is obsolete).
-  autoUpdater.on('update-downloaded', (info) => publishUpdateState({ status: 'downloaded', version: info?.version || '', url: info?.downloadedFile || '' }));
-  autoUpdater.on('error', (error) => publishUpdateState({ status: 'error', message: error.message }));
-
+  const controller = createUpdateController({
+    autoUpdater,
+    isPackaged: app.isPackaged,
+    sendState: (state) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.send('update:state', state);
+    },
+  });
+  ipcMain.handle('update:state', () => controller.getState());
+  ipcMain.handle('update:check', () => controller.check());
+  ipcMain.handle('update:download', () => controller.download());
+  ipcMain.handle('update:install', () => controller.install());
 }
 
 async function startSignalingServer() {

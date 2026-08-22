@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('jumpDesktop', {
     return () => ipcRenderer.removeListener('window:state', listener);
   },
   getInviteUrl: (roomId) => ipcRenderer.invoke('invite:url', roomId),
+  getUpdateState: () => ipcRenderer.invoke('update:state'),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
