@@ -1718,7 +1718,55 @@ function App() {
         setRoomInfoOpen(false);
         setEditingRoomName(false);
         setPermissionError(`A sala "${message.name || roomNameRef.current}" foi excluída.`);
-        setPendingRoomFallback(remainingRooms[0] || { id: DEFAULT_ROOM_ID, name: prettyRoomName(DEFAULT_ROOM_ID), protected: false });
+        if (remainingRooms.length) {
+          setPendingRoomFallback(remainingRooms[0]);
+        } else {
+          // Não recrie automaticamente o jump-house: a exclusão da última
+          // sala deve deixar o diretório vazio até o usuário criar outra.
+          peerConnectionsRef.current.forEach(({ pc }) => pc.close());
+          peerConnectionsRef.current.clear();
+          pendingCandidatesRef.current.clear();
+          dataChunksRef.current.clear();
+          remoteStreamsRef.current.clear();
+          setRemoteStreams({});
+          setRemoteCallStates({});
+          audioStreamRef.current?.getTracks().forEach((track) => track.stop());
+          cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+          screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+          audioStreamRef.current = null;
+          cameraStreamRef.current = null;
+          screenStreamRef.current = null;
+          inCallRef.current = false;
+          isMutedRef.current = false;
+          isDeafenedRef.current = false;
+          setInCall(false);
+          setIsCameraOn(false);
+          setIsSharing(false);
+          setIsMuted(false);
+          setIsDeafened(false);
+          setCallDurationSeconds(0);
+          setPeers([]);
+          activeContactIdRef.current = '';
+          directPeerIdRef.current = '';
+          directConversationRef.current = '';
+          directMessagesRef.current = [];
+          setActiveContactId('');
+          setDirectPeerId('');
+          setDirectMessages([]);
+          messagesRef.current = [];
+          setMessages([]);
+          roomIdRef.current = '';
+          roomNameRef.current = 'Nenhuma sala';
+          roomPasswordRef.current = '';
+          setRoomId('');
+          setRoomName('Nenhuma sala');
+          setRoomNameDraft('');
+          setRoomProtected(false);
+          setRoomCreatedAt(0);
+          setCallPanelOpen(false);
+          window.history.replaceState({}, '', window.location.pathname);
+          setPendingRoomFallback(null);
+        }
       }
       return;
     }
@@ -1794,7 +1842,7 @@ function App() {
         wsRef.current = socket;
         socket.onopen = () => {
           setSignalStatus('connected');
-          sendSignal({ type: 'join', roomId: roomIdRef.current, roomName: roomNameRef.current, password: roomPasswordRef.current, name: displayNameRef.current, avatar: profileAvatarRef.current, status: profileStatusRef.current, clientId: clientIdRef.current });
+          if (roomIdRef.current) sendSignal({ type: 'join', roomId: roomIdRef.current, roomName: roomNameRef.current, password: roomPasswordRef.current, name: displayNameRef.current, avatar: profileAvatarRef.current, status: profileStatusRef.current, clientId: clientIdRef.current });
         };
         socket.onmessage = (event) => {
           try { handleSignalMessage(JSON.parse(event.data)); } catch { /* Ignore malformed packets. */ }
@@ -2112,6 +2160,7 @@ function App() {
   }, [startCall, startScreenShare, stopScreenShare]);
 
   const publishMessage = useCallback((payload) => {
+    if (!roomIdRef.current) return;
     const text = String(payload?.text || '').trim();
     if (!text && !payload?.image && !payload?.attachment) return;
     mergeMessages([{
@@ -2173,6 +2222,10 @@ function App() {
     event.preventDefault();
     const cleanDraft = draft.trim();
     if (!cleanDraft) return;
+    if (!activeContactIdRef.current && !roomIdRef.current) {
+      setPermissionError('Crie ou selecione uma sala antes de enviar mensagens.');
+      return;
+    }
     if (activeContactIdRef.current) void publishDirectMessage({ text: cleanDraft });
     else publishMessage({ text: cleanDraft });
     setDraft('');
@@ -2182,6 +2235,10 @@ function App() {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
+    if (!activeContactIdRef.current && !roomIdRef.current) {
+      setPermissionError('Crie ou selecione uma sala antes de enviar arquivos.');
+      return;
+    }
     if (file.size > MAX_ATTACHMENT_SIZE) {
       setPermissionError(`Escolha um arquivo de até ${formatFileSize(MAX_ATTACHMENT_SIZE)}.`);
       return;
@@ -2466,8 +2523,10 @@ function App() {
   }, [contacts, peers]);
   const directPeer = directoryFriends.find((peer) => peer.id === activeContactId) || null;
   const isDirectChat = Boolean(activeContactId && directPeer);
+  const hasActiveRoom = Boolean(roomId);
   const visibleMessages = isDirectChat ? directMessages : messages;
   const directoryRooms = useMemo(() => {
+    if (!roomId) return rooms;
     if (rooms.some((room) => room.id === roomId)) return rooms;
     return [{ id: roomId, name: roomName, count: peerCount, protected: roomProtected }, ...rooms];
   }, [peerCount, roomId, roomName, roomProtected, rooms]);
@@ -2750,7 +2809,7 @@ function App() {
                   })}
                 </div>
                 <input ref={imageInputRef} className="hidden-file-input" type="file" accept="*/*" onChange={handleAttachmentFile} />
-                <form className="message-composer" onSubmit={sendMessage}><button type="button" className="composer-add" aria-label="Enviar arquivo" title="Enviar arquivo" onClick={() => imageInputRef.current?.click()}><Paperclip size={18} /></button><span className="composer-prompt" aria-hidden="true">$</span><div className="composer-input-shell"><input ref={composerInputRef} value={draft} onChange={(event) => { setDraft(event.target.value); window.requestAnimationFrame(updateComposerCursor); }} onSelect={updateComposerCursor} onClick={updateComposerCursor} onKeyUp={updateComposerCursor} placeholder={isDirectChat ? `escreva para ${directPeer.name}` : 'escreva para esta sala'} /> <span className="composer-cursor" aria-hidden="true" style={{ left: `${composerCursorLeft}px` }} /></div><button type="submit" className="composer-send" aria-label="Enviar mensagem"><WinIcon name="send" size={25} /></button></form>
+                <form className="message-composer" onSubmit={sendMessage}><button type="button" className="composer-add" aria-label="Enviar arquivo" title="Enviar arquivo" disabled={!hasActiveRoom && !isDirectChat} onClick={() => imageInputRef.current?.click()}><Paperclip size={18} /></button><span className="composer-prompt" aria-hidden="true">$</span><div className="composer-input-shell"><input ref={composerInputRef} value={draft} disabled={!hasActiveRoom && !isDirectChat} onChange={(event) => { setDraft(event.target.value); window.requestAnimationFrame(updateComposerCursor); }} onSelect={updateComposerCursor} onClick={updateComposerCursor} onKeyUp={updateComposerCursor} placeholder={isDirectChat ? `escreva para ${directPeer.name}` : hasActiveRoom ? 'escreva para esta sala' : 'crie ou selecione uma sala'} /> <span className="composer-cursor" aria-hidden="true" style={{ left: `${composerCursorLeft}px` }} /></div><button type="submit" className="composer-send" aria-label="Enviar mensagem" disabled={!hasActiveRoom && !isDirectChat}><WinIcon name="send" size={25} /></button></form>
               </section>}
             </div>
 
