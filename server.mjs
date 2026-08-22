@@ -1,14 +1,17 @@
 import http from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const distRoot = join(root, 'dist');
+const roomDataRoot = process.env.JUMP_DATA_DIR || join(root, '.jump-data');
+const roomDataFile = join(roomDataRoot, 'rooms.json');
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || '0.0.0.0';
+const DEFAULT_ROOM_ID = 'jump-house';
 const rooms = new Map();
 const sockets = new Set();
 const PRESENCE_STATUSES = new Set(['online', 'dnd', 'offline']);
@@ -63,6 +66,83 @@ function roomLabel(roomId) {
     .join(' ') || 'Sala sem nome';
 }
 
+function createDefaultRoom() {
+  return {
+    id: DEFAULT_ROOM_ID,
+    name: 'Jump House',
+    members: new Map(),
+    passwordHash: '',
+    createdAt: Date.now(),
+    createdBy: 'JUMP',
+  };
+}
+
+function persistedRoom(value) {
+  const id = cleanText(value?.id, 64).toLowerCase().replace(/[^a-z0-9-_]/g, '-');
+  if (!id) return null;
+  const createdAt = Number(value?.createdAt);
+  const password = typeof value?.passwordHash === 'string' && /^[a-f0-9]{64}$/i.test(value.passwordHash)
+    ? value.passwordHash.toLowerCase()
+    : '';
+  return {
+    id,
+    name: cleanText(value?.name, 48) || roomLabel(id),
+    members: new Map(),
+    passwordHash: password,
+    createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
+    createdBy: cleanText(value?.createdBy, 32) || 'JUMP',
+  };
+}
+
+function roomPersistenceData() {
+  return {
+    version: 1,
+    rooms: [...rooms.values()].map((room) => ({
+      id: room.id,
+      name: room.name,
+      passwordHash: room.passwordHash || '',
+      createdAt: room.createdAt,
+      createdBy: room.createdBy,
+    })),
+  };
+}
+
+function persistRooms() {
+  try {
+    mkdirSync(roomDataRoot, { recursive: true });
+    writeFileSync(roomDataFile, JSON.stringify(roomPersistenceData(), null, 2), 'utf8');
+  } catch (error) {
+    // A read-only data directory should not take down signaling for the
+    // current session, but the failure is visible to the host for diagnosis.
+    console.error(`JUMP could not persist rooms at ${roomDataFile}:`, error);
+  }
+}
+
+function ensureDefaultRoom() {
+  if (rooms.has(DEFAULT_ROOM_ID)) return false;
+  rooms.set(DEFAULT_ROOM_ID, createDefaultRoom());
+  return true;
+}
+
+function loadRooms() {
+  let savedRooms = [];
+  try {
+    if (existsSync(roomDataFile)) {
+      const saved = JSON.parse(readFileSync(roomDataFile, 'utf8'));
+      savedRooms = Array.isArray(saved) ? saved : saved?.rooms;
+      if (!Array.isArray(savedRooms)) savedRooms = [];
+    }
+  } catch (error) {
+    console.error(`JUMP could not load rooms from ${roomDataFile}:`, error);
+  }
+
+  savedRooms.map(persistedRoom).filter(Boolean).forEach((room) => {
+    if (!rooms.has(room.id)) rooms.set(room.id, room);
+  });
+  const addedDefault = ensureDefaultRoom();
+  if (addedDefault || savedRooms.length !== rooms.size) persistRooms();
+}
+
 function roomList() {
   return [...rooms.values()]
     .map((room) => ({
@@ -93,8 +173,7 @@ function leaveRoom(socket) {
   room.members.delete(socket.peerId);
   broadcast(room, { type: 'peer-left', roomId: room.id, peerId: socket.peerId, count: room.members.size });
   // Salas criadas continuam disponíveis no diretório mesmo quando ficam vazias.
-  // O processo de sinalização continua sendo a fonte de vida dessas salas;
-  // reiniciar o servidor ainda limpa o diretório em memória.
+  // Os membros são temporários, mas os metadados das salas ficam persistidos.
   socket.roomId = null;
   broadcastRooms();
 }
@@ -129,6 +208,8 @@ const server = http.createServer((request, response) => {
 });
 
 const wss = new WebSocketServer({ server, path: '/signal' });
+
+loadRooms();
 
 wss.on('connection', (socket) => {
   socket.peerId = randomUUID().slice(0, 8);
@@ -217,6 +298,7 @@ wss.on('connection', (socket) => {
       socket.joinedAt = Date.now();
       room.members.set(socket.peerId, socket);
       rooms.set(roomId, room);
+      persistRooms();
 
       send(socket, {
         type: 'room-state',
@@ -249,6 +331,7 @@ wss.on('connection', (socket) => {
       const name = cleanText(message.name, 48);
       if (!room || message.roomId !== room.id || !name) return;
       room.name = name;
+      persistRooms();
       broadcast(room, { type: 'room-renamed', roomId: room.id, name: room.name });
       send(socket, { type: 'room-renamed', roomId: room.id, name: room.name });
       broadcastRooms();
@@ -262,6 +345,10 @@ wss.on('connection', (socket) => {
       const roomName = room.name;
       const members = [...room.members.values()];
       rooms.delete(roomId);
+      // The default room is always available, even after the last custom room
+      // is deleted or someone removes Jump House itself.
+      ensureDefaultRoom();
+      persistRooms();
       const remainingRooms = roomList();
       members.forEach((member) => {
         member.roomId = null;

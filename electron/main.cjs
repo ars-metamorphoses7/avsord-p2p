@@ -124,6 +124,9 @@ function setupUpdater() {
 async function startSignalingServer() {
   process.env.PORT ||= String(signalingPort);
   process.env.HOST ||= '0.0.0.0';
+  // The packaged app is installed inside an asar archive, so room metadata
+  // must live in Electron's writable per-user data directory.
+  process.env.JUMP_DATA_DIR ||= app.getPath('userData');
   signalingPort = Number(process.env.PORT);
   const serverPath = path.join(app.getAppPath(), 'server.mjs');
   const module = await import(pathToFileURL(serverPath).href);
