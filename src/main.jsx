@@ -39,9 +39,12 @@ import winSend from './assets/win98/send.png';
 import winPencilEdit from './assets/win98/pencil-edit-64.png';
 import winAppIcon from './assets/win98/jump-app-icon.png';
 import winConnectionSprite from './assets/win98/connection-sprite.png';
+import { CallStreamCard } from './components/CallStreamCard.jsx';
 import { PaneResizeHandle } from './components/PaneResizeHandle.jsx';
+import { ParticipantVolumePopover } from './components/ParticipantVolumePopover.jsx';
 import { ScreenShareDialog } from './components/ScreenShareDialog.jsx';
 import { useScreenShare } from './hooks/useScreenShare.js';
+import { playTransmissionSound } from './media/callSounds.js';
 import { usePeerMesh } from './webrtc/usePeerMesh.js';
 
 const INITIAL_QUERY = new URLSearchParams(window.location.search);
@@ -781,34 +784,6 @@ function IconButton({ label, children, className = '', onClick, active = false, 
   );
 }
 
-function MediaElement({ stream, muted = false, sinkId = '', className = '', showVideo }) {
-  const mediaRef = useRef(null);
-  const hasVideo = showVideo ?? Boolean(stream?.getVideoTracks?.().length);
-
-  useEffect(() => {
-    if (!mediaRef.current || !stream) return;
-    const media = mediaRef.current;
-    media.srcObject = stream;
-    media.muted = Boolean(muted);
-    media.volume = muted ? 0 : 1;
-    if (sinkId && typeof media.setSinkId === 'function') media.setSinkId(sinkId).catch(() => {});
-    const play = () => media.play?.().catch(() => {});
-    media.addEventListener('loadedmetadata', play);
-    play();
-    return () => media.removeEventListener('loadedmetadata', play);
-  }, [stream, hasVideo, muted, sinkId]);
-
-  if (!stream) return null;
-  const props = {
-    ref: mediaRef,
-    className: `${className} ${hasVideo ? 'media-visible' : 'media-audio-only'}`,
-    autoPlay: true,
-    playsInline: true,
-    muted,
-  };
-  return hasVideo ? <video {...props} /> : <audio {...props} />;
-}
-
 function MessageAttachment({ message }) {
   const attachment = message?.attachment;
   const [objectUrl, setObjectUrl] = useState('');
@@ -954,6 +929,10 @@ function App() {
   const [remoteStreams, setRemoteStreams] = useState({});
   const [remoteCallStates, setRemoteCallStates] = useState({});
   const [speakingPeers, setSpeakingPeers] = useState({});
+  const [focusedCallPeerId, setFocusedCallPeerId] = useState('');
+  const [streamWatching, setStreamWatching] = useState({});
+  const [participantVolumes, setParticipantVolumes] = useState({});
+  const [volumePopover, setVolumePopover] = useState(null);
   const [permissionError, setPermissionError] = useState('');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [callPanelOpen, setCallPanelOpen] = useState(false);
@@ -978,6 +957,8 @@ function App() {
   const messageListContextRef = useRef('');
   const notificationAudioContextRef = useRef(null);
   const notificationSoundLastPlayedRef = useRef(0);
+  const transmissionSoundLastPlayedRef = useRef({});
+  const remoteSharingRef = useRef(new Map());
   const appStartedAtRef = useRef(Date.now());
   const logicalMessageClockRef = useRef(Number.parseInt(localStorage.getItem(MESSAGE_CLOCK_KEY) || '0', 10) || 0);
   const messagesRef = useRef(messages);
@@ -1015,6 +996,7 @@ function App() {
   const isDeafenedRef = useRef(isDeafened);
   const audioInputIdRef = useRef(selectedAudioInputId);
   const repairPeerMediaRef = useRef(null);
+  const setPeerScreenDeliveryRef = useRef(null);
 
   const updateComposerCursor = useCallback(() => {
     const input = composerInputRef.current;
@@ -1340,6 +1322,7 @@ function App() {
 
   const clearRemoteCallMedia = useCallback((peerId) => {
     remoteStreamsRef.current.delete(peerId);
+    remoteSharingRef.current.delete(peerId);
     [...dataChunksRef.current.keys()].filter((key) => key.startsWith(`${peerId}:`)).forEach((key) => dataChunksRef.current.delete(key));
     setRemoteStreams((current) => {
       if (!current[peerId]) return current;
@@ -1353,7 +1336,25 @@ function App() {
       delete next[peerId];
       return next;
     });
+    setStreamWatching((current) => {
+      if (!(peerId in current)) return current;
+      const next = { ...current };
+      delete next[peerId];
+      return next;
+    });
+    setFocusedCallPeerId((current) => current === peerId ? '' : current);
+    setVolumePopover((current) => current?.peerId === peerId ? null : current);
   }, []);
+
+  const playShareNotification = useCallback((type) => {
+    const now = Date.now();
+    const previous = transmissionSoundLastPlayedRef.current[type] || 0;
+    if (now - previous < 300) return;
+    transmissionSoundLastPlayedRef.current[type] = now;
+    playTransmissionSound(notificationAudioContextRef, type);
+  }, []);
+  const playLocalShareStarted = useCallback(() => playShareNotification('local-start'), [playShareNotification]);
+  const playLocalShareStopped = useCallback(() => playShareNotification('local-stop'), [playShareNotification]);
 
   const broadcastRoomData = useCallback((payload, exceptPeerId = '') => {
     peerConnectionsRef.current.forEach((slot, peerId) => {
@@ -1668,6 +1669,10 @@ function App() {
         }
         return;
       }
+      if (payload.type === 'stream-watch') {
+        void setPeerScreenDeliveryRef.current?.(peerId, payload.watching !== false);
+        return;
+      }
       if (payload.type === 'call-state') {
         const slot = peerConnectionsRef.current.get(peerId);
         const nextMediaState = {
@@ -1676,6 +1681,21 @@ function App() {
           sharing: Boolean(payload.sharing),
           sharingAudio: Boolean(payload.sharingAudio),
         };
+        const wasSharing = remoteSharingRef.current.get(peerId) === true;
+        if (nextMediaState.sharing) remoteSharingRef.current.set(peerId, true);
+        else remoteSharingRef.current.delete(peerId);
+        if (!wasSharing && nextMediaState.sharing) {
+          setStreamWatching((current) => ({ ...current, [peerId]: true }));
+          if (inCallRef.current) playShareNotification('remote-start');
+        } else if (wasSharing && !nextMediaState.sharing) {
+          setStreamWatching((current) => {
+            if (!(peerId in current)) return current;
+            const next = { ...current };
+            delete next[peerId];
+            return next;
+          });
+          if (inCallRef.current) playShareNotification('remote-stop');
+        }
         if (slot) slot.remoteMediaState = nextMediaState;
         if (nextMediaState.inCall) {
           const repairMissingMedia = (attempt = 0) => {
@@ -1764,7 +1784,7 @@ function App() {
       });
     };
     if (channel.readyState === 'open') requestSync();
-  }, [clearRemoteCallMedia, mergeDirectMessages, mergeMessages, requestAttachmentFromPeer, requestDirectSync, sendAttachmentToPeer]);
+  }, [clearRemoteCallMedia, mergeDirectMessages, mergeMessages, playShareNotification, requestAttachmentFromPeer, requestDirectSync, sendAttachmentToPeer]);
 
   const {
     closePeer,
@@ -1773,6 +1793,7 @@ function App() {
     handlePeerSignal,
     replacePeerTrack,
     requestPeerNegotiation,
+    setPeerScreenDelivery,
     setVideoEncodingProfile,
   } = usePeerMesh({
     peerConnectionsRef,
@@ -1781,6 +1802,7 @@ function App() {
     audioStreamRef: outboundAudioStreamRef,
     cameraStreamRef,
     screenStreamRef,
+    screenAudioSessionRef,
     videoProfileRef,
     remoteStreamsRef,
     sendSignal,
@@ -1790,6 +1812,7 @@ function App() {
     onPeerError: setPermissionError,
   });
   repairPeerMediaRef.current = requestPeerNegotiation;
+  setPeerScreenDeliveryRef.current = setPeerScreenDelivery;
 
   const handleSignalMessage = useCallback(async (message) => {
     if (message.type === 'hello') {
@@ -2035,10 +2058,10 @@ function App() {
   // only to an AnalyserNode (never to the destination), so it cannot create an
   // echo; it merely drives the small green speaking ring in the call UI.
   useEffect(() => {
-    const remoteEntries = Object.entries(remoteStreams).filter(([peerId, entry]) => (
+    const remoteEntries = Object.entries(remoteStreams).map(([peerId, entry]) => [peerId, { ...entry, voiceStream: entry?.microphoneStream || entry?.stream }]).filter(([peerId, entry]) => (
       remoteCallStates[peerId]?.inCall === true
       && remoteCallStates[peerId]?.muted !== true
-      && entry?.stream?.getAudioTracks?.().some((track) => track.readyState !== 'ended')
+      && entry?.voiceStream?.getAudioTracks?.().some((track) => track.readyState !== 'ended')
     ));
     const localStream = inCall && !isMuted ? audioStreamRef.current : null;
     if (!localStream && !remoteEntries.length) {
@@ -2069,7 +2092,7 @@ function App() {
       }
     };
     addMonitor('self', localStream);
-    remoteEntries.forEach(([peerId, entry]) => addMonitor(peerId, entry.stream));
+    remoteEntries.forEach(([peerId, entry]) => addMonitor(peerId, entry.voiceStream));
     if (!monitors.length) {
       void context.close().catch(() => {});
       return undefined;
@@ -2158,13 +2181,8 @@ function App() {
       track.enabled = !isMutedRef.current;
       const previousStream = audioStreamRef.current;
       audioStreamRef.current = stream;
-      const audioSession = screenAudioSessionRef.current;
-      if (audioSession?.mixer) {
-        audioSession.mixer.setMicrophoneStream(stream);
-      } else {
-        outboundAudioStreamRef.current = stream;
-      }
-      if (!audioSession && !(await replacePeerTrack('audioSender', track))) {
+      outboundAudioStreamRef.current = stream;
+      if (!(await replacePeerTrack('audioSender', track))) {
         audioStreamRef.current = previousStream;
         outboundAudioStreamRef.current = previousStream;
         stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
@@ -2181,10 +2199,13 @@ function App() {
   }, [refreshAudioDevices, replacePeerTrack]);
 
   const leaveCall = useCallback(() => {
+    const wasSharing = Boolean(screenStreamRef.current);
+    const previousScreenStream = screenStreamRef.current;
+    screenStreamRef.current = null;
     void screenAudioSessionRef.current?.stop();
     audioStreamRef.current?.getTracks().forEach((track) => track.stop());
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
-    screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+    previousScreenStream?.getTracks().forEach((track) => track.stop());
     audioStreamRef.current = null;
     outboundAudioStreamRef.current = null;
     screenAudioSessionRef.current = null;
@@ -2192,17 +2213,19 @@ function App() {
     screenStreamRef.current = null;
     void replacePeerTrack('audioSender', null);
     void replacePeerTrack('videoSender', null);
+    void replacePeerTrack('screenAudioSender', null);
     inCallRef.current = false;
     isMutedRef.current = false;
     isDeafenedRef.current = false;
-    announceCallState({ inCall: false, muted: false, deafened: false, camera: false, sharing: false });
+    announceCallState({ inCall: false, muted: false, deafened: false, camera: false, sharing: false, sharingAudio: false });
     setInCall(false);
     setIsCameraOn(false);
     setIsSharing(false);
     setIsMuted(false);
     setIsDeafened(false);
     setCallPanelOpen(false);
-  }, [announceCallState, replacePeerTrack]);
+    if (wasSharing) playLocalShareStopped();
+  }, [announceCallState, playLocalShareStopped, replacePeerTrack]);
 
   const joinRoom = useCallback((nextRoomId, nextRoomName = '', nextRoomPassword = '') => {
     const normalizedId = slugify(nextRoomId);
@@ -2212,7 +2235,11 @@ function App() {
     leaveCall();
     closeAllPeers();
     remoteStreamsRef.current.clear();
+    remoteSharingRef.current.clear();
     setRemoteCallStates({});
+    setStreamWatching({});
+    setFocusedCallPeerId('');
+    setVolumePopover(null);
     pendingCandidatesRef.current.clear();
     dataChunksRef.current.clear();
     setRemoteStreams({});
@@ -2335,10 +2362,10 @@ function App() {
     videoSource: screenShareVideoSource,
   } = useScreenShare({
     announceCallState,
-    audioStreamRef,
     cameraStreamRef,
     inCallRef,
-    outboundAudioStreamRef,
+    onShareStarted: playLocalShareStarted,
+    onShareStopped: playLocalShareStopped,
     replacePeerTrack,
     screenAudioSessionRef,
     screenStreamRef,
@@ -2349,6 +2376,34 @@ function App() {
     profileId: screenShareProfileId,
     setProfileId: updateScreenShareProfile,
   });
+
+  const changeStreamWatching = useCallback((peerId, watching) => {
+    const nextWatching = Boolean(watching);
+    const bundle = remoteStreams[peerId];
+    bundle?.videoStream?.getVideoTracks?.().forEach((track) => { track.enabled = nextWatching; });
+    bundle?.screenAudioStream?.getAudioTracks?.().forEach((track) => { track.enabled = nextWatching; });
+    setStreamWatching((current) => ({ ...current, [peerId]: nextWatching }));
+    const channel = peerConnectionsRef.current.get(peerId)?.dataChannel;
+    if (channel?.readyState === 'open') {
+      try { sendDataChannelPacket(channel, { type: 'stream-watch', roomId: roomIdRef.current, watching: nextWatching }); } catch { /* Local pause still saves decode work. */ }
+    }
+  }, [remoteStreams]);
+
+  const openParticipantVolumes = useCallback((event, person) => {
+    if (person.self) return;
+    event.preventDefault();
+    setVolumePopover({ peerId: person.peerId, name: person.name, x: event.clientX, y: event.clientY });
+  }, []);
+
+  const updateParticipantVolumes = useCallback((peerId, values) => {
+    setParticipantVolumes((current) => ({
+      ...current,
+      [peerId]: {
+        voice: Math.max(0, Math.min(200, Number(values.voice) || 0)),
+        stream: Math.max(0, Math.min(200, Number(values.stream) || 0)),
+      },
+    }));
+  }, []);
 
   const publishMessage = useCallback((payload) => {
     if (!roomIdRef.current) return;
@@ -2691,6 +2746,9 @@ function App() {
   const hasActiveCall = Boolean(inCall || Object.values(remoteCallStates).some((state) => state.inCall === true));
   const chatVisible = !callPanelOpen || chatPanelOpen;
   useEffect(() => {
+    if (focusedCallPeerId && !activeCallParticipants.some((person) => person.peerId === focusedCallPeerId)) setFocusedCallPeerId('');
+  }, [activeCallParticipants, focusedCallPeerId]);
+  useEffect(() => {
     if (!hasActiveCall) {
       callStartedAtRef.current = 0;
       setCallDurationSeconds(0);
@@ -2875,34 +2933,48 @@ function App() {
                   <div className="stage-title"><strong>{roomName} call {formatCallDuration(callDurationSeconds)}</strong></div>
                   <button type="button" className="stage-header-close win98-close-control" disabled aria-label="Janela da chamada fixa" title="Janela da chamada fixa">×</button>
                 </div>
-                <div className={`stage-body ${activeCallParticipants.length ? 'has-participants' : 'is-empty'}`}>
-                  <div className="call-stream-grid">
+                <div className={`stage-body ${activeCallParticipants.length ? 'has-participants' : 'is-empty'} ${focusedCallPeerId ? 'has-focused-stream' : ''}`}>
+                  <div className={`call-stream-grid ${focusedCallPeerId ? 'has-focused-stream' : ''}`}>
                     {activeCallParticipants.length ? activeCallParticipants.map((person) => {
-                      const personStream = person.self
+                      const localVideoStream = person.self
                         ? (isSharing ? screenStreamRef.current : isCameraOn ? cameraStreamRef.current : null)
-                        : remoteStreams[person.peerId]?.stream;
+                        : null;
+                      const remoteBundle = person.self ? null : remoteStreams[person.peerId];
+                      const videoStream = localVideoStream || remoteBundle?.videoStream || null;
                       const remoteCallState = remoteCallStates[person.peerId] || {};
                       const expectsVideo = person.self ? (isSharing || isCameraOn) : (remoteCallState.sharing || remoteCallState.camera);
-                      const hasVideo = Boolean(expectsVideo && personStream?.getVideoTracks?.().some((track) => track.readyState !== 'ended'));
+                      const hasVideo = Boolean(expectsVideo && videoStream?.getVideoTracks?.().some((track) => track.readyState !== 'ended'));
                       const personIsSpeaking = Boolean(speakingPeers[person.self ? 'self' : person.peerId]);
                       const personLabel = person.self ? `${person.name} (você)` : person.name;
+                      const isWatching = person.self || streamWatching[person.peerId] !== false;
+                      const volumes = participantVolumes[person.peerId] || { voice: 100, stream: 100 };
                       const stateLabel = person.self
                         ? (isSharing ? `compartilhando a tela${screenAudioSessionRef.current ? ' + áudio' : ''}` : isCameraOn ? 'câmera ativa' : 'no palco')
-                        : (remoteCallState.sharing ? `compartilhando a tela${remoteCallState.sharingAudio ? ' + áudio' : ''}` : remoteCallState.camera ? 'câmera ativa' : 'em chamada');
+                        : (remoteCallState.sharing ? (isWatching ? `compartilhando a tela${remoteCallState.sharingAudio ? ' + áudio' : ''}` : 'transmissão pausada por você') : remoteCallState.camera ? 'câmera ativa' : 'em chamada');
                       return (
-                        <article className={`call-stream-card ${person.self ? 'is-self' : ''}`} key={person.peerId}>
-                          <div className={`call-stream-viewport ${hasVideo && personIsSpeaking ? 'is-speaking' : ''}`}>
-                            {hasVideo ? (
-                              <MediaElement stream={personStream} muted={person.self || isDeafened} sinkId={selectedAudioOutputId} className="call-stream-media" showVideo={hasVideo} />
-                            ) : (
-                              <>
-                                {!person.self && personStream && <MediaElement stream={personStream} muted={isDeafened} sinkId={selectedAudioOutputId} className="call-stream-media" showVideo={false} />}
-                                <Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xl" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} speaking={personIsSpeaking} />
-                              </>
-                            )}
-                          </div>
-                          <div className="call-stream-caption"><strong>{personLabel}</strong><small>{stateLabel}</small></div>
-                        </article>
+                        <CallStreamCard
+                          key={person.peerId}
+                          avatar={<Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xl" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} speaking={personIsSpeaking} />}
+                          hasVideo={hasVideo}
+                          isDeafened={isDeafened}
+                          isFocused={focusedCallPeerId === person.peerId}
+                          isSelf={person.self}
+                          isSharing={person.self ? isSharing : remoteCallState.sharing}
+                          isSharingAudio={person.self ? Boolean(screenAudioSessionRef.current) : remoteCallState.sharingAudio}
+                          isSpeaking={personIsSpeaking}
+                          isWatching={isWatching}
+                          label={personLabel}
+                          microphoneStream={remoteBundle?.microphoneStream}
+                          onContextMenu={person.self ? undefined : (event) => openParticipantVolumes(event, person)}
+                          onDoubleClick={() => setFocusedCallPeerId((current) => current === person.peerId ? '' : person.peerId)}
+                          onWatchingChange={(watching) => changeStreamWatching(person.peerId, watching)}
+                          screenAudioStream={remoteBundle?.screenAudioStream}
+                          sinkId={selectedAudioOutputId}
+                          stateLabel={stateLabel}
+                          streamVolume={volumes.stream / 100}
+                          videoStream={videoStream}
+                          voiceVolume={volumes.voice / 100}
+                        />
                       );
                     }) : (
                       <div className="call-empty-card">
@@ -2945,6 +3017,17 @@ function App() {
                   </div>
                 )}
               </section>}
+
+              {volumePopover && (
+                <ParticipantVolumePopover
+                  anchor={volumePopover}
+                  name={volumePopover.name}
+                  values={participantVolumes[volumePopover.peerId] || { voice: 100, stream: 100 }}
+                  sharing={Boolean(remoteCallStates[volumePopover.peerId]?.sharingAudio)}
+                  onChange={(values) => updateParticipantVolumes(volumePopover.peerId, values)}
+                  onClose={() => setVolumePopover(null)}
+                />
+              )}
 
               {callPanelOpen && chatVisible && <PaneResizeHandle value={callChatSplit} onChange={updateCallChatSplit} />}
 

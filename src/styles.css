@@ -4267,6 +4267,151 @@ body.is-resizing-call-chat, body.is-resizing-call-chat * { cursor: col-resize !i
   content: '';
 }
 
+.call-stream-viewport { position: relative; cursor: default; }
+.call-stream-audio { display: none !important; }
+
+.call-stream-watch-toggle {
+  position: absolute;
+  z-index: 4;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 0;
+  color: #000;
+  background: var(--win-face);
+  box-shadow: var(--win98-button-shadow);
+  font: 11px var(--ui);
+  opacity: .84;
+}
+
+.call-stream-watch-toggle:hover,
+.call-stream-watch-toggle:focus-visible { opacity: 1; }
+.call-stream-watch-toggle:active { box-shadow: var(--win98-inset-shadow); transform: translate(1px, 1px); }
+
+.call-stream-paused {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  min-height: 120px;
+  color: #202020;
+  background: #808080;
+  background-image: repeating-linear-gradient(135deg, rgba(255,255,255,.045) 0 2px, transparent 2px 7px);
+}
+
+.call-stream-paused > strong { font: 700 12px var(--ui); }
+.call-stream-paused > button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 0;
+  color: #000;
+  background: var(--win-face);
+  box-shadow: var(--win98-button-shadow);
+  font: 11px var(--ui);
+}
+.call-stream-paused > button:active { box-shadow: var(--win98-inset-shadow); transform: translate(1px, 1px); }
+
+.call-stream-grid.has-focused-stream {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-rows: minmax(260px, 1fr) minmax(92px, 126px);
+  align-content: stretch;
+  height: 100%;
+}
+
+.call-stream-grid.has-focused-stream .call-stream-card.is-focused {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  min-height: 0;
+}
+
+.call-stream-grid.has-focused-stream .call-stream-card.is-focused .call-stream-viewport {
+  min-height: 0;
+  height: 100%;
+  aspect-ratio: auto;
+}
+
+.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) {
+  grid-row: 2;
+  min-height: 0;
+}
+
+.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) .call-stream-viewport {
+  min-height: 0;
+  height: 100%;
+  aspect-ratio: auto;
+}
+
+.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) .call-stream-caption {
+  min-height: 25px;
+  padding: 5px;
+}
+.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) .call-stream-caption small { display: none; }
+.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) .call-stream-watch-toggle { display: none; }
+
+.participant-volume-popover {
+  position: fixed;
+  z-index: 150;
+  width: 292px;
+  padding: 3px;
+  color: #000;
+  background: var(--win-face);
+  box-shadow: var(--win98-button-shadow), 5px 5px 0 #000;
+  font-family: var(--ui);
+}
+
+.participant-volume-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 25px;
+  padding-left: 6px;
+  color: #fff;
+  background: var(--win-blue);
+}
+.participant-volume-titlebar strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.participant-volume-titlebar .win98-close-control { display: grid; place-items: center; width: 20px; min-width: 20px; height: 19px; margin-right: 2px; }
+
+.participant-volume-body { display: grid; gap: 12px; padding: 11px; }
+.participant-volume-body label { display: grid; gap: 5px; }
+.participant-volume-body label > span { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+.participant-volume-body output { margin-left: auto; font-weight: 700; }
+.participant-volume-body input[type="range"] { width: 100%; accent-color: var(--win-blue); }
+.participant-volume-body label.is-disabled { color: #777; text-shadow: 1px 1px #fff; }
+.participant-volume-reset {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: start;
+  gap: 5px;
+  min-height: 25px;
+  padding: 3px 8px;
+  border: 0;
+  background: var(--win-face);
+  box-shadow: var(--win98-button-shadow);
+  font: 11px var(--ui);
+}
+.participant-volume-reset:active { box-shadow: var(--win98-inset-shadow); transform: translate(1px, 1px); }
+.participant-volume-body > small { color: #444; font-size: 10px; }
+
+@media (max-width: 900px) {
+  .call-stream-grid.has-focused-stream { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: minmax(220px, 1fr) minmax(82px, 112px); }
+}
+
+@media (max-width: 560px) {
+  .call-stream-grid.has-focused-stream { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .call-stream-watch-toggle { font-size: 0; }
+}
+
 /* Atualização: caixa modal centralizada, com a animação discreta do shell Win98. */
 .update-overlay {
   position: fixed;

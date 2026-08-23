@@ -13,6 +13,11 @@ let signalingPort = Number(process.env.PORT || 8787);
 let pendingDeepLink = process.argv.find((argument) => argument.startsWith('jump://')) || '';
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
+// A fullscreen game makes the call window invisible. Chromium normally lowers
+// an invisible renderer's priority, which can starve desktop capture even when
+// the network and hardware encoder still have capacity.
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+
 function publishWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send('window:state', { maximized: mainWindow.isMaximized() });
@@ -132,6 +137,7 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });

@@ -89,6 +89,17 @@ async function count(window, selector) {
   return window.webContents.executeJavaScript(`document.querySelectorAll(${JSON.stringify(selector)}).length`);
 }
 
+async function captureDebug(window, suffix) {
+  if (!process.env.JUMP_UI_SCREENSHOT) return;
+  const parsed = path.parse(process.env.JUMP_UI_SCREENSHOT);
+  const target = path.join(parsed.dir, `${parsed.name}-${suffix}${parsed.ext || '.png'}`);
+  window.showInactive();
+  await wait(150);
+  const image = await window.capturePage();
+  fs.writeFileSync(target, image.toPNG());
+  window.hide();
+}
+
 async function inboundRtpCount(window, kind) {
   return window.webContents.executeJavaScript(`(async () => {
     const peers = [...(globalThis.__jumpPeerMesh?.peerConnectionsRef.current || [])];
@@ -112,6 +123,8 @@ async function run() {
   ipcMain.handle('window:state', () => ({ maximized: false }));
   ipcMain.handle('update:state', () => ({ status: 'dev', revision: 0 }));
   ipcMain.handle('media:capabilities', () => ({ hardwareAcceleration: true, hardwareVideoEncoding: true, videoEncode: 'enabled' }));
+  ipcMain.handle('desktop:audio-start', () => ({ ok: true, mode: 'process', processId: process.pid }));
+  ipcMain.handle('desktop:audio-stop', () => ({ ok: true }));
   ipcMain.handle('desktop:sources', async () => {
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],
@@ -170,32 +183,74 @@ async function run() {
   await click(windows[0], 'button[aria-label="Compartilhar tela"]');
   await waitFor(() => count(windows[0], '.screen-share-source'), 'seletor de tela do Electron', 20_000);
   if (await count(windows[0], '.screen-share-tabs button') !== 2) throw new Error('O seletor não exibiu as abas de vídeo e áudio.');
-  if (await count(windows[0], '.screen-share-quality button') !== 3) throw new Error('O seletor não exibiu os três perfis de qualidade.');
+  if (await count(windows[0], '.screen-share-quality button') !== 4) throw new Error('O seletor não exibiu os quatro perfis de qualidade.');
   if (await count(windows[0], '.screen-share-audio-options input[type="checkbox"]') !== 2) throw new Error('O seletor não exibiu os controles de áudio e vínculo automático.');
   if (process.env.JUMP_UI_SCREENSHOT) {
-    windows[0].showInactive();
-    await wait(150);
-    const image = await windows[0].capturePage();
-    fs.writeFileSync(process.env.JUMP_UI_SCREENSHOT, image.toPNG());
-    windows[0].hide();
+    await captureDebug(windows[0], 'picker');
   }
   await click(windows[0], '.screen-share-audio-options input[type="checkbox"]:first-of-type');
   await click(windows[0], '.screen-share-audio-options label:nth-of-type(2) input');
   await waitFor(() => windows[0].webContents.executeJavaScript("!document.querySelector('.screen-share-tabs button:nth-child(2)')?.disabled"), 'aba manual de áudio habilitada');
   await click(windows[0], '.screen-share-tabs button:nth-child(2)');
   await waitFor(() => count(windows[0], '.screen-share-source'), 'fontes manuais de áudio');
-  await click(windows[0], '.screen-share-audio-options input[type="checkbox"]:first-of-type');
-  await waitFor(() => windows[0].webContents.executeJavaScript("document.querySelector('.screen-share-tabs button:first-child')?.getAttribute('aria-selected') === 'true'"), 'retorno automático à aba de vídeo sem áudio');
+  await click(windows[0], '.screen-share-source');
+  await click(windows[0], '.screen-share-tabs button:first-child');
   await click(windows[0], '.screen-share-source');
   await click(windows[0], '.screen-share-actions .dialog-primary');
   await waitFor(() => count(windows[0], 'button[aria-label="Parar compartilhamento"]'), 'compartilhamento local ativo', 20_000);
   await waitFor(() => Promise.all(windows.slice(1).map((window) => count(window, '.voice-member-mic.is-sharing'))).then((values) => values.every(Boolean)), 'compartilhamento anunciado aos peers', 20_000);
   await waitFor(() => Promise.all(windows.slice(1).map((window) => count(window, '.call-stream-card video'))).then((values) => values.every(Boolean)), 'faixa de tela recebida pelos peers', 20_000);
+  await waitFor(() => Promise.all(windows.slice(1).map((window) => count(window, '.call-stream-share-audio'))).then((values) => values.every((value) => value === 1)), 'áudio da transmissão separado do microfone', 20_000);
   await waitFor(() => Promise.all(windows.slice(1).map((window) => inboundRtpCount(window, 'video'))).then((values) => values.every((value) => value >= 1)), 'RTP da tela recebido pelos dois peers', 20_000);
   await waitFor(() => windows[0].webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].every((slot) => {
     const encoding = slot.videoSender?.getParameters?.().encodings?.[0];
     return Number(encoding?.maxBitrate) > 0 && Number(encoding?.maxFramerate) > 0;
   }))()`), 'perfil de bitrate e FPS aplicado aos remetentes', 20_000);
+
+  await windows[1].webContents.executeJavaScript(`(() => {
+    const card = [...document.querySelectorAll('.call-stream-card')].find((entry) => entry.textContent.includes('compartilhando a tela'));
+    card?.querySelector('.call-stream-viewport')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  })()`);
+  await waitFor(() => count(windows[1], '.call-stream-grid.has-focused-stream .call-stream-card.is-focused'), 'transmissão maximizada dentro da chamada');
+  await captureDebug(windows[1], 'focused');
+  await windows[1].webContents.executeJavaScript(`(() => {
+    const card = document.querySelector('.call-stream-card.is-focused');
+    card?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 220 }));
+  })()`);
+  await waitFor(() => count(windows[1], '.participant-volume-popover input[type="range"]'), 'mixer individual aberto com clique direito');
+  await captureDebug(windows[1], 'mixer');
+  if (await count(windows[1], '.participant-volume-popover input[type="range"]') !== 2) throw new Error('O mixer não separou microfone e transmissão.');
+  await windows[1].webContents.executeJavaScript(`(() => {
+    const slider = document.querySelectorAll('.participant-volume-popover input[type="range"]')[1];
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(slider, '35');
+    slider.dispatchEvent(new Event('input', { bubbles: true }));
+    slider.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor(() => windows[1].webContents.executeJavaScript(`(() => {
+    const streamAudio = document.querySelector('.call-stream-share-audio');
+    const microphoneAudio = document.querySelector('.call-stream-audio:not(.call-stream-share-audio)');
+    return Math.abs(Number(streamAudio?.volume) - 0.35) < 0.01 && Number(microphoneAudio?.volume) === 1;
+  })()`), 'volumes de transmissão e microfone independentes');
+  await click(windows[1], '.participant-volume-popover .win98-close-control');
+
+  await windows[1].webContents.executeJavaScript(`(() => {
+    const card = [...document.querySelectorAll('.call-stream-card')].find((entry) => entry.textContent.includes('compartilhando a tela'));
+    card?.querySelector('.call-stream-watch-toggle')?.click();
+  })()`);
+  await waitFor(() => count(windows[1], '.call-stream-card.is-paused .call-stream-paused'), 'transmissão pausada pelo espectador');
+  await captureDebug(windows[1], 'paused');
+  await waitFor(() => windows[0].webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].some((slot) => (
+    slot.videoSender?.getParameters?.().encodings?.[0]?.active === false
+    && slot.screenAudioSender?.getParameters?.().encodings?.[0]?.active === false
+  )))()`), 'remetente parou vídeo e áudio para o espectador', 20_000);
+  await click(windows[1], '.call-stream-card.is-paused .call-stream-paused button');
+  await waitFor(() => windows[0].webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].every((slot) => (
+    slot.videoSender?.getParameters?.().encodings?.[0]?.active !== false
+    && slot.screenAudioSender?.getParameters?.().encodings?.[0]?.active !== false
+  )))()`), 'transmissão retomada para o espectador', 20_000);
+  await windows[1].webContents.executeJavaScript("document.querySelector('.call-stream-card.is-focused .call-stream-viewport')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
+  await waitFor(async () => (await count(windows[1], '.call-stream-grid.has-focused-stream')) === 0, 'layout restaurado após segundo clique duplo');
 
   // Recreate the signaling service to exercise the renderer's reconnect path.
   // Existing media tracks must be rebound to the peers' new socket identities.
@@ -203,7 +258,10 @@ async function run() {
   await startServer();
   await waitFor(() => Promise.all(windows.map((window) => window.webContents.executeJavaScript("document.querySelector('.signal-badge')?.textContent.includes('3 conectados')"))).then((values) => values.every(Boolean)), 'três participantes após reconexão', 20_000);
   try {
-    await waitFor(() => Promise.all(windows.map((window) => count(window, '.call-stream-card .call-stream-media'))).then((values) => values.every((value) => value >= 2)), 'mídia remota refeita após reconexão', 20_000);
+    await waitFor(() => Promise.all(windows.map((window, index) => window.webContents.executeJavaScript(`(() => (
+      document.querySelectorAll('.call-stream-card audio').length >= 2
+      && (${index} === 0 || document.querySelectorAll('.call-stream-card video').length >= 1)
+    ))()`))).then((values) => values.every(Boolean)), 'mídia remota refeita após reconexão', 20_000);
   } catch (error) {
     const reconnectDiagnostics = await Promise.all(windows.map((window) => window.webContents.executeJavaScript(`(() => ({
       cards: document.querySelectorAll('.call-stream-card').length,
@@ -226,8 +284,9 @@ async function run() {
   }
   await waitFor(() => Promise.all(windows.map((window) => inboundRtpCount(window, 'audio'))).then((values) => values.every((value) => value === 2)), 'RTP de áudio após reconexão', 20_000);
   await waitFor(() => Promise.all(windows.slice(1).map((window) => inboundRtpCount(window, 'video'))).then((values) => values.every((value) => value >= 1)), 'tela após reconexão', 20_000);
+  await waitFor(() => Promise.all(windows.slice(1).map((window) => count(window, '.call-stream-share-audio'))).then((values) => values.every((value) => value === 1)), 'áudio separado após reconexão', 20_000);
 
-  process.stdout.write('OK: 3 participantes, RTP de áudio/tela e reconexão da malha validados.\n');
+  process.stdout.write('OK: 3 participantes, áudio separado, foco, pausa, mixer, RTP e reconexão validados.\n');
 }
 
 run().then(() => app.exit(0)).catch((error) => {

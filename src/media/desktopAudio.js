@@ -66,31 +66,3 @@ export async function createDesktopAudioBridge(desktop, target) {
     },
   };
 }
-
-export async function createCallAudioMixer(microphoneStream, desktopStream) {
-  const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
-  const context = new AudioContextClass({ latencyHint: 'interactive', sampleRate: SAMPLE_RATE });
-  const destination = context.createMediaStreamDestination();
-  let microphoneSource = null;
-  const desktopSource = context.createMediaStreamSource(desktopStream);
-  desktopSource.connect(destination);
-
-  const setMicrophoneStream = (stream) => {
-    try { microphoneSource?.disconnect(); } catch { /* Already disconnected. */ }
-    microphoneSource = stream?.getAudioTracks?.().length ? context.createMediaStreamSource(stream) : null;
-    microphoneSource?.connect(destination);
-  };
-  setMicrophoneStream(microphoneStream);
-  await context.resume();
-
-  return {
-    stream: destination.stream,
-    setMicrophoneStream,
-    async stop() {
-      try { microphoneSource?.disconnect(); } catch { /* Already disconnected. */ }
-      try { desktopSource.disconnect(); } catch { /* Already disconnected. */ }
-      destination.stream.getTracks().forEach((track) => track.stop());
-      await context.close().catch(() => {});
-    },
-  };
-}

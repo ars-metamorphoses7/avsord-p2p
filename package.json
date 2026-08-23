@@ -1,6 +1,6 @@
 {
   "name": "jump-p2p",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "private": true,
   "type": "module",
   "description": "JUMP — salas P2P com chat, áudio e compartilhamento de tela",
@@ -63,7 +63,7 @@
     "build": "vite build",
     "test:call": "npm run build && electron tests/call-mesh.e2e.cjs",
     "test:update": "node --test tests/update-controller.test.cjs",
-    "test:media": "node --test tests/screen-share-profiles.test.js",
+    "test:media": "node --test tests/screen-share-profiles.test.js tests/call-sounds.test.js",
     "test:gpu": "electron tests/gpu-capabilities.e2e.cjs",
     "test:desktop-audio": "node --test tests/desktop-audio-native.test.cjs",
     "desktop": "electron .",
