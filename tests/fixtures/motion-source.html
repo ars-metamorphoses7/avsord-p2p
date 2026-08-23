@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JUMP_BENCH_MOTION_SOURCE</title>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #020504;
+      }
+
+      #motion-source {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      #gpu-load {
+        position: fixed;
+        left: -2px;
+        top: -2px;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="motion-source"></canvas>
+    <canvas id="gpu-load"></canvas>
+    <script>
+      (() => {
+        const params = new URLSearchParams(location.search);
+        const targetFps = Math.max(1, Math.min(240, Number(params.get('fps')) || 60));
+        const seed = (Number(params.get('seed')) || 0x4a554d50) >>> 0;
+        const gpuLoad = Math.max(0, Math.min(128, Math.round(Number(params.get('gpuLoad')) || 0)));
+        document.title = params.get('title') || document.title;
+        const canvas = document.querySelector('#motion-source');
+        const context = canvas.getContext('2d', { alpha: false, desynchronized: true });
+        const state = {
+          targetFps,
+          seed,
+          epochMs: performance.now(),
+          frameId: -1,
+          drawnFrames: 0,
+          skippedSlots: 0,
+          lastDrawMs: 0,
+          width: 0,
+          height: 0,
+          gpuLoad,
+          gpuLoadActive: false,
+          gpuLoadError: '',
+          frozen: false,
+        };
+
+        function hash(value) {
+          let next = (value ^ seed) >>> 0;
+          next = Math.imul(next ^ (next >>> 16), 0x7feb352d);
+          next = Math.imul(next ^ (next >>> 15), 0x846ca68b);
+          return (next ^ (next >>> 16)) >>> 0;
+        }
+
+        function resize() {
+          const scale = Math.max(1, Number(devicePixelRatio) || 1);
+          const width = Math.max(1, Math.round(innerWidth * scale));
+          const height = Math.max(1, Math.round(innerHeight * scale));
+          if (canvas.width !== width || canvas.height !== height) {
+            canvas.width = width;
+            canvas.height = height;
+          }
+          state.width = width;
+          state.height = height;
+        }
+
+        function drawGrayCode(frameId, width, height) {
+          const bits = 20;
+          const gray = (frameId ^ (frameId >>> 1)) >>> 0;
+          const cellWidth = Math.max(4, Math.floor(width / bits));
+          const cellHeight = Math.max(18, Math.floor(height * 0.045));
+          // Keep the marker away from taskbars/overscan when the fixture fills
+          // an entire physical display.
+          const top = Math.floor(height * 0.71);
+          for (let bit = 0; bit < bits; bit += 1) {
+            context.fillStyle = gray & (1 << bit) ? '#fff' : '#000';
+            context.fillRect(bit * cellWidth, top, cellWidth, cellHeight);
+          }
+        }
+
+        function draw(frameId, now) {
+          resize();
+          const width = canvas.width;
+          const height = canvas.height;
+          const phase = frameId / targetFps;
+
+          const gradient = context.createLinearGradient(0, 0, width, height);
+          gradient.addColorStop(0, `hsl(${(frameId * 2) % 360} 80% 18%)`);
+          gradient.addColorStop(0.5, '#071712');
+          gradient.addColorStop(1, `hsl(${(frameId * 2 + 150) % 360} 75% 15%)`);
+          context.fillStyle = gradient;
+          context.fillRect(0, 0, width, height);
+
+          const tile = Math.max(16, Math.floor(height / 24));
+          const offsetX = Math.floor((phase * width * 0.32) % (tile * 2));
+          const offsetY = Math.floor((phase * height * 0.18) % (tile * 2));
+          for (let y = -tile * 2; y < height; y += tile) {
+            for (let x = -tile * 2; x < width; x += tile) {
+              const parity = ((Math.floor((x + offsetX) / tile) + Math.floor((y + offsetY) / tile)) & 1);
+              context.fillStyle = parity ? 'rgba(232,255,244,0.20)' : 'rgba(0,0,0,0.24)';
+              context.fillRect(x + offsetX, y + offsetY, tile, tile);
+            }
+          }
+
+          const noiseLeft = Math.floor(width * 0.66);
+          const noiseTop = Math.floor(height * 0.08);
+          const noiseWidth = Math.floor(width * 0.29);
+          const noiseHeight = Math.floor(height * 0.34);
+          const cellsX = 24;
+          const cellsY = 16;
+          const cellWidth = noiseWidth / cellsX;
+          const cellHeight = noiseHeight / cellsY;
+          for (let y = 0; y < cellsY; y += 1) {
+            for (let x = 0; x < cellsX; x += 1) {
+              const value = hash(frameId * 911 + y * cellsX + x);
+              context.fillStyle = `rgb(${value & 255} ${(value >>> 8) & 255} ${(value >>> 16) & 255})`;
+              context.fillRect(noiseLeft + x * cellWidth, noiseTop + y * cellHeight, Math.ceil(cellWidth), Math.ceil(cellHeight));
+            }
+          }
+          context.strokeStyle = '#fff';
+          context.lineWidth = Math.max(2, width / 640);
+          context.strokeRect(noiseLeft, noiseTop, noiseWidth, noiseHeight);
+
+          const radius = Math.max(28, height * 0.075);
+          const centerX = width * (0.1 + 0.46 * (0.5 + 0.5 * Math.sin(phase * Math.PI * 1.35)));
+          const centerY = height * (0.25 + 0.42 * (0.5 + 0.5 * Math.cos(phase * Math.PI * 1.05)));
+          context.fillStyle = '#ff4f2d';
+          context.beginPath();
+          context.arc(centerX, centerY, radius, 0, Math.PI * 2);
+          context.fill();
+          context.fillStyle = '#d8ff35';
+          context.beginPath();
+          context.arc(centerX + radius * 0.25, centerY - radius * 0.2, radius * 0.43, 0, Math.PI * 2);
+          context.fill();
+
+          context.save();
+          context.translate(width * 0.5, height * 0.64);
+          context.rotate(phase * 1.8);
+          context.fillStyle = '#36a7ff';
+          context.fillRect(-width * 0.19, -height * 0.018, width * 0.38, height * 0.036);
+          context.fillStyle = '#fff';
+          context.fillRect(-height * 0.018, -width * 0.19, height * 0.036, width * 0.38);
+          context.restore();
+
+          const ticker = 'JUMP P2P  MOTION  DETAIL  FRAME PACING  WEBRTC  ';
+          const fontSize = Math.max(22, Math.floor(height * 0.046));
+          context.font = `700 ${fontSize}px Consolas, monospace`;
+          context.textBaseline = 'middle';
+          context.fillStyle = '#030604';
+          context.fillRect(0, height * 0.79, width, fontSize * 1.55);
+          context.fillStyle = '#b6ff2e';
+          const tickerWidth = context.measureText(ticker).width;
+          const tickerOffset = -((phase * width * 0.48) % tickerWidth);
+          for (let x = tickerOffset - tickerWidth; x < width + tickerWidth; x += tickerWidth) {
+            context.fillText(ticker, x, height * 0.79 + fontSize * 0.75);
+          }
+
+          context.fillStyle = 'rgba(0,0,0,0.72)';
+          context.fillRect(width * 0.025, height * 0.035, width * 0.43, height * 0.145);
+          context.fillStyle = '#fff';
+          context.font = `700 ${Math.max(24, Math.floor(height * 0.055))}px Consolas, monospace`;
+          context.textBaseline = 'top';
+          context.fillText(`FRAME ${String(frameId).padStart(8, '0')}`, width * 0.045, height * 0.052);
+          context.fillStyle = '#79ffb0';
+          context.font = `600 ${Math.max(16, Math.floor(height * 0.027))}px Consolas, monospace`;
+          context.fillText(`${targetFps} FPS  ${width}x${height}  SEED ${seed.toString(16).toUpperCase()}`, width * 0.045, height * 0.12);
+
+          drawGrayCode(frameId, width, height);
+          state.lastDrawMs = now;
+          state.drawnFrames += 1;
+        }
+
+        function animate(now) {
+          if (state.frozen) {
+            requestAnimationFrame(animate);
+            return;
+          }
+          const frameId = Math.floor(((now - state.epochMs) * targetFps) / 1000);
+          if (frameId !== state.frameId) {
+            if (state.frameId >= 0 && frameId > state.frameId + 1) state.skippedSlots += frameId - state.frameId - 1;
+            state.frameId = frameId;
+            draw(frameId, now);
+          }
+          requestAnimationFrame(animate);
+        }
+
+        function snapshot() {
+          return {
+            targetFps: state.targetFps,
+            seed: state.seed,
+            epochMs: state.epochMs,
+            nowMs: performance.now(),
+            frameId: state.frameId,
+            drawnFrames: state.drawnFrames,
+            skippedSlots: state.skippedSlots,
+            lastDrawMs: state.lastDrawMs,
+            width: state.width,
+            height: state.height,
+            gpuLoad: state.gpuLoad,
+            gpuLoadActive: state.gpuLoadActive,
+            gpuLoadError: state.gpuLoadError,
+            frozen: state.frozen,
+          };
+        }
+
+        function reset() {
+          state.frozen = false;
+          state.epochMs = performance.now();
+          state.frameId = -1;
+          state.drawnFrames = 0;
+          state.skippedSlots = 0;
+          state.lastDrawMs = 0;
+          return snapshot();
+        }
+
+        function freeze(frameId = 4242) {
+          state.frozen = true;
+          state.frameId = Math.max(0, Math.floor(Number(frameId) || 0));
+          draw(state.frameId, performance.now());
+          return snapshot();
+        }
+
+        function captureDataUrl(width = canvas.width, height = canvas.height) {
+          const outputWidth = Math.max(1, Math.floor(Number(width) || canvas.width));
+          const outputHeight = Math.max(1, Math.floor(Number(height) || canvas.height));
+          const output = document.createElement('canvas');
+          output.width = outputWidth;
+          output.height = outputHeight;
+          const outputContext = output.getContext('2d', { alpha: false });
+          outputContext.drawImage(canvas, 0, 0, outputWidth, outputHeight);
+          return {
+            dataUrl: output.toDataURL('image/png'),
+            width: outputWidth,
+            height: outputHeight,
+            frameId: state.frameId,
+          };
+        }
+
+        globalThis.__motionBenchmark = { snapshot, reset, freeze, captureDataUrl };
+
+        if (gpuLoad > 0) {
+          const gpuCanvas = document.querySelector('#gpu-load');
+          const gl = gpuCanvas.getContext('webgl2', {
+            alpha: false,
+            antialias: false,
+            depth: false,
+            desynchronized: true,
+            powerPreference: 'high-performance',
+          });
+          if (gl) {
+            state.gpuLoadActive = true;
+            const compile = (type, source) => {
+              const shader = gl.createShader(type);
+              gl.shaderSource(shader, source);
+              gl.compileShader(shader);
+              if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+              return shader;
+            };
+            const program = gl.createProgram();
+            gl.attachShader(program, compile(gl.VERTEX_SHADER, `#version 300 es
+              void main() {
+                vec2 positions[3] = vec2[3](vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));
+                gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+              }
+            `));
+            gl.attachShader(program, compile(gl.FRAGMENT_SHADER, `#version 300 es
+              precision highp float;
+              uniform float uTime;
+              uniform int uIterations;
+              out vec4 color;
+              void main() {
+                vec2 p = gl_FragCoord.xy / vec2(1920.0, 1080.0);
+                float value = p.x + p.y + uTime * 0.001;
+                for (int i = 0; i < 128; ++i) {
+                  if (i >= uIterations) break;
+                  value = sin(value * 1.017 + float(i) * 0.013) * 0.5 + 0.5;
+                  p = fract(p.yx * mat2(1.031, 0.017, -0.023, 0.997) + value * 0.001);
+                }
+                color = vec4(value, p, 1.0);
+              }
+            `));
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+            const timeLocation = gl.getUniformLocation(program, 'uTime');
+            const iterationsLocation = gl.getUniformLocation(program, 'uIterations');
+            const drawGpuLoad = (now) => {
+              const width = Math.max(1, Math.round(innerWidth * devicePixelRatio));
+              const height = Math.max(1, Math.round(innerHeight * devicePixelRatio));
+              if (gpuCanvas.width !== width || gpuCanvas.height !== height) {
+                gpuCanvas.width = width;
+                gpuCanvas.height = height;
+              }
+              gl.viewport(0, 0, width, height);
+              gl.useProgram(program);
+              gl.uniform1f(timeLocation, now);
+              gl.uniform1i(iterationsLocation, gpuLoad);
+              gl.drawArrays(gl.TRIANGLES, 0, 3);
+              gl.flush();
+              requestAnimationFrame(drawGpuLoad);
+            };
+            requestAnimationFrame(drawGpuLoad);
+          } else {
+            state.gpuLoadError = 'webgl2-unavailable';
+          }
+        }
+        addEventListener('resize', resize);
+        resize();
+        requestAnimationFrame(animate);
+      })();
+    </script>
+  </body>
+</html>

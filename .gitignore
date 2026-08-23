@@ -5,3 +5,4 @@ release-test/
 .jump-data/
 .env
 *.log
+artifacts/
