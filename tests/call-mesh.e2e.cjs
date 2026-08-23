@@ -183,7 +183,19 @@ async function run() {
   await click(windows[0], 'button[aria-label="Compartilhar tela"]');
   await waitFor(() => count(windows[0], '.screen-share-source'), 'seletor de tela do Electron', 20_000);
   if (await count(windows[0], '.screen-share-tabs button') !== 2) throw new Error('O seletor não exibiu as abas de vídeo e áudio.');
-  if (await count(windows[0], '.screen-share-quality button') !== 4) throw new Error('O seletor não exibiu os quatro perfis de qualidade.');
+  if (await count(windows[0], '.screen-share-quality button') !== 2) throw new Error('O seletor não exibiu somente desempenho e qualidade.');
+  await windows[0].webContents.executeJavaScript(`(() => {
+    const buttons = [...document.querySelectorAll('.screen-share-quality button')];
+    const quality = buttons.find((button) => button.textContent.includes('qualidade'));
+    quality?.click();
+  })()`);
+  await waitFor(() => windows[0].webContents.executeJavaScript("document.querySelector('.screen-share-quality button.is-selected')?.textContent.includes('qualidade')"), 'modo qualidade selecionável');
+  await windows[0].webContents.executeJavaScript(`(() => {
+    const buttons = [...document.querySelectorAll('.screen-share-quality button')];
+    const performance = buttons.find((button) => button.textContent.includes('desempenho'));
+    performance?.click();
+  })()`);
+  await waitFor(() => windows[0].webContents.executeJavaScript("document.querySelector('.screen-share-quality button.is-selected')?.textContent.includes('desempenho')"), 'modo desempenho selecionável');
   if (await count(windows[0], '.screen-share-audio-options input[type="checkbox"]') !== 2) throw new Error('O seletor não exibiu os controles de áudio e vínculo automático.');
   if (process.env.JUMP_UI_SCREENSHOT) {
     await captureDebug(windows[0], 'picker');
@@ -215,7 +227,7 @@ async function run() {
     await waitFor(() => Promise.all(windows.slice(1).map((window) => window.webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()]
       .filter((slot) => slot.remoteMediaState?.sharing)
       .every((slot) => {
-        const expected = { competitive: 220, fluid: 140, balanced: 180, detail: 260 }[slot.remoteMediaState.sharingProfile];
+        const expected = { performance: 220, quality: 260 }[slot.remoteMediaState.sharingProfile];
         return slot.remotePlaybackProfile === slot.remoteMediaState.sharingProfile
           && (!('jitterBufferTarget' in slot.videoTransceiver.receiver) || slot.videoTransceiver.receiver.jitterBufferTarget === expected)
           && (!('jitterBufferTarget' in slot.screenAudioTransceiver.receiver) || slot.screenAudioTransceiver.receiver.jitterBufferTarget === expected);
@@ -232,6 +244,11 @@ async function run() {
     process.stderr.write(`${JSON.stringify(playbackDiagnostics, null, 2)}\n`);
     throw error;
   }
+  await waitFor(() => windows[0].webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].every((slot) => (
+    slot.videoAdaptation?.profileId === 'performance'
+    && slot.videoAdaptation?.targetFps === 60
+    && Number(slot.videoAdaptation?.effectiveWidth) <= 854
+  )))()`), 'controlador automático de desempenho ativo', 20_000);
 
   await windows[1].webContents.executeJavaScript("document.querySelector('.chat-toggle-button.is-active')?.click()");
 

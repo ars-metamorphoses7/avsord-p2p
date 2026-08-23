@@ -73,14 +73,14 @@ export function useScreenShare({
     try {
       const profile = screenShareProfile(selectedProfile);
       videoStream = desktopCapture
-        ? await navigator.mediaDevices.getUserMedia({ audio: false, video: screenCaptureConstraints(selectedProfile, selectedVideo.id) })
-        : await navigator.mediaDevices.getDisplayMedia({ video: screenCaptureConstraints(selectedProfile), audio: false });
+        ? await navigator.mediaDevices.getUserMedia({ audio: false, video: screenCaptureConstraints(profile.id, selectedVideo.id) })
+        : await navigator.mediaDevices.getDisplayMedia({ video: screenCaptureConstraints(profile.id), audio: false });
       const videoTrack = videoStream.getVideoTracks()[0];
       if (!videoTrack) throw new Error('Nenhuma faixa de vídeo foi criada.');
       videoTrack.contentHint = profile.contentHint;
       await videoTrack.applyConstraints?.({ frameRate: { ideal: profile.frameRate, max: profile.frameRate } }).catch(() => {});
-      setProfileId(selectedProfile);
-      await setVideoEncodingProfile(selectedProfile);
+      setProfileId(profile.id);
+      await setVideoEncodingProfile(profile.id);
 
       let outboundShareStream = videoStream;
 
@@ -110,7 +110,7 @@ export function useScreenShare({
         if (screenStreamRef.current === videoStream) stopScreenShare();
       };
       setIsSharing(true);
-      announceCallState({ sharing: true, sharingAudio: withAudio, sharingProfile: selectedProfile });
+      announceCallState({ sharing: true, sharingAudio: withAudio, sharingProfile: profile.id });
       onShareStarted?.();
       return true;
     } catch (error) {

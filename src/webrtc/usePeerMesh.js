@@ -6,6 +6,7 @@ import {
   evaluateCaptureAdaptation,
   initialCaptureAdaptation,
   preferVideoCodecs,
+  screenShareProfile,
   screenSharePlaybackBuffer,
 } from '../media/screenShareProfiles.js';
 
@@ -84,7 +85,7 @@ function setReceiverPlaybackBuffer(receiver, targetMs) {
 
 function applySlotPlaybackProfile(slot, profileId) {
   if (!slot) return false;
-  slot.remotePlaybackProfile = profileId || 'fluid';
+  slot.remotePlaybackProfile = screenShareProfile(profileId).id;
   const targetMs = screenSharePlaybackBuffer(slot.remotePlaybackProfile);
   const videoApplied = setReceiverPlaybackBuffer(slot.videoTransceiver?.receiver, targetMs);
   const audioApplied = setReceiverPlaybackBuffer(slot.screenAudioTransceiver?.receiver, targetMs);
@@ -194,6 +195,7 @@ export function usePeerMesh({
       const nextAdaptation = evaluateCaptureAdaptation(adaptationRef.current, videoProfileRef.current, aggregate);
       nextAdaptation.trackId = screenTrack.id;
       adaptationRef.current = nextAdaptation;
+      samples.forEach(({ slot }) => { slot.videoAdaptation = { ...nextAdaptation }; });
       await Promise.all(samples.map(({ slot, diagnostics }) => adaptVideoSender(
         slot.videoSender,
         videoProfileRef.current,
@@ -294,10 +296,11 @@ export function usePeerMesh({
   }, [onPeerError, peerConnectionsRef, requestPeerNegotiation, screenStreamRef, videoProfileRef]);
 
   const setVideoEncodingProfile = useCallback(async (profileId) => {
-    videoProfileRef.current = profileId;
-    adaptationRef.current = initialCaptureAdaptation(profileId);
+    const normalizedProfileId = screenShareProfile(profileId).id;
+    videoProfileRef.current = normalizedProfileId;
+    adaptationRef.current = initialCaptureAdaptation(normalizedProfileId);
     const slots = [...peerConnectionsRef.current.values()].filter((slot) => slot?.videoSender?.track);
-    await Promise.all(slots.map((slot) => configureVideoSender(slot.videoSender, profileId, slots.length)));
+    await Promise.all(slots.map((slot) => configureVideoSender(slot.videoSender, normalizedProfileId, slots.length)));
   }, [peerConnectionsRef, videoProfileRef]);
 
   const setPeerPlaybackProfile = useCallback((peerId, profileId) => {

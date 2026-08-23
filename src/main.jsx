@@ -45,6 +45,7 @@ import { ParticipantVolumePopover } from './components/ParticipantVolumePopover.
 import { ScreenShareDialog } from './components/ScreenShareDialog.jsx';
 import { useScreenShare } from './hooks/useScreenShare.js';
 import { playTransmissionSound } from './media/callSounds.js';
+import { normalizeScreenShareProfileId } from './media/screenShareProfiles.js';
 import { usePeerMesh } from './webrtc/usePeerMesh.js';
 
 const INITIAL_QUERY = new URLSearchParams(window.location.search);
@@ -917,7 +918,7 @@ function App() {
   const [isDeafened, setIsDeafened] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
-  const [screenShareProfileId, setScreenShareProfileId] = useState(() => localStorage.getItem(SCREEN_SHARE_PROFILE_KEY) || 'balanced');
+  const [screenShareProfileId, setScreenShareProfileId] = useState(() => normalizeScreenShareProfileId(localStorage.getItem(SCREEN_SHARE_PROFILE_KEY)));
   const [inCall, setInCall] = useState(false);
   const [callDurationSeconds, setCallDurationSeconds] = useState(0);
   const [audioInputDevices, setAudioInputDevices] = useState([]);
@@ -1683,7 +1684,7 @@ function App() {
           camera: Boolean(payload.camera),
           sharing: Boolean(payload.sharing),
           sharingAudio: Boolean(payload.sharingAudio),
-          sharingProfile: payload.sharing ? String(payload.sharingProfile || 'fluid') : '',
+          sharingProfile: payload.sharing ? normalizeScreenShareProfileId(String(payload.sharingProfile || 'performance')) : '',
         };
         if (nextMediaState.sharing) setPeerPlaybackProfileRef.current?.(peerId, nextMediaState.sharingProfile);
         const wasSharing = remoteSharingRef.current.get(peerId) === true;
@@ -2336,11 +2337,11 @@ function App() {
   }, [announceCallState, replacePeerTrack, startCall]);
 
   const updateScreenShareProfile = useCallback((profileId) => {
-    videoProfileRef.current = profileId;
-    setScreenShareProfileId(profileId);
-    localStorage.setItem(SCREEN_SHARE_PROFILE_KEY, profileId);
-    void setVideoEncodingProfile(profileId);
-  }, [setVideoEncodingProfile]);
+    const normalizedProfileId = normalizeScreenShareProfileId(profileId);
+    videoProfileRef.current = normalizedProfileId;
+    setScreenShareProfileId(normalizedProfileId);
+    localStorage.setItem(SCREEN_SHARE_PROFILE_KEY, normalizedProfileId);
+  }, []);
 
   const updateCallChatSplit = useCallback((percent) => {
     const next = Math.max(25, Math.min(75, Number(percent) || 50));

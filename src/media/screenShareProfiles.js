@@ -1,70 +1,64 @@
 export const SCREEN_SHARE_PROFILES = {
-  competitive: {
-    id: 'competitive',
-    label: 'estável',
-    description: '540p · 60 FPS cadenciados',
-    width: 960,
-    height: 540,
+  performance: {
+    id: 'performance',
+    label: 'desempenho',
+    description: '60 FPS alvo · 270p–480p automático',
+    width: 854,
+    height: 480,
     frameRate: 60,
-    maxBitrate: 6_000_000,
-    minBitrate: 1_200_000,
+    maxBitrate: 4_000_000,
+    minBitrate: 500_000,
     degradationPreference: 'maintain-framerate',
     contentHint: 'motion',
     codecOrder: ['video/H264', 'video/VP9', 'video/VP8'],
-    adaptationScales: [1, 1.2],
+    adaptationScales: [1, 1.14, 1.33, 1.5, 1.78],
     playbackBufferMs: 220,
+    severeFpsRatio: 0.72,
+    pressureFpsRatio: 0.90,
+    stableFpsRatio: 0.97,
+    severeStep: 2,
+    pressureSamples: 2,
+    recoverySamples: 10,
   },
-  fluid: {
-    id: 'fluid',
-    label: 'fluido',
-    description: '60 FPS · movimento e jogos',
-    width: 1920,
-    height: 1080,
-    frameRate: 60,
-    maxBitrate: 10_000_000,
-    minBitrate: 2_200_000,
-    degradationPreference: 'maintain-framerate',
-    contentHint: 'motion',
-    codecOrder: ['video/H264', 'video/VP9', 'video/VP8'],
-    adaptationScales: [1, 1.25, 1.5],
-    playbackBufferMs: 140,
-  },
-  balanced: {
-    id: 'balanced',
-    label: 'equilibrado',
-    description: '30 FPS · uso geral',
+  quality: {
+    id: 'quality',
+    label: 'qualidade',
+    description: 'até 1080p · 30 FPS automático',
     width: 1920,
     height: 1080,
     frameRate: 30,
-    maxBitrate: 5_000_000,
-    minBitrate: 1_500_000,
+    maxBitrate: 8_000_000,
+    minBitrate: 1_200_000,
     degradationPreference: 'balanced',
     contentHint: 'motion',
     codecOrder: ['video/H264', 'video/VP9', 'video/VP8'],
-    adaptationScales: [1, 1.2, 1.45],
-    playbackBufferMs: 180,
-  },
-  detail: {
-    id: 'detail',
-    label: 'detalhes',
-    description: '24 FPS · texto e imagem',
-    width: 2560,
-    height: 1440,
-    frameRate: 24,
-    maxBitrate: 6_000_000,
-    minBitrate: 1_800_000,
-    degradationPreference: 'maintain-resolution',
-    contentHint: 'detail',
-    codecOrder: ['video/VP9', 'video/H264', 'video/VP8'],
-    adaptationScales: [1, 1.15, 1.35],
+    adaptationScales: [1, 1.2, 1.5],
     playbackBufferMs: 260,
+    severeFpsRatio: 0.65,
+    pressureFpsRatio: 0.84,
+    stableFpsRatio: 0.96,
+    severeStep: 1,
+    pressureSamples: 3,
+    recoverySamples: 14,
   },
 };
 
 export const SCREEN_SHARE_ADAPT_INTERVAL_MS = 1_500;
 
+const LEGACY_PROFILE_ALIASES = {
+  competitive: 'performance',
+  fluid: 'performance',
+  balanced: 'quality',
+  detail: 'quality',
+};
+
+export function normalizeScreenShareProfileId(profileId) {
+  const normalized = LEGACY_PROFILE_ALIASES[profileId] || profileId;
+  return SCREEN_SHARE_PROFILES[normalized] ? normalized : 'performance';
+}
+
 export function screenShareProfile(profileId) {
-  return SCREEN_SHARE_PROFILES[profileId] || SCREEN_SHARE_PROFILES.balanced;
+  return SCREEN_SHARE_PROFILES[normalizeScreenShareProfileId(profileId)];
 }
 
 export function screenSharePlaybackBuffer(profileId) {
@@ -119,27 +113,35 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   const parameters = sender.getParameters();
   parameters.encodings ??= [{}];
   const encoding = parameters.encodings[0];
+  const adaptationScale = Math.max(1, Number(diagnostics.adaptationScale) || 1);
+  const currentScale = Math.max(1, Number(encoding.scaleResolutionDownBy) || 1);
   const meshFactor = Math.max(1, 1 + ((Math.max(1, peerCount) - 1) * 0.55));
   const profileBudget = Math.round(profile.maxBitrate / meshFactor);
+  // Scale bitrate with pixel count. Otherwise a degraded 360p stream keeps a
+  // 480p/1080p-sized budget, looks unnecessarily pristine and can continue
+  // saturating the encoder or uplink without buying any more frames.
+  const resolutionBudget = Math.max(
+    profile.minBitrate,
+    Math.round(profileBudget / (adaptationScale ** 2)),
+  );
   const available = Number(diagnostics.availableOutgoingBitrate) || 0;
   // Leave transport headroom for Opus, retransmissions and signaling. A
   // flashing/full-motion screen otherwise fills the queue and loses frames.
   // `availableOutgoingBitrate` already belongs to this peer connection. The
   // mesh factor above accounts for the other uploads; dividing it by the peer
   // count again needlessly starves each individual receiver.
-  const networkBudget = available > 0 ? Math.round(available * 0.82) : profileBudget;
+  const networkBudget = available > 0 ? Math.round(available * 0.78) : resolutionBudget;
   const targetBitrate = available > 0
-    ? Math.max(600_000, Math.min(profileBudget, networkBudget))
-    : profileBudget;
+    ? Math.max(450_000, Math.min(resolutionBudget, networkBudget))
+    : resolutionBudget;
   const previousBitrate = Number(encoding.maxBitrate) || targetBitrate;
   // Bandwidth estimates are intentionally noisy. Chasing every sample makes
   // queues empty/fill in bursts and the receiver compensates by varying
   // playout. Downshift decisively, but recover capacity in small steps.
+  const scalingDown = adaptationScale > currentScale + 0.01;
   const nextBitrate = targetBitrate < previousBitrate
-    ? Math.max(targetBitrate, Math.round(previousBitrate * 0.76))
-    : Math.min(targetBitrate, Math.round(previousBitrate * 1.12));
-  const adaptationScale = Math.max(1, Number(diagnostics.adaptationScale) || 1);
-  const currentScale = Math.max(1, Number(encoding.scaleResolutionDownBy) || 1);
+    ? (scalingDown ? targetBitrate : Math.max(targetBitrate, Math.round(previousBitrate * 0.68)))
+    : Math.min(targetBitrate, Math.round(previousBitrate * 1.08));
   const sameParameters = Math.abs(previousBitrate - nextBitrate) < 50_000
     && Math.abs(currentScale - adaptationScale) < 0.01
     && Number(encoding.maxFramerate) === profile.frameRate
@@ -184,20 +186,31 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     .map(Number)
     .filter((value) => Number.isFinite(value) && value > 0);
   const measuredFps = fpsSamples.length ? Math.min(...fpsSamples) : 0;
-  const fpsEma = measuredFps > 0 ? (current.fpsEma > 0 ? (current.fpsEma * 0.68) + (measuredFps * 0.32) : measuredFps) : current.fpsEma;
+  const fpsEma = measuredFps > 0 ? (current.fpsEma > 0 ? (current.fpsEma * 0.58) + (measuredFps * 0.42) : measuredFps) : current.fpsEma;
+  const instantFpsRatio = measuredFps > 0 ? measuredFps / profile.frameRate : 1;
   const fpsRatio = fpsEma > 0 ? fpsEma / profile.frameRate : 1;
   const encodeBudgetMs = 1000 / profile.frameRate;
   const measuredEncode = Number(diagnostics.averageEncodeTimeMs) || 0;
-  const encodeEma = measuredEncode > 0 ? (current.encodeEma > 0 ? (current.encodeEma * 0.68) + (measuredEncode * 0.32) : measuredEncode) : current.encodeEma;
+  const encodeEma = measuredEncode > 0 ? (current.encodeEma > 0 ? (current.encodeEma * 0.58) + (measuredEncode * 0.42) : measuredEncode) : current.encodeEma;
+  const instantEncodeRatio = measuredEncode / encodeBudgetMs;
   const encodeRatio = encodeEma / encodeBudgetMs;
   const limitation = diagnostics.qualityLimitationReason || 'none';
-  const severePressure = fpsSamples.length > 0 && (fpsRatio < 0.58 || encodeRatio > 1.05);
-  const moderatePressure = (fpsSamples.length > 0 && fpsRatio < 0.84)
-    || encodeRatio > 0.82
+  // Decisions require both the latest sample and the rolling trend. This
+  // reacts quickly to a real collapse without repeatedly downshifting after
+  // the latest frame rate has already recovered.
+  const severePressure = (fpsSamples.length > 0
+    && instantFpsRatio < profile.severeFpsRatio
+    && fpsRatio < profile.pressureFpsRatio)
+    || (instantEncodeRatio > 1.08 && encodeRatio > 0.92);
+  const moderatePressure = (fpsSamples.length > 0
+    && instantFpsRatio < profile.pressureFpsRatio
+    && fpsRatio < Math.min(0.95, profile.pressureFpsRatio + 0.04))
+    || (instantEncodeRatio > 0.82 && encodeRatio > 0.76)
     || ['cpu', 'bandwidth'].includes(limitation);
   const stable = fpsSamples.length > 0
-    && fpsRatio > 0.94
-    && encodeRatio < 0.68
+    && instantFpsRatio >= profile.stableFpsRatio
+    && fpsRatio >= profile.stableFpsRatio - 0.02
+    && encodeRatio < 0.66
     && !['cpu', 'bandwidth'].includes(limitation);
   let level = current.level;
   let poorSamples = moderatePressure ? current.poorSamples + 1 : 0;
@@ -208,39 +221,43 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   if (cooldownSamples > 0) {
     // Hold the current resolution long enough for congestion control and the
     // hardware encoder to settle before judging the next sample.
-  } else if (severePressure && poorSamples >= 2) {
+  } else if (severePressure) {
+    level += profile.severeStep;
+    poorSamples = 0;
+    stableSamples = 0;
+    cooldownSamples = 2;
+    reason = instantFpsRatio < profile.severeFpsRatio ? 'fps-severe' : 'encode-severe';
+  } else if (moderatePressure && poorSamples >= profile.pressureSamples) {
     level += 1;
     poorSamples = 0;
     stableSamples = 0;
-    cooldownSamples = 3;
-    reason = fpsRatio < 0.58 ? 'fps-severe' : 'encode-severe';
-  } else if (moderatePressure && poorSamples >= 3) {
-    level += 1;
-    poorSamples = 0;
-    stableSamples = 0;
-    cooldownSamples = 3;
-    reason = limitation !== 'none' ? limitation : encodeRatio > 0.82 ? 'encode' : 'fps';
-  } else if (stable && stableSamples >= 12) {
+    cooldownSamples = 2;
+    reason = limitation !== 'none' ? limitation : instantEncodeRatio > 0.82 ? 'encode' : 'fps';
+  } else if (stable && stableSamples >= profile.recoverySamples) {
     level -= 1;
     stableSamples = 0;
     poorSamples = 0;
-    cooldownSamples = 6;
+    cooldownSamples = 5;
     reason = 'recovery';
   }
 
   level = Math.max(0, Math.min(profile.adaptationScales.length - 1, level));
+  const scale = profile.adaptationScales[level];
   return {
     profileId: profile.id,
     level,
     poorSamples,
     stableSamples,
     cooldownSamples,
-    scale: profile.adaptationScales[level],
+    scale,
     reason,
+    targetFps: profile.frameRate,
     measuredFps,
     averageEncodeTimeMs: measuredEncode,
     fpsEma,
     encodeEma,
+    effectiveWidth: Math.round(profile.width / scale),
+    effectiveHeight: Math.round(profile.height / scale),
   };
 }
 
