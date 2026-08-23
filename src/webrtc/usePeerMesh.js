@@ -3,7 +3,9 @@ import {
   SCREEN_SHARE_ADAPT_INTERVAL_MS,
   adaptVideoSender,
   configureVideoSender,
+  evaluatePlaybackBufferAdaptation,
   evaluateCaptureAdaptation,
+  initialPlaybackBufferAdaptation,
   initialCaptureAdaptation,
   preferVideoCodecs,
   screenShareProfile,
@@ -97,8 +99,13 @@ function setReceiverPlaybackBuffer(receiver, targetMs) {
 
 function applySlotPlaybackProfile(slot, profileId) {
   if (!slot) return false;
-  slot.remotePlaybackProfile = screenShareProfile(profileId).id;
-  const targetMs = screenSharePlaybackBuffer(slot.remotePlaybackProfile);
+  const nextProfile = screenShareProfile(profileId).id;
+  if (slot.remotePlaybackProfile !== nextProfile) {
+    slot.playbackAdaptation = initialPlaybackBufferAdaptation(nextProfile);
+  }
+  slot.remotePlaybackProfile = nextProfile;
+  const targetMs = slot.playbackAdaptation?.targetMs
+    ?? screenSharePlaybackBuffer(slot.remotePlaybackProfile);
   const videoApplied = setReceiverPlaybackBuffer(slot.videoTransceiver?.receiver, targetMs);
   const audioApplied = setReceiverPlaybackBuffer(slot.screenAudioTransceiver?.receiver, targetMs);
   return videoApplied || audioApplied;
@@ -156,6 +163,7 @@ export function usePeerMesh({
           && slot.screenWatching !== false
         ));
         if (!slots.length) return;
+        const activePeerCount = slots.length;
         const trackSettings = screenTrack.getSettings?.() || {};
         const samples = (await Promise.all(slots.map(async (slot) => {
           try {
@@ -183,6 +191,9 @@ export function usePeerMesh({
               sendBitrateBps: telemetry.derived.sendBitrateBps,
               remotePacketsLost: telemetry.remoteInbound.packetsLost,
               roundTripTimeMs: telemetry.derived.currentRoundTripTimeMs,
+              peerCount: activePeerCount,
+              encoderImplementation: telemetry.outbound.encoderImplementation,
+              powerEfficientEncoder: telemetry.outbound.powerEfficientEncoder,
             };
             const hasFpsSample = diagnostics.captureFps !== null
               || diagnostics.framesPerSecond !== null;
@@ -234,16 +245,15 @@ export function usePeerMesh({
               });
               if (events.length > 1_000) events.shift();
             }
-            const activePeerCount = [...peerConnectionsRef.current.values()].filter((candidate) => (
-              candidate?.videoSender?.track === screenTrack
-              && candidate.screenWatching !== false
-              && candidate.pc.connectionState !== 'closed'
-            )).length;
             return adaptVideoSender(
               sender,
               videoProfileRef.current,
               activePeerCount,
-              { ...diagnostics, adaptationScale: nextAdaptation.scale },
+              {
+                ...diagnostics,
+                adaptationScale: nextAdaptation.scale,
+                targetFrameRate: nextAdaptation.frameRate,
+              },
             );
           })
         )));
@@ -256,7 +266,7 @@ export function usePeerMesh({
   }, [peerConnectionsRef, screenStreamRef, videoProfileRef]);
 
   useEffect(() => {
-    if (!new URLSearchParams(window.location.search).has('streamTelemetry')) return undefined;
+    const telemetryEnabled = new URLSearchParams(window.location.search).has('streamTelemetry');
     let running = false;
     const sampleReceivers = async () => {
       if (running) return;
@@ -270,16 +280,36 @@ export function usePeerMesh({
           });
           if (!telemetry.ids.inbound) return;
           slot.inboundVideoTelemetry = telemetry;
-          slot.inboundVideoTelemetryHistory ||= [];
-          slot.inboundVideoTelemetryHistory.push(telemetry);
-          if (slot.inboundVideoTelemetryHistory.length > 240) slot.inboundVideoTelemetryHistory.shift();
+          const playbackProfile = slot.remotePlaybackProfile || 'performance';
+          slot.playbackAdaptation = evaluatePlaybackBufferAdaptation(
+            slot.playbackAdaptation,
+            playbackProfile,
+            {
+              jitterMs: telemetry.derived.inboundJitterMs,
+              freezeCount: telemetry.inbound.freezeCount,
+              framesDropped: telemetry.inbound.framesDropped,
+            },
+          );
+          setReceiverPlaybackBuffer(
+            slot.videoTransceiver?.receiver,
+            slot.playbackAdaptation.targetMs,
+          );
+          setReceiverPlaybackBuffer(
+            slot.screenAudioTransceiver?.receiver,
+            slot.playbackAdaptation.targetMs,
+          );
+          if (telemetryEnabled) {
+            slot.inboundVideoTelemetryHistory ||= [];
+            slot.inboundVideoTelemetryHistory.push(telemetry);
+            if (slot.inboundVideoTelemetryHistory.length > 240) slot.inboundVideoTelemetryHistory.shift();
+          }
         } catch {
           // Telemetry is diagnostic-only and must never disturb the call.
         }
       }));
       running = false;
     };
-    const timer = window.setInterval(() => { void sampleReceivers(); }, 500);
+    const timer = window.setInterval(() => { void sampleReceivers(); }, SCREEN_SHARE_ADAPT_INTERVAL_MS);
     void sampleReceivers();
     return () => window.clearInterval(timer);
   }, [peerConnectionsRef]);

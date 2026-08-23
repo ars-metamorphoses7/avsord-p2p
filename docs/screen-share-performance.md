@@ -30,6 +30,21 @@ No mesmo host e fixture, a correção levou desempenho de 427×240/OpenH264 para
 
 O experimento de GPU texture do Chromium M152 não passou no gate. No único cenário em que o trace comprovou `DesktopCaptureDevice::DeliverTextureToClient`, a fonte externa do Chrome, ativar a feature reduziu o FPS apresentado de 54,50 para 49,32, elevou o encode médio de 2,48 para 7,83 ms e o WebRTC reportou `OpenH264`. A causa exata do fallback ainda não foi provada, mas a regressão é suficiente para uma decisão **no-go**.
 
+### Atualização multi-hardware: Intel/software e rede instável
+
+Uma segunda máquina, Intel UHD 620 no Linux, reproduziu o problema fora da NVIDIA: o probe do Electron retornou `video_encode = disabled_software`, o sender usou `OpenH264` e o receiver caiu para `FFmpeg (fallback from VAAPI)`. Em runs curtos com pressão WebGL 32, o baseline observado apresentou cerca de 27,6 FPS no desempenho e 13,9 FPS na qualidade, com avisos de `continual frame skips` do OpenH264. Esses runs são diagnósticos de uma repetição e a fixture marcou cadência instável; não substituem o protocolo de release 5×60 s.
+
+Foram encontrados quatro defeitos adicionais de generalização:
+
+1. A pressão de rede era comparada com `maxBitrate`, mas esse valor já havia sido reduzido pela amostra anterior. Uma conexão fraca passava a parecer saudável e mantinha resolução demais para a capacidade real.
+2. A redução de bitrate demorava várias amostras mesmo quando a estimativa caía abruptamente, deixando fila acumulada por segundos.
+3. Os perfis não tinham fallback temporal depois do último nível espacial. Um encoder por software podia permanecer indefinidamente sobrecarregado em 360p60/720p30.
+4. O receptor usava buffer fixo. Jitter de Wi-Fi/VPN e novos `freezeCount`/`framesDropped` não aumentavam a proteção de playout.
+
+A correção compara a capacidade com a demanda nominal do nível, aplica quedas de bitrate imediatamente com 22% de headroom, usa safe-start espacial quando os stats confirmam encoder por software, acrescenta escadas temporais e exige 12% de folga de rede mais custo de encode projetado antes da recuperação. No receptor, `jitterBufferTarget` agora cresce rapidamente sob jitter/drop/freeze e decai 15 ms somente após cinco amostras estáveis, limitado a 360 ms no desempenho e 480 ms na qualidade.
+
+No run curto final da UHD 620, desempenho apresentou 29,24 FPS com 41,4% de CPU agregada (contra 27,59/46,1% no run diagnóstico inicial) e qualidade apresentou 18,11 FPS com 44,7% (contra 13,88/47,9%). SSIM ficou em 0,9607 e 0,9767, respectivamente. A melhora de qualidade foi obtida sem voltar a comprimir linearmente o budget ao reduzir FPS, pois isso reativava os descartes do rate control OpenH264.
+
 ## Como ler as evidências
 
 Este documento usa quatro rótulos:
@@ -159,14 +174,15 @@ receptor
 ### 2.2 Regras de adaptação
 
 - Intervalo de decisão: 1,5 s.
-- As três primeiras amostras são somente observação de startup.
-- Pressão puramente de rede reduz o budget de bitrate, não a resolução; o estado só é classificado como sustentado após quatro amostras em desempenho ou seis em qualidade.
+- Hardware encode confirmado mantém três amostras de observação; encoder real por software inicia imediatamente em um nível espacial conservador.
+- Pressão de rede só muda o nível após quatro amostras em desempenho ou seis em qualidade; então reduz pixels e, no piso espacial, cadência.
 - Downshift por FPS só ocorre quando há perda entre captura e encode.
-- Encode time é comparado ao orçamento de 16,67 ms em 60 FPS ou 33,33 ms em 30 FPS.
+- Encode time é comparado ao orçamento do nível temporal atual (60/30/20/15 FPS).
 - Cada downshift de encoder abre um trial de três amostras. Ele só permanece com ganho de delivery ≥8 pontos percentuais, recuperação para ≥0,92 ou queda de custo de encode ≥15%; caso contrário volta exatamente ao nível anterior e entra em cooldown.
-- Downshift comprovadamente eficaz é rápido; recuperação é lenta e tem cooldown.
-- O bitrate acompanha aproximadamente o número de pixels, preservando 22% de headroom da estimativa de uplink.
+- Downshift comprovadamente eficaz é rápido; recuperação exige 12% de headroom para o próximo nível, custo de encode projetado seguro e cooldown.
+- Queda de bitrate acompanha a estimativa imediatamente; recuperação sobe 15% por amostra. O budget acompanha pixels, preserva 22% de headroom e não cai linearmente com FPS para evitar frame skip do OpenH264.
 - Cada peer possui seu próprio estado, encoder e congestion controller. Um peer ruim não altera diretamente o perfil dos demais.
+- O receptor adapta o jitter buffer entre 140–360 ms (desempenho) ou 180–480 ms (qualidade), subindo com jitter/drop/freeze e recuando lentamente.
 
 ### 2.3 O que a arquitetura atual não é
 
@@ -183,12 +199,13 @@ receptor
 | Objetivo | movimento/latência | detalhe espacial |
 | Captura nominal | 1280×720 @ 60 FPS | 1920×1080 @ 30 FPS |
 | Níveis espaciais | 720p, 540p, 360p | 1080p, 900p, 720p |
+| Níveis temporais | 60, 30, 20, 15 FPS | 30, 20, 15 FPS |
 | Bitrate máximo, 1 peer | 8 Mbps | 8 Mbps |
-| Bitrate mínimo | 1,2 Mbps | 1,2 Mbps |
+| Piso do budget nominal | 300 kbps | 300 kbps |
 | `degradationPreference` | `maintain-resolution` | `maintain-resolution` |
 | `contentHint` | `motion` | `motion` |
 | Codec preferido | H.264 por hardware | H.264 por hardware |
-| Buffer-alvo do receptor | 140 ms | 180 ms |
+| Buffer-alvo do receptor | 140–360 ms adaptativo | 180–480 ms adaptativo |
 | Pressão necessária | reage mais cedo | reage mais cautelosamente |
 
 `maintain-resolution` em desempenho parece contraintuitivo, mas é deliberado: evita uma segunda adaptação espacial oculta no Chromium. A prioridade temporal continua sendo implementada pelo target de 60 FPS e pelo controlador do aplicativo, que reduz resolução somente quando há evidência de pressão downstream.
