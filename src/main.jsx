@@ -39,6 +39,9 @@ import winSend from './assets/win98/send.png';
 import winPencilEdit from './assets/win98/pencil-edit-64.png';
 import winAppIcon from './assets/win98/jump-app-icon.png';
 import winConnectionSprite from './assets/win98/connection-sprite.png';
+import { PaneResizeHandle } from './components/PaneResizeHandle.jsx';
+import { ScreenShareDialog } from './components/ScreenShareDialog.jsx';
+import { useScreenShare } from './hooks/useScreenShare.js';
 import { usePeerMesh } from './webrtc/usePeerMesh.js';
 
 const INITIAL_QUERY = new URLSearchParams(window.location.search);
@@ -63,6 +66,8 @@ const CONTACTS_KEY = 'jump-contacts';
 const UNREAD_COUNTS_KEY = 'jump-unread-counts';
 const PROFILE_STATUS_KEY = 'jump-profile-status';
 const MESSAGE_CLOCK_KEY = 'jump-message-clock';
+const CALL_CHAT_SPLIT_KEY = 'jump-call-chat-split';
+const SCREEN_SHARE_PROFILE_KEY = 'jump-screen-share-profile';
 const MAX_CONTACTS = 100;
 const PRESENCE_STATUSES = ['online', 'dnd', 'offline'];
 const WIN_ICONS = {
@@ -937,9 +942,7 @@ function App() {
   const [isDeafened, setIsDeafened] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
-  const [screenSharePickerOpen, setScreenSharePickerOpen] = useState(false);
-  const [screenShareSources, setScreenShareSources] = useState([]);
-  const [screenShareSourcesLoading, setScreenShareSourcesLoading] = useState(false);
+  const [screenShareProfileId, setScreenShareProfileId] = useState(() => localStorage.getItem(SCREEN_SHARE_PROFILE_KEY) || 'balanced');
   const [inCall, setInCall] = useState(false);
   const [callDurationSeconds, setCallDurationSeconds] = useState(0);
   const [audioInputDevices, setAudioInputDevices] = useState([]);
@@ -955,6 +958,7 @@ function App() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [callPanelOpen, setCallPanelOpen] = useState(false);
   const [chatPanelOpen, setChatPanelOpen] = useState(true);
+  const [callChatSplit, setCallChatSplit] = useState(() => Math.max(25, Math.min(75, Number(localStorage.getItem(CALL_CHAT_SPLIT_KEY)) || 50)));
   const [roomProtected, setRoomProtected] = useState(false);
   const [roomCreatedAt, setRoomCreatedAt] = useState(0);
   const [editingRoomName, setEditingRoomName] = useState(false);
@@ -1000,8 +1004,11 @@ function App() {
   const incomingAttachmentTransfersRef = useRef(new Map());
   const requestedAttachmentIdsRef = useRef(new Map());
   const audioStreamRef = useRef(null);
+  const outboundAudioStreamRef = useRef(null);
   const cameraStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
+  const screenAudioSessionRef = useRef(null);
+  const videoProfileRef = useRef(screenShareProfileId);
   const inCallRef = useRef(false);
   const callStartedAtRef = useRef(0);
   const isMutedRef = useRef(isMuted);
@@ -1180,17 +1187,6 @@ function App() {
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [profileSettingsOpen]);
-  useEffect(() => {
-    if (!screenSharePickerOpen) return undefined;
-    const closeOnEscape = (event) => {
-      if (event.key === 'Escape') {
-        setScreenSharePickerOpen(false);
-        setScreenShareSources([]);
-      }
-    };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [screenSharePickerOpen]);
   useEffect(() => {
     const applyUpdateState = (nextState) => setUpdateState((current) => {
       if (!nextState?.status) return current;
@@ -1376,6 +1372,7 @@ function App() {
       deafened: isDeafenedRef.current,
       camera: Boolean(cameraStreamRef.current),
       sharing: Boolean(screenStreamRef.current),
+      sharingAudio: Boolean(screenAudioSessionRef.current),
       ...overrides,
     });
   }, [broadcastRoomData]);
@@ -1557,6 +1554,7 @@ function App() {
         deafened: isDeafenedRef.current,
         camera: Boolean(cameraStreamRef.current),
         sharing: Boolean(screenStreamRef.current),
+        sharingAudio: Boolean(screenAudioSessionRef.current),
       });
       requestDirectSync();
       messagesRef.current.forEach((message) => {
@@ -1676,6 +1674,7 @@ function App() {
           inCall: Boolean(payload.inCall),
           camera: Boolean(payload.camera),
           sharing: Boolean(payload.sharing),
+          sharingAudio: Boolean(payload.sharingAudio),
         };
         if (slot) slot.remoteMediaState = nextMediaState;
         if (nextMediaState.inCall) {
@@ -1700,6 +1699,7 @@ function App() {
             deafened: Boolean(payload.deafened),
             camera: Boolean(payload.camera),
             sharing: Boolean(payload.sharing),
+            sharingAudio: Boolean(payload.sharingAudio),
           },
         }));
         return;
@@ -1773,13 +1773,15 @@ function App() {
     handlePeerSignal,
     replacePeerTrack,
     requestPeerNegotiation,
+    setVideoEncodingProfile,
   } = usePeerMesh({
     peerConnectionsRef,
     pendingCandidatesRef,
     localPeerIdRef: peerIdRef,
-    audioStreamRef,
+    audioStreamRef: outboundAudioStreamRef,
     cameraStreamRef,
     screenStreamRef,
+    videoProfileRef,
     remoteStreamsRef,
     sendSignal,
     attachDataChannel,
@@ -1871,9 +1873,12 @@ function App() {
           setRemoteStreams({});
           setRemoteCallStates({});
           audioStreamRef.current?.getTracks().forEach((track) => track.stop());
+          void screenAudioSessionRef.current?.stop();
           cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
           screenStreamRef.current?.getTracks().forEach((track) => track.stop());
           audioStreamRef.current = null;
+          outboundAudioStreamRef.current = null;
+          screenAudioSessionRef.current = null;
           cameraStreamRef.current = null;
           screenStreamRef.current = null;
           inCallRef.current = false;
@@ -1983,9 +1988,11 @@ function App() {
       window.clearTimeout(retryTimer);
       socket?.close();
       closeAllPeers();
+      void screenAudioSessionRef.current?.stop();
       audioStreamRef.current?.getTracks().forEach((track) => track.stop());
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
       screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+      screenAudioSessionRef.current = null;
     };
   }, [closeAllPeers, handleSignalMessage, rememberContact, sendSignal]);
 
@@ -2119,10 +2126,12 @@ function App() {
       if (!track) throw new Error('no-audio-track');
       track.contentHint = 'speech';
       audioStreamRef.current = stream;
+      outboundAudioStreamRef.current = stream;
       track.enabled = !isMutedRef.current;
       if (!(await replacePeerTrack('audioSender', track))) {
         stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
         audioStreamRef.current = null;
+        outboundAudioStreamRef.current = null;
         return false;
       }
       inCallRef.current = true;
@@ -2149,8 +2158,15 @@ function App() {
       track.enabled = !isMutedRef.current;
       const previousStream = audioStreamRef.current;
       audioStreamRef.current = stream;
-      if (!(await replacePeerTrack('audioSender', track))) {
+      const audioSession = screenAudioSessionRef.current;
+      if (audioSession?.mixer) {
+        audioSession.mixer.setMicrophoneStream(stream);
+      } else {
+        outboundAudioStreamRef.current = stream;
+      }
+      if (!audioSession && !(await replacePeerTrack('audioSender', track))) {
         audioStreamRef.current = previousStream;
+        outboundAudioStreamRef.current = previousStream;
         stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
         return false;
       }
@@ -2165,10 +2181,13 @@ function App() {
   }, [refreshAudioDevices, replacePeerTrack]);
 
   const leaveCall = useCallback(() => {
+    void screenAudioSessionRef.current?.stop();
     audioStreamRef.current?.getTracks().forEach((track) => track.stop());
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
     audioStreamRef.current = null;
+    outboundAudioStreamRef.current = null;
+    screenAudioSessionRef.current = null;
     cameraStreamRef.current = null;
     screenStreamRef.current = null;
     void replacePeerTrack('audioSender', null);
@@ -2282,100 +2301,54 @@ function App() {
     }
   }, [announceCallState, replacePeerTrack, startCall]);
 
-  const stopScreenShare = useCallback(() => {
-    screenStreamRef.current?.getTracks().forEach((track) => track.stop());
-    screenStreamRef.current = null;
-    setScreenSharePickerOpen(false);
-    setScreenShareSources([]);
-    setScreenShareSourcesLoading(false);
-    const fallbackTrack = cameraStreamRef.current?.getVideoTracks()[0] || null;
-    void replacePeerTrack('videoSender', fallbackTrack);
-    setIsSharing(false);
-    announceCallState({ sharing: false });
-  }, [announceCallState, replacePeerTrack]);
+  const updateScreenShareProfile = useCallback((profileId) => {
+    videoProfileRef.current = profileId;
+    setScreenShareProfileId(profileId);
+    localStorage.setItem(SCREEN_SHARE_PROFILE_KEY, profileId);
+    void setVideoEncodingProfile(profileId);
+  }, [setVideoEncodingProfile]);
 
-  const startScreenShare = useCallback(async (source = null) => {
-    const desktopCapture = source?.id && globalThis.jumpDesktop?.isDesktop;
-    if (desktopCapture && !navigator.mediaDevices?.getUserMedia) {
-      setPermissionError('O compartilhamento de tela não está disponível neste aplicativo.');
-      return false;
-    }
-    if (!desktopCapture && !navigator.mediaDevices?.getDisplayMedia) {
-      setPermissionError('O compartilhamento de tela não está disponível neste navegador.');
-      return false;
-    }
-    setScreenSharePickerOpen(false);
-    setScreenShareSources([]);
-    setPermissionError('');
-    try {
-      const stream = desktopCapture
-        ? await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            mandatory: {
-              chromeMediaSource: 'desktop',
-              chromeMediaSourceId: source.id,
-              maxFrameRate: 60,
-            },
-          },
-        })
-        : await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: { ideal: 30, max: 60 } },
-          audio: false,
-        });
-      const track = stream.getVideoTracks()[0];
-      if (!track) throw new Error('no-screen-track');
-      track.contentHint = 'detail';
-      screenStreamRef.current = stream;
-      if (!(await replacePeerTrack('videoSender', track))) {
-        screenStreamRef.current = null;
-        stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
-        return false;
-      }
-      track.onended = () => {
-        if (screenStreamRef.current === stream) stopScreenShare();
-      };
-      setIsSharing(true);
-      announceCallState({ sharing: true });
-      return true;
-    } catch (error) {
-      if (error?.name === 'AbortError') return false;
-      setPermissionError(mediaErrorMessage(error, 'Não foi possível iniciar o compartilhamento de tela.'));
-      return false;
-    }
-  }, [announceCallState, replacePeerTrack, stopScreenShare]);
+  const updateCallChatSplit = useCallback((percent) => {
+    const next = Math.max(25, Math.min(75, Number(percent) || 50));
+    setCallChatSplit(next);
+    localStorage.setItem(CALL_CHAT_SPLIT_KEY, String(next));
+  }, []);
 
-  const selectScreenShareSource = useCallback((source) => {
-    void startScreenShare(source);
-  }, [startScreenShare]);
-
-  const toggleScreenShare = useCallback(async () => {
-    if (screenStreamRef.current) {
-      stopScreenShare();
-      return;
-    }
-    if (!inCallRef.current && !(await startCall())) return;
-    const getDesktopSources = globalThis.jumpDesktop?.getDesktopSources;
-    if (typeof getDesktopSources === 'function') {
-      setScreenShareSourcesLoading(true);
-      setScreenSharePickerOpen(true);
-      try {
-        const sources = await getDesktopSources();
-        if (!sources.length) {
-          setScreenSharePickerOpen(false);
-          setPermissionError('Nenhuma tela ou janela disponível para compartilhar.');
-        }
-        setScreenShareSources(sources);
-      } catch {
-        setScreenSharePickerOpen(false);
-        setPermissionError('Não foi possível listar as telas e janelas disponíveis.');
-      } finally {
-        setScreenShareSourcesLoading(false);
-      }
-      return;
-    }
-    await startScreenShare();
-  }, [startCall, startScreenShare, stopScreenShare]);
+  const {
+    audioSource: screenShareAudioSource,
+    cancelPicker: cancelScreenSharePicker,
+    changeIncludeAudio: changeScreenShareAudio,
+    changeSyncAudio: changeScreenShareAudioSync,
+    chooseVideoSource: chooseScreenShareVideo,
+    includeAudio: screenShareIncludesAudio,
+    loading: screenShareSourcesLoading,
+    mediaCapabilities: screenShareMediaCapabilities,
+    pickerOpen: screenSharePickerOpen,
+    setAudioSource: setScreenShareAudioSource,
+    setTab: setScreenShareTab,
+    sources: screenShareSources,
+    startScreenShare,
+    stopScreenShare,
+    syncAudio: screenShareAudioSync,
+    tab: screenShareTab,
+    toggleScreenShare,
+    videoSource: screenShareVideoSource,
+  } = useScreenShare({
+    announceCallState,
+    audioStreamRef,
+    cameraStreamRef,
+    inCallRef,
+    outboundAudioStreamRef,
+    replacePeerTrack,
+    screenAudioSessionRef,
+    screenStreamRef,
+    setIsSharing,
+    setPermissionError,
+    setVideoEncodingProfile,
+    startCall,
+    profileId: screenShareProfileId,
+    setProfileId: updateScreenShareProfile,
+  });
 
   const publishMessage = useCallback((payload) => {
     if (!roomIdRef.current) return;
@@ -2896,7 +2869,7 @@ function App() {
 
         <div className="dashboard-scroll">
           <div className={`content-grid ${callPanelOpen ? 'is-call-open' : 'is-chat-only'} ${!chatVisible ? 'is-chat-hidden' : ''}`}>
-            <div className={`content-column ${callPanelOpen ? 'is-call-visible' : 'is-chat-visible'} ${!chatVisible ? 'is-chat-hidden' : ''}`}>
+            <div className={`content-column ${callPanelOpen ? 'is-call-visible' : 'is-chat-visible'} ${callPanelOpen && chatVisible ? 'has-call-chat-split' : ''} ${!chatVisible ? 'is-chat-hidden' : ''}`} style={callPanelOpen && chatVisible ? { '--call-pane-percent': `${callChatSplit}%` } : undefined}>
               {callPanelOpen && <section className="stage-card">
                 <div className="stage-header">
                   <div className="stage-title"><strong>{roomName} call {formatCallDuration(callDurationSeconds)}</strong></div>
@@ -2914,8 +2887,8 @@ function App() {
                       const personIsSpeaking = Boolean(speakingPeers[person.self ? 'self' : person.peerId]);
                       const personLabel = person.self ? `${person.name} (você)` : person.name;
                       const stateLabel = person.self
-                        ? (isSharing ? 'compartilhando a tela' : isCameraOn ? 'câmera ativa' : 'no palco')
-                        : (remoteCallState.sharing ? 'compartilhando a tela' : remoteCallState.camera ? 'câmera ativa' : 'em chamada');
+                        ? (isSharing ? `compartilhando a tela${screenAudioSessionRef.current ? ' + áudio' : ''}` : isCameraOn ? 'câmera ativa' : 'no palco')
+                        : (remoteCallState.sharing ? `compartilhando a tela${remoteCallState.sharingAudio ? ' + áudio' : ''}` : remoteCallState.camera ? 'câmera ativa' : 'em chamada');
                       return (
                         <article className={`call-stream-card ${person.self ? 'is-self' : ''}`} key={person.peerId}>
                           <div className={`call-stream-viewport ${hasVideo && personIsSpeaking ? 'is-speaking' : ''}`}>
@@ -2972,6 +2945,8 @@ function App() {
                   </div>
                 )}
               </section>}
+
+              {callPanelOpen && chatVisible && <PaneResizeHandle value={callChatSplit} onChange={updateCallChatSplit} />}
 
               {(permissionError || signalStatus !== 'connected') && <div className={`notice-bar ${permissionError ? 'is-warning' : ''}`}><span>{permissionError || 'Sinalização offline: peers conectados continuam conversando; novas entradas precisam do servidor.'}</span><IconButton label="Fechar aviso" className="notice-close-button win98-close-control" onClick={() => setPermissionError('')}><X size={15} /></IconButton></div>}
 
@@ -3090,41 +3065,26 @@ function App() {
         </div>
       )}
 
-      {screenSharePickerOpen && (
-        <div className="screen-share-overlay" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) {
-            setScreenSharePickerOpen(false);
-            setScreenShareSources([]);
-          }
-        }}>
-          <div className="screen-share-dialog" role="dialog" aria-modal="true" aria-labelledby="screen-share-title" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="screen-share-titlebar">
-              <div className="screen-share-titlebar-label"><img className="room-info-titlebar-icon" src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong id="screen-share-title">JUMP — compartilhar tela</strong></div>
-              <button type="button" className="win98-close-control" aria-label="Cancelar compartilhamento" title="Cancelar" onClick={() => { setScreenSharePickerOpen(false); setScreenShareSources([]); }}>×</button>
-            </div>
-            <div className="screen-share-body">
-              <p>Escolha uma janela ou uma tela inteira para transmitir.</p>
-              {screenShareSourcesLoading ? (
-                <div className="screen-share-empty">procurando telas e janelas...</div>
-              ) : screenShareSources.length ? (
-                <div className="screen-share-grid">
-                  {screenShareSources.map((source) => (
-                    <button type="button" className="screen-share-source" key={source.id} onClick={() => selectScreenShareSource(source)}>
-                      <span className="screen-share-thumbnail">
-                        {source.thumbnail ? <img src={source.thumbnail} alt="" draggable="false" /> : source.appIcon ? <img src={source.appIcon} alt="" draggable="false" /> : <span className="screen-share-thumbnail-placeholder">J</span>}
-                      </span>
-                      <span className="screen-share-source-copy"><strong>{source.name || (source.type === 'screen' ? 'tela inteira' : 'janela')}</strong><small>{source.type === 'screen' ? 'tela inteira' : 'janela'}</small></span>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div className="screen-share-empty">nenhuma fonte disponível</div>
-              )}
-            </div>
-            <div className="screen-share-actions"><button type="button" className="dialog-secondary" onClick={() => { setScreenSharePickerOpen(false); setScreenShareSources([]); }}>cancelar</button></div>
-          </div>
-        </div>
-      )}
+      {screenSharePickerOpen && <ScreenShareDialog
+        appIcon={winAppIcon}
+        sources={screenShareSources}
+        loading={screenShareSourcesLoading}
+        mediaCapabilities={screenShareMediaCapabilities}
+        tab={screenShareTab}
+        onTabChange={setScreenShareTab}
+        videoSource={screenShareVideoSource}
+        audioSource={screenShareAudioSource}
+        onVideoSource={chooseScreenShareVideo}
+        onAudioSource={setScreenShareAudioSource}
+        includeAudio={screenShareIncludesAudio}
+        onIncludeAudio={changeScreenShareAudio}
+        syncAudio={screenShareAudioSync}
+        onSyncAudio={changeScreenShareAudioSync}
+        profileId={screenShareProfileId}
+        onProfile={updateScreenShareProfile}
+        onConfirm={startScreenShare}
+        onCancel={cancelScreenSharePicker}
+      />}
 
       {profileSettingsOpen && (
         <div className="profile-settings-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setProfileSettingsOpen(false); }}>

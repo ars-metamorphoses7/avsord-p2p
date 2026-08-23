@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { adaptVideoSender, configureVideoSender, preferVideoCodecs } from '../media/screenShareProfiles.js';
 
 const ICE_RESTART_DELAY_MS = 4_000;
 const ICE_RESTART_RETRY_MS = 10_000;
@@ -43,6 +44,7 @@ export function usePeerMesh({
   audioStreamRef,
   cameraStreamRef,
   screenStreamRef,
+  videoProfileRef,
   remoteStreamsRef,
   sendSignal,
   attachDataChannel,
@@ -61,6 +63,36 @@ export function usePeerMesh({
     globalThis.__jumpPeerMesh = { peerConnectionsRef, remoteStreamsRef };
     return () => { delete globalThis.__jumpPeerMesh; };
   }, [peerConnectionsRef, remoteStreamsRef]);
+
+  useEffect(() => {
+    let running = false;
+    const tuneVideo = async () => {
+      if (running) return;
+      running = true;
+      const slots = [...peerConnectionsRef.current.values()].filter((slot) => slot?.videoSender?.track && slot.pc.connectionState !== 'closed');
+      await Promise.all(slots.map(async (slot) => {
+        try {
+          const reports = await slot.pc.getStats(slot.videoSender.track);
+          const outbound = [...reports.values()].find((report) => report.type === 'outbound-rtp' && report.kind === 'video' && !report.isRemote);
+          const transport = outbound?.transportId ? reports.get(outbound.transportId) : [...reports.values()].find((report) => report.type === 'transport');
+          const pair = transport?.selectedCandidatePairId ? reports.get(transport.selectedCandidatePairId) : [...reports.values()].find((report) => report.type === 'candidate-pair' && report.nominated && report.state === 'succeeded');
+          const diagnostics = {
+            availableOutgoingBitrate: Number(pair?.availableOutgoingBitrate) || 0,
+            framesPerSecond: Number(outbound?.framesPerSecond) || 0,
+            qualityLimitationReason: outbound?.qualityLimitationReason || 'none',
+          };
+          slot.videoDiagnostics = diagnostics;
+          await adaptVideoSender(slot.videoSender, videoProfileRef.current, slots.length, diagnostics);
+        } catch {
+          // Stats support varies slightly across Chromium builds. Static sender
+          // parameters remain active when an adaptive sample is unavailable.
+        }
+      }));
+      running = false;
+    };
+    const timer = window.setInterval(() => { void tuneVideo(); }, 2_500);
+    return () => window.clearInterval(timer);
+  }, [peerConnectionsRef, videoProfileRef]);
 
   const closePeer = useCallback((peerId) => {
     const slot = peerConnectionsRef.current.get(peerId);
@@ -124,6 +156,9 @@ export function usePeerMesh({
         sender.setStreams?.(...(outboundStream ? [outboundStream] : []));
         slot[`${senderKey}Stream`] = outboundStream;
         await sender.replaceTrack(track || null);
+        if (senderKey === 'videoSender' && track) {
+          await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
+        }
         // Chromium does not consistently emit the first remote `track` event
         // when a transceiver was negotiated without an msid. Only the sender
         // that attaches the first real track renegotiates; the receiver never
@@ -135,7 +170,13 @@ export function usePeerMesh({
     }));
     if (failed.length) onPeerError?.('A mídia não pôde ser anexada a um dos participantes. Tente entrar na chamada novamente.');
     return failed.length === 0;
-  }, [onPeerError, peerConnectionsRef, requestPeerNegotiation]);
+  }, [onPeerError, peerConnectionsRef, requestPeerNegotiation, videoProfileRef]);
+
+  const setVideoEncodingProfile = useCallback(async (profileId) => {
+    videoProfileRef.current = profileId;
+    const slots = [...peerConnectionsRef.current.values()].filter((slot) => slot?.videoSender?.track);
+    await Promise.all(slots.map((slot) => configureVideoSender(slot.videoSender, profileId, slots.length)));
+  }, [peerConnectionsRef, videoProfileRef]);
 
   const createPeerConnection = useCallback((peerId, initiator = false) => {
     const existing = peerConnectionsRef.current.get(peerId);
@@ -147,6 +188,7 @@ export function usePeerMesh({
     // both sides can leave orphaned transceivers after a polite rollback.
     const audioTransceiver = initiator ? pc.addTransceiver('audio', { direction: 'sendrecv' }) : null;
     const videoTransceiver = initiator ? pc.addTransceiver('video', { direction: 'sendrecv' }) : null;
+    if (videoTransceiver) preferVideoCodecs(videoTransceiver, videoProfileRef.current);
     const slot = {
       pc,
       audioTransceiver,
@@ -231,6 +273,7 @@ export function usePeerMesh({
       slot.videoSender.setStreams?.(videoStream);
       slot.videoSenderStream = videoStream;
       initialMediaTasks.push(slot.videoSender.replaceTrack(videoTrack));
+      initialMediaTasks.push(configureVideoSender(slot.videoSender, videoProfileRef.current, peerConnectionsRef.current.size));
     }
     slot.mediaReady = Promise.all(initialMediaTasks);
     if (initiator) {
@@ -255,6 +298,7 @@ export function usePeerMesh({
     screenStreamRef,
     sendSignal,
     setRemoteStreams,
+    videoProfileRef,
   ]);
 
   const handlePeerSignal = useCallback((from, data) => {
@@ -305,6 +349,7 @@ export function usePeerMesh({
         const transceivers = slot.pc.getTransceivers();
         slot.audioTransceiver ||= transceivers.find((transceiver) => transceiver.receiver.track?.kind === 'audio') || null;
         slot.videoTransceiver ||= transceivers.find((transceiver) => transceiver.receiver.track?.kind === 'video') || null;
+        if (slot.videoTransceiver) preferVideoCodecs(slot.videoTransceiver, videoProfileRef.current);
         slot.audioSender ||= slot.audioTransceiver?.sender || null;
         slot.videoSender ||= slot.videoTransceiver?.sender || null;
         const audioStream = audioStreamRef.current;
@@ -323,6 +368,7 @@ export function usePeerMesh({
           slot.videoSender.setStreams?.(videoStream);
           slot.videoSenderStream = videoStream;
           mediaTasks.push(slot.videoSender.replaceTrack(videoTrack));
+          mediaTasks.push(configureVideoSender(slot.videoSender, videoProfileRef.current, peerConnectionsRef.current.size));
         }
         slot.mediaReady = Promise.all(mediaTasks);
         await slot.mediaReady;
@@ -340,7 +386,7 @@ export function usePeerMesh({
       }
       return true;
     }, () => onPeerError?.('A conexão com este participante foi interrompida.'));
-  }, [audioStreamRef, cameraStreamRef, createPeerConnection, onPeerError, pendingCandidatesRef, remoteStreamsRef, screenStreamRef, sendSignal, setRemoteStreams]);
+  }, [audioStreamRef, cameraStreamRef, createPeerConnection, onPeerError, peerConnectionsRef, pendingCandidatesRef, remoteStreamsRef, screenStreamRef, sendSignal, setRemoteStreams, videoProfileRef]);
 
   const closeAllPeers = useCallback(() => {
     [...peerConnectionsRef.current.keys()].forEach(closePeer);
@@ -353,5 +399,6 @@ export function usePeerMesh({
     handlePeerSignal,
     replacePeerTrack,
     requestPeerNegotiation,
+    setVideoEncodingProfile,
   };
 }

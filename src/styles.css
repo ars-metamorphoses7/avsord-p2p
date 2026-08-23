@@ -349,7 +349,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--yellow); ou
   .dashboard-scroll { display: flex; flex-direction: column; height: calc(100vh - 68px); overflow: hidden; padding: 0; }
   .content-grid { display: grid; flex: 1 1 auto; width: 100%; min-height: 0; }
   .content-column { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; align-items: stretch; height: 100%; min-height: 0; }
-  .content-column.is-call-visible { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .content-column.is-call-visible.has-call-chat-split { grid-template-columns: minmax(0, var(--call-pane-percent, 50%)) 8px minmax(0, 1fr); }
   .stage-card { grid-column: 1; grid-row: 1; }
   .notice-bar { grid-column: 1 / -1; grid-row: 2; }
   .stage-card, .chat-card { height: 100%; min-height: 0; }
@@ -359,7 +359,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--yellow); ou
   .stage-side-tiles { min-height: 0; grid-template-rows: repeat(3, minmax(0, 1fr)); }
   .small-stage-tile { min-height: 0; }
   .chat-card { grid-column: 1; grid-row: 1; }
-  .content-column.is-call-visible .chat-card { grid-column: 2; }
+  .content-column.is-call-visible.has-call-chat-split .chat-card { grid-column: 3; }
+  .content-column.is-call-visible.has-call-chat-split .call-chat-resizer { grid-column: 2; grid-row: 1; }
   .message-list { min-height: 0; }
   .right-column { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
   .right-column .side-card { padding: 13px; }
@@ -3731,8 +3732,8 @@ body,
 .screen-share-dialog {
   display: flex;
   flex-direction: column;
-  width: min(720px, 100%);
-  max-height: min(86vh, 620px);
+  width: min(900px, 100%);
+  max-height: min(90vh, 760px);
   overflow: hidden;
   padding: 3px;
   color: #000;
@@ -3766,6 +3767,7 @@ body,
 }
 
 .screen-share-body {
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   padding: 12px;
@@ -3783,7 +3785,39 @@ body,
   gap: 8px;
 }
 
+.screen-share-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  min-height: 34px;
+  padding: 7px 10px 0;
+  border-bottom: 1px solid #808080;
+}
+
+.screen-share-tabs button {
+  display: inline-flex;
+  align-items: center;
+  min-width: 148px;
+  height: 27px;
+  gap: 6px;
+  padding: 0 10px;
+  color: #000;
+  background: var(--win-face);
+}
+
+.screen-share-tabs button.is-active {
+  position: relative;
+  z-index: 1;
+  height: 30px;
+  margin-bottom: -1px;
+  box-shadow: var(--win98-button-shadow-pressed) !important;
+  background: #fff;
+}
+
+.screen-share-tabs button:disabled { color: #777; text-shadow: 1px 1px #fff; }
+
 .screen-share-source {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -3802,6 +3836,24 @@ body,
 .screen-share-source:hover {
   color: #fff;
   background: #000080;
+}
+
+.screen-share-source.is-selected {
+  color: #fff;
+  background: #000080;
+  box-shadow: var(--win98-button-shadow-pressed) !important;
+}
+
+.screen-share-source.is-selected .screen-share-source-copy small { color: #e6e6ff; }
+
+.screen-share-selected-check {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  padding: 2px;
+  color: #fff;
+  background: #008000;
+  box-sizing: content-box;
 }
 
 .screen-share-source:active {
@@ -3879,8 +3931,136 @@ body,
 .screen-share-actions {
   display: flex;
   justify-content: flex-end;
-  padding: 0 12px 10px;
+  gap: 7px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid #808080;
 }
+
+.screen-share-options {
+  display: grid;
+  grid-template-columns: minmax(180px, .85fr) minmax(330px, 1.5fr) minmax(210px, 1fr);
+  align-items: stretch;
+  gap: 8px;
+  padding: 9px 10px;
+  border-top: 1px solid #fff;
+  background: var(--win-face);
+}
+
+.screen-share-selection-info,
+.screen-share-audio-options,
+.screen-share-quality {
+  min-width: 0;
+  margin: 0;
+  padding: 7px;
+  border: 0;
+  box-shadow: var(--win98-inset-shadow);
+  background: #fff;
+}
+
+.screen-share-selection-info {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+
+.screen-share-selection-info strong,
+.screen-share-selection-info small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-share-selection-info small { color: #444; }
+
+.screen-share-quality legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  background: var(--win-face);
+}
+
+.screen-share-quality legend span {
+  margin-left: 4px;
+  padding: 2px 4px;
+  color: #700;
+  background: #efefef;
+  box-shadow: var(--win98-inset-shadow);
+  font-weight: 400;
+}
+
+.screen-share-quality legend span:empty { display: none; }
+.screen-share-quality legend span.is-accelerated { color: #006000; }
+
+.screen-share-quality > div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.screen-share-quality button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  min-height: 45px;
+  gap: 3px;
+  padding: 6px;
+  color: #000;
+  background: var(--win-face);
+  text-align: left;
+}
+
+.screen-share-quality button.is-selected {
+  color: #fff;
+  background: #000080;
+  box-shadow: var(--win98-button-shadow-pressed) !important;
+}
+
+.screen-share-quality button small { color: inherit; line-height: 1.15; }
+
+.screen-share-audio-options {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+
+.screen-share-audio-options label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.screen-share-audio-options label.is-disabled { color: #777; cursor: default; }
+.screen-share-audio-options input { margin: 0; }
+.screen-share-audio-options small { color: #444; line-height: 1.2; }
+
+.call-chat-resizer {
+  position: relative;
+  z-index: 3;
+  min-width: 8px;
+  cursor: col-resize;
+  background: var(--win-face);
+  box-shadow: inset 1px 0 #fff, inset -1px 0 #808080;
+  touch-action: none;
+}
+
+.call-chat-resizer::before {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 4px;
+  height: 54px;
+  transform: translateY(-50%);
+  background: repeating-linear-gradient(to bottom, #808080 0 2px, #fff 2px 4px);
+  content: '';
+}
+
+.call-chat-resizer:focus-visible { outline: 1px dotted #000; outline-offset: -3px; }
+body.is-resizing-call-chat, body.is-resizing-call-chat * { cursor: col-resize !important; }
 
 .screen-share-actions button {
   min-width: 82px;
@@ -3893,6 +4073,11 @@ body,
   .screen-share-overlay { padding: 8px; }
   .screen-share-body { padding: 9px; }
   .screen-share-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 1120px) {
+  .call-chat-resizer { display: none; }
+  .screen-share-options { grid-template-columns: 1fr; }
 }
 
 /* A chamada ocupa uma grade de transmissões horizontais, como uma janela Win98. */

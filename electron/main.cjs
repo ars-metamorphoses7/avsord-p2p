@@ -4,9 +4,11 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { autoUpdater } = require('electron-updater');
 const { createUpdateController } = require('./update-controller.cjs');
+const { setupDesktopMedia } = require('./desktop-media.cjs');
 
 let mainWindow;
 let signalingServer;
+let desktopMedia;
 let signalingPort = Number(process.env.PORT || 8787);
 let pendingDeepLink = process.argv.find((argument) => argument.startsWith('jump://')) || '';
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -26,46 +28,6 @@ function setupWindowControls() {
     return { maximized: mainWindow.isMaximized() };
   });
   ipcMain.on('window:close', () => mainWindow?.close());
-}
-
-function setupMediaCapture() {
-  const allowedPermissions = new Set(['media', 'display-capture']);
-  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => allowedPermissions.has(permission));
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => callback(allowedPermissions.has(permission)));
-  ipcMain.handle('desktop:sources', async () => {
-    try {
-      const sources = await desktopCapturer.getSources({
-        types: ['screen', 'window'],
-        thumbnailSize: { width: 320, height: 180 },
-        fetchWindowIcons: true,
-      });
-      return sources.map((source) => ({
-        id: source.id,
-        name: source.name,
-        type: source.id.startsWith('window:') ? 'window' : 'screen',
-        displayId: source.display_id || '',
-        thumbnail: source.thumbnail?.toDataURL?.() || '',
-        appIcon: source.appIcon?.toDataURL?.() || '',
-      }));
-    } catch (error) {
-      console.error('JUMP desktop sources failed:', error);
-      return [];
-    }
-  });
-  session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
-    try {
-      const sources = await desktopCapturer.getSources({
-        types: ['screen', 'window'],
-        thumbnailSize: { width: 0, height: 0 },
-        fetchWindowIcons: false,
-      });
-      const source = sources.find((candidate) => candidate.id.startsWith('screen:')) || sources[0];
-      callback(source ? { video: source } : {});
-    } catch (error) {
-      console.error('JUMP screen capture failed:', error);
-      callback({});
-    }
-  }, { useSystemPicker: true });
 }
 
 function preferredNetworkAddress() {
@@ -119,6 +81,26 @@ function setupUpdater() {
   ipcMain.handle('update:check', () => controller.check());
   ipcMain.handle('update:download', () => controller.download());
   ipcMain.handle('update:install', () => controller.install());
+}
+
+function setupMediaDiagnostics() {
+  ipcMain.handle('media:capabilities', async () => {
+    const featureStatus = app.getGPUFeatureStatus();
+    const videoEncode = featureStatus?.video_encode || 'unknown';
+    const enabledStates = new Set(['enabled', 'enabled_on', 'enabled_force', 'enabled_force_on']);
+    let gpu = null;
+    try {
+      const info = await app.getGPUInfo('basic');
+      const active = info?.gpuDevice?.find((device) => device.active) || info?.gpuDevice?.[0];
+      gpu = active ? { vendorId: active.vendorId, deviceId: active.deviceId } : null;
+    } catch { /* GPU details are diagnostic-only. */ }
+    return {
+      hardwareAcceleration: app.isHardwareAccelerationEnabled(),
+      hardwareVideoEncoding: enabledStates.has(videoEncode),
+      videoEncode,
+      gpu,
+    };
+  });
 }
 
 async function startSignalingServer() {
@@ -194,7 +176,8 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     setupUpdater();
     setupWindowControls();
-    setupMediaCapture();
+    setupMediaDiagnostics();
+    desktopMedia = setupDesktopMedia({ desktopCapturer, ipcMain, session });
     await createWindow();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -205,6 +188,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('before-quit', () => {
+    desktopMedia?.stopProcessAudio();
     signalingServer?.close();
   });
 

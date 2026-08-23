@@ -9,6 +9,14 @@ contextBridge.exposeInMainWorld('jumpDesktop', {
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.send('window:close'),
   getDesktopSources: () => ipcRenderer.invoke('desktop:sources'),
+  getMediaCapabilities: () => ipcRenderer.invoke('media:capabilities'),
+  startDesktopAudio: (target) => ipcRenderer.invoke('desktop:audio-start', target),
+  stopDesktopAudio: () => ipcRenderer.invoke('desktop:audio-stop'),
+  onDesktopAudioData: (callback) => {
+    const listener = (_event, chunk) => callback(chunk);
+    ipcRenderer.on('desktop:audio-data', listener);
+    return () => ipcRenderer.removeListener('desktop:audio-data', listener);
+  },
   onWindowState: (callback) => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('window:state', listener);

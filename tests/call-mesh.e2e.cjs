@@ -1,5 +1,6 @@
 const { app, BrowserWindow, desktopCapturer, ipcMain, session } = require('electron');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -110,6 +111,7 @@ async function run() {
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(true));
   ipcMain.handle('window:state', () => ({ maximized: false }));
   ipcMain.handle('update:state', () => ({ status: 'dev', revision: 0 }));
+  ipcMain.handle('media:capabilities', () => ({ hardwareAcceleration: true, hardwareVideoEncoding: true, videoEncode: 'enabled' }));
   ipcMain.handle('desktop:sources', async () => {
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],
@@ -123,6 +125,9 @@ async function run() {
       displayId: source.display_id || '',
       thumbnail: source.thumbnail?.toDataURL?.() || '',
       appIcon: source.appIcon?.toDataURL?.() || '',
+      processId: source.id.startsWith('window:') ? process.pid : 0,
+      processName: source.id.startsWith('window:') ? 'electron' : '',
+      audioSupported: true,
     }));
   });
   await startServer();
@@ -164,11 +169,33 @@ async function run() {
 
   await click(windows[0], 'button[aria-label="Compartilhar tela"]');
   await waitFor(() => count(windows[0], '.screen-share-source'), 'seletor de tela do Electron', 20_000);
+  if (await count(windows[0], '.screen-share-tabs button') !== 2) throw new Error('O seletor não exibiu as abas de vídeo e áudio.');
+  if (await count(windows[0], '.screen-share-quality button') !== 3) throw new Error('O seletor não exibiu os três perfis de qualidade.');
+  if (await count(windows[0], '.screen-share-audio-options input[type="checkbox"]') !== 2) throw new Error('O seletor não exibiu os controles de áudio e vínculo automático.');
+  if (process.env.JUMP_UI_SCREENSHOT) {
+    windows[0].showInactive();
+    await wait(150);
+    const image = await windows[0].capturePage();
+    fs.writeFileSync(process.env.JUMP_UI_SCREENSHOT, image.toPNG());
+    windows[0].hide();
+  }
+  await click(windows[0], '.screen-share-audio-options input[type="checkbox"]:first-of-type');
+  await click(windows[0], '.screen-share-audio-options label:nth-of-type(2) input');
+  await waitFor(() => windows[0].webContents.executeJavaScript("!document.querySelector('.screen-share-tabs button:nth-child(2)')?.disabled"), 'aba manual de áudio habilitada');
+  await click(windows[0], '.screen-share-tabs button:nth-child(2)');
+  await waitFor(() => count(windows[0], '.screen-share-source'), 'fontes manuais de áudio');
+  await click(windows[0], '.screen-share-audio-options input[type="checkbox"]:first-of-type');
+  await waitFor(() => windows[0].webContents.executeJavaScript("document.querySelector('.screen-share-tabs button:first-child')?.getAttribute('aria-selected') === 'true'"), 'retorno automático à aba de vídeo sem áudio');
   await click(windows[0], '.screen-share-source');
+  await click(windows[0], '.screen-share-actions .dialog-primary');
   await waitFor(() => count(windows[0], 'button[aria-label="Parar compartilhamento"]'), 'compartilhamento local ativo', 20_000);
   await waitFor(() => Promise.all(windows.slice(1).map((window) => count(window, '.voice-member-mic.is-sharing'))).then((values) => values.every(Boolean)), 'compartilhamento anunciado aos peers', 20_000);
   await waitFor(() => Promise.all(windows.slice(1).map((window) => count(window, '.call-stream-card video'))).then((values) => values.every(Boolean)), 'faixa de tela recebida pelos peers', 20_000);
   await waitFor(() => Promise.all(windows.slice(1).map((window) => inboundRtpCount(window, 'video'))).then((values) => values.every((value) => value >= 1)), 'RTP da tela recebido pelos dois peers', 20_000);
+  await waitFor(() => windows[0].webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].every((slot) => {
+    const encoding = slot.videoSender?.getParameters?.().encodings?.[0];
+    return Number(encoding?.maxBitrate) > 0 && Number(encoding?.maxFramerate) > 0;
+  }))()`), 'perfil de bitrate e FPS aplicado aos remetentes', 20_000);
 
   // Recreate the signaling service to exercise the renderer's reconnect path.
   // Existing media tracks must be rebound to the peers' new socket identities.
