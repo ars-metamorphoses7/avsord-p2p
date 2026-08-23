@@ -18,6 +18,23 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 // the network and hardware encoder still have capacity.
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
+// On Windows 11 24H2 Chromium M150 silently prefers WGC for whole-screen
+// capture. A repeated external-source A/B on this runtime measured the DXGI
+// Desktop Duplication path at 56.99 presented FPS versus 54.95 for WGC, with a
+// tighter 18.3 ms versus 24.2 ms frame-interval p95. Keep WGC for individual
+// windows (where it is the safe occlusion-independent capturer), but use DDA
+// for an entire display. The environment escape hatch makes driver-specific
+// regressions recoverable without a new build.
+const requestedScreenCaptureBackend = String(process.env.JUMP_SCREEN_CAPTURE_BACKEND || '').trim().toLowerCase();
+if (process.platform === 'win32' && requestedScreenCaptureBackend !== 'wgc') {
+  const disabledFeatures = new Set(app.commandLine.getSwitchValue('disable-features')
+    .split(',')
+    .map((feature) => feature.trim())
+    .filter(Boolean));
+  disabledFeatures.add('AllowWgcScreenCapturer');
+  app.commandLine.appendSwitch('disable-features', [...disabledFeatures].join(','));
+}
+
 function publishWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send('window:state', { maximized: mainWindow.isMaximized() });
