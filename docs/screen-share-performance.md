@@ -550,6 +550,19 @@ artifacts/wgc-external-trace.json
 
 `artifacts/` é ignorado pelo Git. Os JSONs armazenam o commit base e o estado dirty usado no teste; não devem ser confundidos com resultados de uma release publicada.
 
+### 6.9 Tela inteira isolada com carga GPU e qualidade visual alinhada
+
+Ensaio pendente da seção 6.6/6.7 executado em 2026-08-23 na branch `feat/stream-modes-resume` (`artifacts/bench-resume-screen-dda-gpu128.json`): `JUMP_BENCH_CAPTURE_TYPE=screen`, `AllowWgcScreenCapturer` desabilitado (DDA), receptor posicionado fora de todos os monitores, `JUMP_BENCH_GPU_LOAD=128`, 15 s de warmup e 60 s de medição, cinco repetições alternando a ordem dos perfis, com duas amostras de qualidade visual por rodada alinhadas por Gray code de 20 bits (SSIM/PSNR sobre quadros realmente alinhados, não apenas bitrate/QP).
+
+| Perfil | Present FPS (5 runs) | Intervalo p95 | Saída | Encoder | QP médio | SSIM médio | PSNR médio |
+|---|---|---:|---|---|---:|---|---:|
+| Desempenho | 57,50–57,67 | 18,3 ms | 1280×720 | NVIDIA H.264 MFT | 32,2 | 0,9890–0,9893 | 29,0–29,1 dB |
+| Qualidade | 29,40–29,49 | 36,4 ms | 1920×1080 | NVIDIA H.264 MFT | 29,0 | 0,9954–0,9955 | 32,7–32,9 dB |
+
+**Conclusão medida:** nas dez rodadas válidas, `encoderImplementation` permaneceu `MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)` com escala de adaptação 1 — nenhum fallback para software sob tela inteira isolada + contenção de GPU. Os dois trade-offs voltaram a aparecer simultaneamente: ~1,96× a cadência apresentada no desempenho e fidelidade objetivamente maior na qualidade (ΔSSIM ≈ +0,0063, ΔPSNR ≈ +3,7 dB). Isto fecha o item "repetir com tela inteira isolada e carga GPU"; o gate de jogos reais (Forza/Ultrakill com PresentMon) e a matriz de hardware continuam pendentes.
+
+Correção no harness durante esta rodada: `measureVisualQuality` passava a exigir o parâmetro `captureSource` (fonte do `desktopCapturer`), mas `measureRun` não o repassava — o benchmark padrão abortava com `TypeError` no fim da primeira rodada medida. O `fixtureSource` agora atravessa `measureRun` até `measureVisualQuality`.
+
 ## 7. Decisão: manter M150; não ativar a feature
 
 ### 7.1 `WebRtcAllowWgcUsingTexture`: no-go
@@ -608,7 +621,7 @@ libwebrtc RTP + GCC/TWCC + pacer
 
 ### Fase 0 — baseline e observabilidade
 
-**Estado:** implementada no working tree; validação de release pendente.
+**Estado:** implementada; ensaio de tela inteira isolada com carga GPU e qualidade visual alinhada concluído (seção 6.9). Pendente: runs de release com `captureType=window`, jogos reais e matriz de hardware.
 
 Entregáveis:
 
