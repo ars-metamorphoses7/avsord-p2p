@@ -9,6 +9,7 @@ import {
   screenShareProfile,
   screenSharePlaybackBuffer,
 } from '../media/screenShareProfiles.js';
+import { createScreenShareTelemetrySnapshot } from '../media/screenShareTelemetry.js';
 
 const ICE_RESTART_DELAY_MS = 4_000;
 const ICE_RESTART_RETRY_MS = 10_000;
@@ -28,6 +29,17 @@ function enqueuePeerTask(slot, task, onError) {
     return false;
   });
   return slot.signalChain;
+}
+
+function enqueueSenderMutation(slot, senderKey, task) {
+  slot.senderMutationChains ||= {};
+  const run = () => task(slot?.[senderKey] || null);
+  const previous = slot.senderMutationChains[senderKey] || Promise.resolve();
+  const result = previous.then(run, run);
+  // Keep the queue usable after one rejected mutation while returning the
+  // original result to the caller so its normal error path still runs.
+  slot.senderMutationChains[senderKey] = result.catch(() => false);
+  return result;
 }
 
 function addIncomingTrack(stream, event) {
@@ -120,7 +132,6 @@ export function usePeerMesh({
   onPeerError,
 }) {
   const mountedRef = useRef(true);
-  const adaptationRef = useRef(initialCaptureAdaptation(videoProfileRef.current));
 
   useEffect(() => () => {
     mountedRef.current = false;
@@ -134,79 +145,144 @@ export function usePeerMesh({
 
   useEffect(() => {
     let running = false;
+    const telemetryEnabled = new URLSearchParams(window.location.search).has('streamTelemetry');
     const tuneVideo = async () => {
       if (running) return;
       running = true;
-      const screenTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
-      const slots = [...peerConnectionsRef.current.values()].filter((slot) => (
-        screenTrack && slot?.videoSender?.track === screenTrack && slot.pc.connectionState !== 'closed'
-      ));
-      if (!slots.length) {
+      try {
+        const screenTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
+        const slots = [...peerConnectionsRef.current.values()].filter((slot) => (
+          screenTrack && slot?.videoSender?.track === screenTrack && slot.pc.connectionState !== 'closed'
+          && slot.screenWatching !== false
+        ));
+        if (!slots.length) return;
+        const trackSettings = screenTrack.getSettings?.() || {};
+        const samples = (await Promise.all(slots.map(async (slot) => {
+          try {
+            const reports = await slot.pc.getStats(screenTrack);
+            const telemetry = createScreenShareTelemetrySnapshot(reports, slot.videoTelemetry || null, {
+              trackIdentifier: screenTrack.id,
+              timestampMs: performance.timeOrigin + performance.now(),
+            });
+            const diagnostics = {
+              availableOutgoingBitrate: telemetry.network.availableOutgoingBitrate ?? 0,
+              configuredMaxBitrate: Number(slot.videoSender.getParameters?.().encodings?.[0]?.maxBitrate) || 0,
+              framesPerSecond: telemetry.derived.encodeFps,
+              captureFps: telemetry.derived.captureFps,
+              sourceWidth: telemetry.source.width,
+              sourceHeight: telemetry.source.height,
+              trackWidth: trackSettings.width ?? null,
+              trackHeight: trackSettings.height ?? null,
+              frameWidth: telemetry.outbound.frameWidth,
+              frameHeight: telemetry.outbound.frameHeight,
+              // Preserve null: unavailable encode timing is not a free/zero-cost
+              // encode and must not make an adaptation trial look successful.
+              averageEncodeTimeMs: telemetry.derived.averageEncodeTimeMs,
+              qualityLimitationReason: telemetry.outbound.qualityLimitationReason || 'none',
+              codec: telemetry.codec,
+              sendBitrateBps: telemetry.derived.sendBitrateBps,
+              remotePacketsLost: telemetry.remoteInbound.packetsLost,
+              roundTripTimeMs: telemetry.derived.currentRoundTripTimeMs,
+            };
+            const hasFpsSample = diagnostics.captureFps !== null
+              || diagnostics.framesPerSecond !== null;
+            return { slot, diagnostics, hasFpsSample, telemetry };
+          } catch {
+            // Never replay a stale measurement: one failed getStats call must
+            // not advance startup guards or count three times inside a trial.
+            return null;
+          }
+        }))).filter(Boolean);
+        // Each RTCPeerConnection has its own encoder, congestion controller and
+        // uplink estimate. A single weak viewer must not reduce quality for every
+        // other viewer, so adaptation state and sender scale stay per peer.
+        await Promise.all(samples.map(({ slot, diagnostics, hasFpsSample, telemetry }) => (
+          enqueueSenderMutation(slot, 'videoSender', async (sender) => {
+            const liveTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
+            if (!sender || liveTrack !== screenTrack || sender.track !== screenTrack
+                || slot.screenWatching === false || slot.pc.connectionState === 'closed') return false;
+
+            slot.videoTelemetry = telemetry;
+            slot.videoDiagnostics = diagnostics;
+            if (telemetryEnabled) {
+              slot.videoTelemetryHistory ||= [];
+              slot.videoTelemetryHistory.push(telemetry);
+              if (slot.videoTelemetryHistory.length > 240) slot.videoTelemetryHistory.shift();
+            }
+            const current = slot.videoAdaptation?.trackId === screenTrack.id
+              && slot.videoAdaptation?.profileId === videoProfileRef.current
+              ? slot.videoAdaptation
+              : { ...initialCaptureAdaptation(videoProfileRef.current), trackId: screenTrack.id };
+            // Transport-only samples can still tune bitrate, but only an actual
+            // FPS observation advances the spatial controller and its trials.
+            const nextAdaptation = hasFpsSample
+              ? evaluateCaptureAdaptation(current, videoProfileRef.current, diagnostics)
+              : current;
+            nextAdaptation.trackId = screenTrack.id;
+            slot.videoAdaptation = nextAdaptation;
+            if (telemetryEnabled) {
+              globalThis.__jumpStreamTelemetry ||= { version: 1, capture: null, events: [], render: {} };
+              const events = globalThis.__jumpStreamTelemetry.events ||= [];
+              events.push({
+                type: 'adaptation-sample',
+                timestampMs: Date.now(),
+                peerId: slot.peerId || '',
+                profileId: videoProfileRef.current,
+                adaptation: { ...nextAdaptation },
+                diagnostics: { ...diagnostics },
+                fpsSample: hasFpsSample,
+              });
+              if (events.length > 1_000) events.shift();
+            }
+            const activePeerCount = [...peerConnectionsRef.current.values()].filter((candidate) => (
+              candidate?.videoSender?.track === screenTrack
+              && candidate.screenWatching !== false
+              && candidate.pc.connectionState !== 'closed'
+            )).length;
+            return adaptVideoSender(
+              sender,
+              videoProfileRef.current,
+              activePeerCount,
+              { ...diagnostics, adaptationScale: nextAdaptation.scale },
+            );
+          })
+        )));
+      } finally {
         running = false;
-        return;
       }
-      if (adaptationRef.current.trackId !== screenTrack.id || adaptationRef.current.profileId !== videoProfileRef.current) {
-        adaptationRef.current = { ...initialCaptureAdaptation(videoProfileRef.current), trackId: screenTrack.id };
-      }
-      const samples = await Promise.all(slots.map(async (slot) => {
-        try {
-          const reports = await slot.pc.getStats(slot.videoSender.track);
-          const outbound = [...reports.values()].find((report) => report.type === 'outbound-rtp' && report.kind === 'video' && !report.isRemote);
-          const mediaSource = [...reports.values()].find((report) => report.type === 'media-source' && report.kind === 'video');
-          const transport = outbound?.transportId ? reports.get(outbound.transportId) : [...reports.values()].find((report) => report.type === 'transport');
-          const pair = transport?.selectedCandidatePairId ? reports.get(transport.selectedCandidatePairId) : [...reports.values()].find((report) => report.type === 'candidate-pair' && report.nominated && report.state === 'succeeded');
-          const previous = slot.videoStatsSample;
-          const elapsedSeconds = previous && Number(outbound?.timestamp) > previous.timestamp
-            ? (Number(outbound.timestamp) - previous.timestamp) / 1000
-            : 0;
-          const encodedDelta = previous ? Number(outbound?.framesEncoded || 0) - previous.framesEncoded : 0;
-          const encodeTimeDelta = previous ? Number(outbound?.totalEncodeTime || 0) - previous.totalEncodeTime : 0;
-          const computedFps = elapsedSeconds > 0 && encodedDelta >= 0 ? encodedDelta / elapsedSeconds : 0;
-          const averageEncodeTimeMs = encodedDelta > 0 && encodeTimeDelta >= 0 ? (encodeTimeDelta * 1000) / encodedDelta : 0;
-          slot.videoStatsSample = {
-            timestamp: Number(outbound?.timestamp) || performance.now(),
-            framesEncoded: Number(outbound?.framesEncoded) || 0,
-            totalEncodeTime: Number(outbound?.totalEncodeTime) || 0,
-          };
-          const diagnostics = {
-            availableOutgoingBitrate: Number(pair?.availableOutgoingBitrate) || 0,
-            framesPerSecond: computedFps || Number(outbound?.framesPerSecond) || 0,
-            captureFps: Number(mediaSource?.framesPerSecond) || 0,
-            averageEncodeTimeMs,
-            qualityLimitationReason: outbound?.qualityLimitationReason || 'none',
-          };
-          slot.videoDiagnostics = diagnostics;
-          return { slot, diagnostics };
-        } catch {
-          // Stats support varies slightly across Chromium builds. Static sender
-          // parameters remain active when an adaptive sample is unavailable.
-          return { slot, diagnostics: slot.videoDiagnostics || {} };
-        }
-      }));
-      const limitations = samples.map(({ diagnostics }) => diagnostics.qualityLimitationReason || 'none');
-      const aggregate = {
-        captureFps: Math.min(...samples.map(({ diagnostics }) => Number(diagnostics.captureFps) || Infinity)),
-        framesPerSecond: Math.min(...samples.map(({ diagnostics }) => Number(diagnostics.framesPerSecond) || Infinity)),
-        averageEncodeTimeMs: Math.max(...samples.map(({ diagnostics }) => Number(diagnostics.averageEncodeTimeMs) || 0)),
-        qualityLimitationReason: limitations.includes('cpu') ? 'cpu' : limitations.includes('bandwidth') ? 'bandwidth' : 'none',
-      };
-      if (!Number.isFinite(aggregate.captureFps)) aggregate.captureFps = 0;
-      if (!Number.isFinite(aggregate.framesPerSecond)) aggregate.framesPerSecond = 0;
-      const nextAdaptation = evaluateCaptureAdaptation(adaptationRef.current, videoProfileRef.current, aggregate);
-      nextAdaptation.trackId = screenTrack.id;
-      adaptationRef.current = nextAdaptation;
-      samples.forEach(({ slot }) => { slot.videoAdaptation = { ...nextAdaptation }; });
-      await Promise.all(samples.map(({ slot, diagnostics }) => adaptVideoSender(
-        slot.videoSender,
-        videoProfileRef.current,
-        slots.length,
-        { ...diagnostics, adaptationScale: nextAdaptation.scale },
-      )));
-      running = false;
     };
     const timer = window.setInterval(() => { void tuneVideo(); }, SCREEN_SHARE_ADAPT_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [peerConnectionsRef, screenStreamRef, videoProfileRef]);
+
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has('streamTelemetry')) return undefined;
+    let running = false;
+    const sampleReceivers = async () => {
+      if (running) return;
+      running = true;
+      await Promise.all([...peerConnectionsRef.current.values()].map(async (slot) => {
+        if (!slot?.pc || slot.pc.connectionState === 'closed') return;
+        try {
+          const reports = await slot.pc.getStats();
+          const telemetry = createScreenShareTelemetrySnapshot(reports, slot.inboundVideoTelemetry || null, {
+            timestampMs: performance.timeOrigin + performance.now(),
+          });
+          if (!telemetry.ids.inbound) return;
+          slot.inboundVideoTelemetry = telemetry;
+          slot.inboundVideoTelemetryHistory ||= [];
+          slot.inboundVideoTelemetryHistory.push(telemetry);
+          if (slot.inboundVideoTelemetryHistory.length > 240) slot.inboundVideoTelemetryHistory.shift();
+        } catch {
+          // Telemetry is diagnostic-only and must never disturb the call.
+        }
+      }));
+      running = false;
+    };
+    const timer = window.setInterval(() => { void sampleReceivers(); }, 500);
+    void sampleReceivers();
+    return () => window.clearInterval(timer);
+  }, [peerConnectionsRef]);
 
   const closePeer = useCallback((peerId) => {
     const slot = peerConnectionsRef.current.get(peerId);
@@ -260,33 +336,36 @@ export function usePeerMesh({
   const replacePeerTrack = useCallback(async (senderKey, track, streamOverride = null) => {
     const failed = [];
     await Promise.all([...peerConnectionsRef.current.entries()].map(async ([peerId, slot]) => {
-      const sender = slot?.[senderKey];
-      if (!sender || ['closed', 'failed'].includes(slot.pc.connectionState)) return;
+      if (!slot?.[senderKey] || ['closed', 'failed'].includes(slot.pc.connectionState)) return;
       try {
-        const previousTrack = sender.track;
-        const outboundStream = track ? (streamOverride || new MediaStream([track])) : null;
-        const transceiver = senderKey === 'audioSender'
-          ? slot.audioTransceiver
-          : senderKey === 'screenAudioSender'
-            ? slot.screenAudioTransceiver
-            : slot.videoTransceiver;
-        if (track && transceiver) transceiver.direction = 'sendrecv';
-        sender.setStreams?.(...(outboundStream ? [outboundStream] : []));
-        slot[`${senderKey}Stream`] = outboundStream;
-        await sender.replaceTrack(track || null);
-        if (senderKey === 'videoSender' && track) {
-          await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
-          const isScreenTrack = track === screenStreamRef.current?.getVideoTracks?.()[0];
-          await setSenderActive(sender, isScreenTrack ? slot.screenWatching !== false : true);
-        }
-        if (senderKey === 'screenAudioSender' && track) {
-          await setSenderActive(sender, slot.screenWatching !== false);
-        }
-        // Chromium does not consistently emit the first remote `track` event
-        // when a transceiver was negotiated without an msid. Only the sender
-        // that attaches the first real track renegotiates; the receiver never
-        // mirrors this from call-state, avoiding the old offer storm.
-        if (!previousTrack && track) requestPeerNegotiation(peerId);
+        await enqueueSenderMutation(slot, senderKey, async (sender) => {
+          if (!sender || ['closed', 'failed'].includes(slot.pc.connectionState)) return false;
+          const previousTrack = sender.track;
+          const outboundStream = track ? (streamOverride || new MediaStream([track])) : null;
+          const transceiver = senderKey === 'audioSender'
+            ? slot.audioTransceiver
+            : senderKey === 'screenAudioSender'
+              ? slot.screenAudioTransceiver
+              : slot.videoTransceiver;
+          if (track && transceiver) transceiver.direction = 'sendrecv';
+          sender.setStreams?.(...(outboundStream ? [outboundStream] : []));
+          slot[`${senderKey}Stream`] = outboundStream;
+          await sender.replaceTrack(track || null);
+          if (senderKey === 'videoSender' && track) {
+            await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
+            const isScreenTrack = track === screenStreamRef.current?.getVideoTracks?.()[0];
+            await setSenderActive(sender, isScreenTrack ? slot.screenWatching !== false : true);
+          }
+          if (senderKey === 'screenAudioSender' && track) {
+            await setSenderActive(sender, slot.screenWatching !== false);
+          }
+          // Chromium does not consistently emit the first remote `track` event
+          // when a transceiver was negotiated without an msid. Only the sender
+          // that attaches the first real track renegotiates; the receiver never
+          // mirrors this from call-state, avoiding the old offer storm.
+          if (!previousTrack && track) requestPeerNegotiation(peerId);
+          return true;
+        });
       } catch {
         failed.push(peerId);
       }
@@ -298,9 +377,14 @@ export function usePeerMesh({
   const setVideoEncodingProfile = useCallback(async (profileId) => {
     const normalizedProfileId = screenShareProfile(profileId).id;
     videoProfileRef.current = normalizedProfileId;
-    adaptationRef.current = initialCaptureAdaptation(normalizedProfileId);
     const slots = [...peerConnectionsRef.current.values()].filter((slot) => slot?.videoSender?.track);
-    await Promise.all(slots.map((slot) => configureVideoSender(slot.videoSender, normalizedProfileId, slots.length)));
+    await Promise.all(slots.map((slot) => enqueueSenderMutation(slot, 'videoSender', async (sender) => {
+      if (!sender?.track || slot.pc.connectionState === 'closed') return false;
+      slot.videoAdaptation = initialCaptureAdaptation(normalizedProfileId);
+      slot.videoTelemetry = null;
+      slot.videoDiagnostics = null;
+      return configureVideoSender(sender, normalizedProfileId, slots.length);
+    })));
   }, [peerConnectionsRef, videoProfileRef]);
 
   const setPeerPlaybackProfile = useCallback((peerId, profileId) => {
@@ -312,14 +396,43 @@ export function usePeerMesh({
   const setPeerScreenDelivery = useCallback(async (peerId, watching) => {
     const slot = peerConnectionsRef.current.get(peerId);
     if (!slot || slot.pc.connectionState === 'closed') return false;
-    slot.screenWatching = Boolean(watching);
+    const nextWatching = Boolean(watching);
+    if (slot.screenWatching !== nextWatching) {
+      // Counters do not advance while the encoding is inactive. Reusing the
+      // pre-pause snapshot would divide the next delta by the whole paused
+      // interval and manufacture a low FPS sample on resume.
+      slot.videoTelemetry = null;
+      slot.videoDiagnostics = null;
+      const activeTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
+      slot.videoAdaptation = activeTrack
+        ? { ...initialCaptureAdaptation(videoProfileRef.current), trackId: activeTrack.id }
+        : initialCaptureAdaptation(videoProfileRef.current);
+    }
+    slot.screenWatching = nextWatching;
     const activeScreenTrack = screenStreamRef.current?.getVideoTracks?.()[0];
     const tasks = [];
-    if (activeScreenTrack && slot.videoSender?.track === activeScreenTrack) tasks.push(setSenderActive(slot.videoSender, watching));
-    if (slot.screenAudioSender?.track) tasks.push(setSenderActive(slot.screenAudioSender, watching));
+    if (activeScreenTrack && slot.videoSender?.track === activeScreenTrack) {
+      tasks.push(enqueueSenderMutation(slot, 'videoSender', async (sender) => {
+        if (sender?.track !== activeScreenTrack) return false;
+        if (nextWatching) {
+          const activePeerCount = [...peerConnectionsRef.current.values()].filter((candidate) => (
+            candidate?.videoSender?.track === activeScreenTrack
+            && candidate.screenWatching !== false
+            && candidate.pc.connectionState !== 'closed'
+          )).length;
+          await configureVideoSender(sender, videoProfileRef.current, activePeerCount);
+        }
+        return setSenderActive(sender, nextWatching);
+      }));
+    }
+    if (slot.screenAudioSender?.track) {
+      tasks.push(enqueueSenderMutation(slot, 'screenAudioSender', (sender) => (
+        sender?.track ? setSenderActive(sender, nextWatching) : false
+      )));
+    }
     await Promise.all(tasks);
     return true;
-  }, [peerConnectionsRef, screenStreamRef]);
+  }, [peerConnectionsRef, screenStreamRef, videoProfileRef]);
 
   const createPeerConnection = useCallback((peerId, initiator = false) => {
     const existing = peerConnectionsRef.current.get(peerId);
@@ -336,6 +449,7 @@ export function usePeerMesh({
     const screenAudioTransceiver = initiator ? pc.addTransceiver('audio', { direction: 'sendrecv' }) : null;
     if (videoTransceiver) preferVideoCodecs(videoTransceiver, videoProfileRef.current);
     const slot = {
+      peerId,
       pc,
       audioTransceiver,
       videoTransceiver,
@@ -415,20 +529,32 @@ export function usePeerMesh({
     const screenAudioTrack = screenAudioStream?.getAudioTracks?.()[0] || null;
     const initialMediaTasks = [];
     if (audioTrack && slot.audioSender) {
-      slot.audioSender.setStreams?.(audioStream);
-      slot.audioSenderStream = audioStream;
-      initialMediaTasks.push(slot.audioSender.replaceTrack(audioTrack));
+      initialMediaTasks.push(enqueueSenderMutation(slot, 'audioSender', async (sender) => {
+        if (!sender) return false;
+        sender.setStreams?.(audioStream);
+        slot.audioSenderStream = audioStream;
+        await sender.replaceTrack(audioTrack);
+        return true;
+      }));
     }
     if (videoTrack && slot.videoSender) {
-      slot.videoSender.setStreams?.(outboundShareStream);
-      slot.videoSenderStream = outboundShareStream;
-      initialMediaTasks.push(slot.videoSender.replaceTrack(videoTrack));
-      initialMediaTasks.push(configureVideoSender(slot.videoSender, videoProfileRef.current, peerConnectionsRef.current.size));
+      initialMediaTasks.push(enqueueSenderMutation(slot, 'videoSender', async (sender) => {
+        if (!sender) return false;
+        sender.setStreams?.(outboundShareStream);
+        slot.videoSenderStream = outboundShareStream;
+        await sender.replaceTrack(videoTrack);
+        await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
+        return true;
+      }));
     }
     if (screenAudioTrack && slot.screenAudioSender) {
-      slot.screenAudioSender.setStreams?.(outboundShareStream);
-      slot.screenAudioSenderStream = outboundShareStream;
-      initialMediaTasks.push(slot.screenAudioSender.replaceTrack(screenAudioTrack));
+      initialMediaTasks.push(enqueueSenderMutation(slot, 'screenAudioSender', async (sender) => {
+        if (!sender) return false;
+        sender.setStreams?.(outboundShareStream);
+        slot.screenAudioSenderStream = outboundShareStream;
+        await sender.replaceTrack(screenAudioTrack);
+        return true;
+      }));
     }
     slot.mediaReady = Promise.all(initialMediaTasks);
     if (initiator) {
@@ -518,22 +644,34 @@ export function usePeerMesh({
         const mediaTasks = [];
         if (audioTrack && slot.audioSender) {
           slot.audioTransceiver.direction = 'sendrecv';
-          slot.audioSender.setStreams?.(audioStream);
-          slot.audioSenderStream = audioStream;
-          mediaTasks.push(slot.audioSender.replaceTrack(audioTrack));
+          mediaTasks.push(enqueueSenderMutation(slot, 'audioSender', async (sender) => {
+            if (!sender) return false;
+            sender.setStreams?.(audioStream);
+            slot.audioSenderStream = audioStream;
+            await sender.replaceTrack(audioTrack);
+            return true;
+          }));
         }
         if (videoTrack && slot.videoSender) {
           slot.videoTransceiver.direction = 'sendrecv';
-          slot.videoSender.setStreams?.(outboundShareStream);
-          slot.videoSenderStream = outboundShareStream;
-          mediaTasks.push(slot.videoSender.replaceTrack(videoTrack));
-          mediaTasks.push(configureVideoSender(slot.videoSender, videoProfileRef.current, peerConnectionsRef.current.size));
+          mediaTasks.push(enqueueSenderMutation(slot, 'videoSender', async (sender) => {
+            if (!sender) return false;
+            sender.setStreams?.(outboundShareStream);
+            slot.videoSenderStream = outboundShareStream;
+            await sender.replaceTrack(videoTrack);
+            await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
+            return true;
+          }));
         }
         if (screenAudioTrack && slot.screenAudioSender) {
           slot.screenAudioTransceiver.direction = 'sendrecv';
-          slot.screenAudioSender.setStreams?.(outboundShareStream);
-          slot.screenAudioSenderStream = outboundShareStream;
-          mediaTasks.push(slot.screenAudioSender.replaceTrack(screenAudioTrack));
+          mediaTasks.push(enqueueSenderMutation(slot, 'screenAudioSender', async (sender) => {
+            if (!sender) return false;
+            sender.setStreams?.(outboundShareStream);
+            slot.screenAudioSenderStream = outboundShareStream;
+            await sender.replaceTrack(screenAudioTrack);
+            return true;
+          }));
         }
         slot.mediaReady = Promise.all(mediaTasks);
         await slot.mediaReady;

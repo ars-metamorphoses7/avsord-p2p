@@ -1,6 +1,24 @@
 import { useCallback, useEffect, useState } from 'react';
 import { createDesktopAudioBridge } from '../media/desktopAudio.js';
-import { screenCaptureConstraints, screenShareProfile } from '../media/screenShareProfiles.js';
+import {
+  evenScreenCaptureConstraints,
+  screenCaptureConstraints,
+  screenShareProfile,
+} from '../media/screenShareProfiles.js';
+
+function streamTelemetryStore() {
+  if (!new URLSearchParams(window.location.search).has('streamTelemetry')) return null;
+  globalThis.__jumpStreamTelemetry ||= { version: 1, capture: null, events: [], render: {} };
+  return globalThis.__jumpStreamTelemetry;
+}
+
+function safeTrackSnapshot(track, method) {
+  try {
+    return track?.[method]?.() || null;
+  } catch {
+    return null;
+  }
+}
 
 export function useScreenShare({
   announceCallState,
@@ -43,6 +61,8 @@ export function useScreenShare({
 
   const stopScreenShare = useCallback(() => {
     const wasSharing = Boolean(screenStreamRef.current);
+    const telemetry = streamTelemetryStore();
+    if (wasSharing && telemetry) telemetry.events.push({ type: 'capture-stopped', timestampMs: Date.now() });
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
     screenStreamRef.current = null;
     cancelPicker();
@@ -70,6 +90,7 @@ export function useScreenShare({
     setPermissionError('');
     let videoStream = null;
     let audioBridge = null;
+    let videoAttachAttempted = false;
     try {
       const profile = screenShareProfile(selectedProfile);
       videoStream = desktopCapture
@@ -78,7 +99,55 @@ export function useScreenShare({
       const videoTrack = videoStream.getVideoTracks()[0];
       if (!videoTrack) throw new Error('Nenhuma faixa de vídeo foi criada.');
       videoTrack.contentHint = profile.contentHint;
-      await videoTrack.applyConstraints?.({ frameRate: { ideal: profile.frameRate, max: profile.frameRate } }).catch(() => {});
+      let constraintError = '';
+      let dimensionNormalization = null;
+      // applyConstraints replaces the track's active constraint set. Passing
+      // only frameRate here used to discard the 720p/1080p size ceiling from
+      // getUserMedia, silently letting Chromium capture performance mode at
+      // 1440x810 before sender scaling. Re-apply the complete standard set.
+      await videoTrack.applyConstraints?.(screenCaptureConstraints(profile.id)).catch((error) => {
+        constraintError = error?.message || String(error);
+      });
+      const evenConstraints = evenScreenCaptureConstraints(profile.id, safeTrackSnapshot(videoTrack, 'getSettings'));
+      if (evenConstraints) {
+        dimensionNormalization = { requested: evenConstraints, applied: false, error: '' };
+        try {
+          await videoTrack.applyConstraints?.(evenConstraints);
+          const normalizedSettings = safeTrackSnapshot(videoTrack, 'getSettings') || {};
+          dimensionNormalization.applied = Number(normalizedSettings.width) % 2 === 0
+            && Number(normalizedSettings.height) % 2 === 0;
+          if (!dimensionNormalization.applied) dimensionNormalization.error = 'capturer-returned-odd-dimensions';
+        } catch (error) {
+          dimensionNormalization.error = error?.message || String(error);
+          constraintError = [constraintError, `even-dimensions: ${dimensionNormalization.error}`].filter(Boolean).join('; ');
+        }
+      }
+      const telemetry = streamTelemetryStore();
+      if (telemetry) {
+        const requestedConstraints = screenCaptureConstraints(profile.id, selectedVideo?.id || '');
+        telemetry.capture = {
+          timestampMs: Date.now(),
+          profileId: profile.id,
+          source: selectedVideo ? {
+            id: selectedVideo.id,
+            name: selectedVideo.name || '',
+            type: selectedVideo.type || '',
+          } : { id: '', name: '', type: 'browser-picker' },
+          requestedConstraints,
+          trackSettings: safeTrackSnapshot(videoTrack, 'getSettings'),
+          trackConstraints: safeTrackSnapshot(videoTrack, 'getConstraints'),
+          trackCapabilities: safeTrackSnapshot(videoTrack, 'getCapabilities'),
+          constraintError,
+          dimensionNormalization,
+        };
+        telemetry.events.push({
+          type: 'capture-started',
+          timestampMs: Date.now(),
+          profileId: profile.id,
+          trackId: videoTrack.id,
+          settings: telemetry.capture.trackSettings,
+        });
+      }
       setProfileId(profile.id);
       await setVideoEncodingProfile(profile.id);
 
@@ -105,6 +174,7 @@ export function useScreenShare({
       }
 
       screenStreamRef.current = videoStream;
+      videoAttachAttempted = true;
       if (!(await replacePeerTrack('videoSender', videoTrack, outboundShareStream))) throw new Error('Não foi possível enviar a tela aos participantes.');
       videoTrack.onended = () => {
         if (screenStreamRef.current === videoStream) stopScreenShare();
@@ -116,6 +186,13 @@ export function useScreenShare({
     } catch (error) {
       videoStream?.getTracks().forEach((track) => track.stop());
       if (screenStreamRef.current === videoStream) screenStreamRef.current = null;
+      if (videoAttachAttempted) {
+        // replacePeerTrack fans out to every mesh peer. If one peer fails after
+        // others already switched, put all successful peers back on the camera
+        // instead of leaving them attached to the now-ended screen track.
+        const fallbackTrack = cameraStreamRef.current?.getVideoTracks?.()[0] || null;
+        await replacePeerTrack('videoSender', fallbackTrack).catch(() => false);
+      }
       if (audioBridge) {
         await replacePeerTrack('screenAudioSender', null);
         await audioBridge?.stop().catch(() => {});
@@ -124,7 +201,7 @@ export function useScreenShare({
       if (error?.name !== 'AbortError') setPermissionError(error?.message || 'Não foi possível iniciar o compartilhamento de tela.');
       return false;
     }
-  }, [announceCallState, cancelPicker, onShareStarted, profileId, replacePeerTrack, screenAudioSessionRef, screenStreamRef, setIsSharing, setPermissionError, setProfileId, setVideoEncodingProfile, stopScreenShare]);
+  }, [announceCallState, cameraStreamRef, cancelPicker, onShareStarted, profileId, replacePeerTrack, screenAudioSessionRef, screenStreamRef, setIsSharing, setPermissionError, setProfileId, setVideoEncodingProfile, stopScreenShare]);
 
   const toggleScreenShare = useCallback(async () => {
     if (screenStreamRef.current) {

@@ -4110,11 +4110,6 @@ body.is-resizing-call-chat, body.is-resizing-call-chat * { cursor: col-resize !i
   box-shadow: var(--win98-button-shadow);
 }
 
-.call-stream-card.is-self {
-  outline: 1px solid var(--win-blue);
-  outline-offset: -1px;
-}
-
 .call-stream-viewport {
   display: grid;
   place-items: center;

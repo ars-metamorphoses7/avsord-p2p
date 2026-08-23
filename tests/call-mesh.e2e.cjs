@@ -227,7 +227,7 @@ async function run() {
     await waitFor(() => Promise.all(windows.slice(1).map((window) => window.webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()]
       .filter((slot) => slot.remoteMediaState?.sharing)
       .every((slot) => {
-        const expected = { performance: 220, quality: 260 }[slot.remoteMediaState.sharingProfile];
+        const expected = { performance: 140, quality: 180 }[slot.remoteMediaState.sharingProfile];
         return slot.remotePlaybackProfile === slot.remoteMediaState.sharingProfile
           && (!('jitterBufferTarget' in slot.videoTransceiver.receiver) || slot.videoTransceiver.receiver.jitterBufferTarget === expected)
           && (!('jitterBufferTarget' in slot.screenAudioTransceiver.receiver) || slot.screenAudioTransceiver.receiver.jitterBufferTarget === expected);
@@ -247,7 +247,7 @@ async function run() {
   await waitFor(() => windows[0].webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].every((slot) => (
     slot.videoAdaptation?.profileId === 'performance'
     && slot.videoAdaptation?.targetFps === 60
-    && Number(slot.videoAdaptation?.effectiveWidth) <= 854
+    && Number(slot.videoAdaptation?.effectiveWidth) <= 1280
   )))()`), 'controlador automático de desempenho ativo', 20_000);
 
   await windows[1].webContents.executeJavaScript("document.querySelector('.chat-toggle-button.is-active')?.click()");
