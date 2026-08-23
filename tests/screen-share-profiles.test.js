@@ -5,11 +5,14 @@ import {
   adaptVideoSender,
   configureVideoSender,
   evenScreenCaptureConstraints,
+  evaluatePlaybackBufferAdaptation,
   evaluateCaptureAdaptation,
   initialCaptureAdaptation,
+  initialPlaybackBufferAdaptation,
   normalizeScreenShareProfileId,
   safeVideoSenderScale,
   screenCaptureConstraints,
+  screenShareEncodingBitrate,
   screenSharePlaybackBuffer,
 } from '../src/media/screenShareProfiles.js';
 
@@ -25,6 +28,8 @@ test('picker exposes only performance and quality automatic modes', () => {
   assert.deepEqual(Object.keys(SCREEN_SHARE_PROFILES), ['performance', 'quality']);
   assert.equal(SCREEN_SHARE_PROFILES.performance.frameRate, 60);
   assert.equal(SCREEN_SHARE_PROFILES.quality.frameRate, 30);
+  assert.deepEqual(SCREEN_SHARE_PROFILES.performance.adaptationFrameRates, [60, 30, 20, 15]);
+  assert.deepEqual(SCREEN_SHARE_PROFILES.quality.adaptationFrameRates, [30, 20, 15]);
 });
 
 test('performance mode lowers native capture cost before the encoder', async () => {
@@ -80,6 +85,50 @@ test('quality mode caps itself at 1080p30', () => {
   assert.equal(SCREEN_SHARE_PROFILES.quality.degradationPreference, 'maintain-resolution');
 });
 
+test('receiver buffer grows on jitter/freezes and decays slowly', () => {
+  let state = initialPlaybackBufferAdaptation('performance');
+  state = evaluatePlaybackBufferAdaptation(state, 'performance', {
+    jitterMs: 5,
+    freezeCount: 0,
+    framesDropped: 0,
+  });
+  assert.equal(state.targetMs, 140);
+
+  state = evaluatePlaybackBufferAdaptation(state, 'performance', {
+    jitterMs: 60,
+    freezeCount: 1,
+    framesDropped: 0,
+  });
+  assert.equal(state.targetMs, 360);
+  assert.equal(state.reason, 'freeze-protection');
+  assert.equal(state.freezeDelta, 1);
+
+  for (let sample = 0; sample < 5; sample += 1) {
+    state = evaluatePlaybackBufferAdaptation(state, 'performance', {
+      jitterMs: 0,
+      freezeCount: 1,
+      framesDropped: 0,
+    });
+  }
+  assert.equal(state.targetMs, 345);
+  assert.equal(state.reason, 'stable-decay');
+});
+
+test('quality receiver buffer is bounded under repeated drops', () => {
+  let state = evaluatePlaybackBufferAdaptation(initialPlaybackBufferAdaptation('quality'), 'quality', {
+    jitterMs: 0,
+    freezeCount: 0,
+    framesDropped: 0,
+  });
+  state = evaluatePlaybackBufferAdaptation(state, 'quality', {
+    jitterMs: 200,
+    freezeCount: 4,
+    framesDropped: 20,
+  });
+  assert.equal(state.targetMs, 480);
+  assert.equal(state.reason, 'freeze-protection');
+});
+
 test('odd capture dimensions request a one-pixel crop before H.264', () => {
   assert.deepEqual(evenScreenCaptureConstraints('performance', { width: 1279, height: 721 }), {
     width: { exact: 1278 },
@@ -114,6 +163,30 @@ test('adaptive sender respects a constrained uplink instead of queueing above it
   });
   assert.equal(sender.parameters.encodings[0].maxBitrate, 780_000);
   assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 4 / 3);
+});
+
+test('adaptive sender clamps a sudden capacity collapse in one sample', async () => {
+  const sender = fakeSender();
+  sender.parameters.encodings[0].maxBitrate = 8_000_000;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 1_000_000,
+    adaptationScale: 1,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 780_000);
+});
+
+test('temporal fallback reduces sender cadence and its nominal bitrate', async () => {
+  const sender = fakeSender();
+  await configureVideoSender(sender, 'performance', 1);
+  await adaptVideoSender(sender, 'performance', 1, {
+    adaptationScale: 2,
+    targetFrameRate: 30,
+    sourceWidth: 1280,
+    sourceHeight: 720,
+  });
+  assert.equal(sender.parameters.encodings[0].maxFramerate, 30);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_000_000);
+  assert.equal(screenShareEncodingBitrate('performance', 1, 2), 2_000_000);
 });
 
 test('adaptive sender applies the 360p floor to the real ultrawide source height', async () => {
@@ -159,6 +232,48 @@ test('performance controller preserves pixels when capture is source-limited', (
   assert.equal(state.sourceLimited, true);
   assert.equal(state.effectiveWidth, 1280);
   assert.equal(state.effectiveHeight, 720);
+});
+
+test('actual software encoder stats start from a conservative operating point', () => {
+  const performance = evaluateCaptureAdaptation(initialCaptureAdaptation('performance'), 'performance', {
+    captureFps: 30,
+    framesPerSecond: 28,
+    averageEncodeTimeMs: 28,
+    encoderImplementation: 'OpenH264',
+    powerEfficientEncoder: false,
+  });
+  assert.equal(performance.level, 1);
+  assert.equal(performance.temporalLevel, 0);
+  assert.equal(performance.scale, 4 / 3);
+  assert.equal(performance.frameRate, 60);
+  assert.equal(performance.reason, 'software-encoder-safe-start');
+  assert.equal(performance.softwareEncoder, true);
+
+  const quality = evaluateCaptureAdaptation(initialCaptureAdaptation('quality'), 'quality', {
+    captureFps: 30,
+    framesPerSecond: 14,
+    averageEncodeTimeMs: 55,
+    encoderImplementation: 'OpenH264',
+    powerEfficientEncoder: false,
+  });
+  assert.equal(quality.level, 2);
+  assert.equal(quality.temporalLevel, 0);
+  assert.equal(quality.scale, 1.5);
+  assert.equal(quality.frameRate, 30);
+});
+
+test('hardware encoder retains the full startup operating point', () => {
+  const state = evaluateCaptureAdaptation(initialCaptureAdaptation('performance'), 'performance', {
+    captureFps: 60,
+    framesPerSecond: 59,
+    averageEncodeTimeMs: 3,
+    encoderImplementation: 'MediaFoundationVideoEncodeAccelerator',
+    powerEfficientEncoder: true,
+  });
+  assert.equal(state.level, 0);
+  assert.equal(state.temporalLevel, 0);
+  assert.equal(state.frameRate, 60);
+  assert.equal(state.softwareEncoder, false);
 });
 
 test('performance controller downscales when encoder loses captured frames', () => {
@@ -399,32 +514,90 @@ test('stale bandwidth reason cannot trap a source-limited stream at low resoluti
   assert.equal(state.reason, 'source-limited-recovery');
 });
 
-test('sustained pure network pressure changes bitrate diagnostics, not spatial level', () => {
+test('sustained network pressure reaches the minimum safe operating point', () => {
   let state = initialCaptureAdaptation('performance');
-  for (let sample = 0; sample < 12; sample += 1) {
+  for (let sample = 0; sample < 24; sample += 1) {
     state = evaluateCaptureAdaptation(state, 'performance', {
       captureFps: 60,
-      framesPerSecond: 59,
+      framesPerSecond: state.frameRate,
       averageEncodeTimeMs: 3,
       qualityLimitationReason: 'bandwidth',
       availableOutgoingBitrate: 1_000_000,
-      configuredMaxBitrate: 8_000_000,
+      // This is deliberately below the demand but above the sender cap from
+      // the previous sample. Comparing against maxBitrate would hide pressure.
+      configuredMaxBitrate: 780_000,
+      peerCount: 1,
     });
   }
-  assert.equal(state.level, 0);
-  assert.equal(state.scale, 1);
-  assert.equal(state.bottleneck, 'network');
+  assert.equal(state.level, 2);
+  assert.equal(state.scale, 2);
+  assert.equal(state.temporalLevel, 3);
+  assert.equal(state.frameRate, 15);
+  assert.equal(state.targetFps, 15);
   assert.equal(state.networkPressure, true);
-  assert.equal(state.networkSustained, true);
-  assert.equal(state.reason, 'network-bitrate-only');
+  assert.equal(state.reason, 'network-minimum-operating-point');
+  assert.equal(state.networkRecoveryReady, false);
+  assert.equal(state.recoveryRequiredBitrate, 2_000_000);
   assert.equal(state.encoderTrial, null);
+});
+
+test('encoder pressure uses temporal fallback after the spatial floor', () => {
+  let state = {
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 4,
+  };
+  state = evaluateCaptureAdaptation(state, 'performance', {
+    captureFps: 60,
+    framesPerSecond: 20,
+    averageEncodeTimeMs: 20,
+    qualityLimitationReason: 'cpu',
+  });
+  assert.equal(state.level, 2);
+  assert.equal(state.temporalLevel, 1);
+  assert.equal(state.frameRate, 30);
+  assert.equal(state.reason, 'encoder-temporal-severe');
+  assert.equal(state.encoderTrial, null);
+});
+
+test('temporal recovery waits for capacity headroom for the richer level', () => {
+  let state = {
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    temporalLevel: 1,
+    frameRate: 30,
+  };
+  for (let sample = 0; sample < 20; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', {
+      captureFps: 60,
+      framesPerSecond: 30,
+      averageEncodeTimeMs: 3,
+      availableOutgoingBitrate: 1_000_000,
+    });
+  }
+  assert.equal(state.temporalLevel, 3);
+  assert.equal(state.networkRecoveryReady, false);
+
+  for (let sample = 0; sample < SCREEN_SHARE_PROFILES.performance.recoverySamples; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', {
+      captureFps: 60,
+      framesPerSecond: 30,
+      averageEncodeTimeMs: 3,
+      availableOutgoingBitrate: 2_400_000,
+    });
+  }
+  assert.equal(state.temporalLevel, 2);
+  assert.equal(state.frameRate, 20);
+  assert.equal(state.reason, 'temporal-recovery');
 });
 
 test('sender bitrate recovers gradually instead of following noisy estimates in bursts', async () => {
   const sender = fakeSender();
   sender.parameters.encodings[0].maxBitrate = 2_000_000;
   await adaptVideoSender(sender, 'performance', 1, { availableOutgoingBitrate: 20_000_000 });
-  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_160_000);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_300_000);
 });
 
 test('legacy profile ids migrate without breaking old clients or saved settings', () => {

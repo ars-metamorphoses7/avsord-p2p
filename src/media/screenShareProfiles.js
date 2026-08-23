@@ -2,12 +2,11 @@ export const SCREEN_SHARE_PROFILES = {
   performance: {
     id: 'performance',
     label: 'desempenho',
-    description: '60 FPS alvo · 360p–720p automático',
+    description: 'até 720p/60 · adapta GPU, CPU e rede',
     width: 1280,
     height: 720,
     frameRate: 60,
     maxBitrate: 8_000_000,
-    minBitrate: 1_200_000,
     // App-controlled scaling has a hard 360p floor. Chromium's own
     // maintain-framerate adaptation can stack another hidden scale on top and
     // fall to 240p/OpenH264, so preserve the configured resolution here and
@@ -19,8 +18,16 @@ export const SCREEN_SHARE_PROFILES = {
     // every level at or above that floor avoids turning an overloaded stream
     // into an even more expensive CPU encode.
     adaptationScales: [1, 4 / 3, 2],
+    // Resolution is the first lever because it reduces encoder and transport
+    // cost while preserving motion. On software encoders or very constrained
+    // links, however, 360p60 can still miss every deadline. A temporal ladder
+    // is the final safety valve instead of letting the stream freeze forever.
+    adaptationFrameRates: [60, 30, 20, 15],
+    softwareSafeStart: { level: 1, temporalLevel: 0 },
     minimumEncodedHeight: 360,
+    minimumAdaptiveBitrate: 300_000,
     playbackBufferMs: 140,
+    maxPlaybackBufferMs: 360,
     severeFpsRatio: 0.72,
     pressureFpsRatio: 0.90,
     stableFpsRatio: 0.97,
@@ -33,18 +40,21 @@ export const SCREEN_SHARE_PROFILES = {
   quality: {
     id: 'quality',
     label: 'qualidade',
-    description: 'até 1080p · 30 FPS automático',
+    description: 'até 1080p/30 · adapta GPU, CPU e rede',
     width: 1920,
     height: 1080,
     frameRate: 30,
     maxBitrate: 8_000_000,
-    minBitrate: 1_200_000,
     degradationPreference: 'maintain-resolution',
     contentHint: 'motion',
     codecOrder: ['video/H264', 'video/VP9', 'video/VP8'],
     adaptationScales: [1, 1.2, 1.5],
+    adaptationFrameRates: [30, 20, 15],
+    softwareSafeStart: { level: 2, temporalLevel: 0 },
     minimumEncodedHeight: 360,
+    minimumAdaptiveBitrate: 300_000,
     playbackBufferMs: 180,
+    maxPlaybackBufferMs: 480,
     severeFpsRatio: 0.65,
     pressureFpsRatio: 0.84,
     stableFpsRatio: 0.96,
@@ -81,6 +91,101 @@ export function screenShareProfile(profileId) {
 
 export function screenSharePlaybackBuffer(profileId) {
   return screenShareProfile(profileId).playbackBufferMs;
+}
+
+export function initialPlaybackBufferAdaptation(profileId) {
+  const profile = screenShareProfile(profileId);
+  return {
+    profileId: profile.id,
+    targetMs: profile.playbackBufferMs,
+    stableSamples: 0,
+    freezeCount: null,
+    framesDropped: null,
+    reason: 'initial',
+  };
+}
+
+/**
+ * Receiver-side jitter protection. Chromium's fixed low-latency target works
+ * well on a clean LAN but turns bursty Wi-Fi/VPN delivery into visible pauses.
+ * Grow quickly on jitter/freezes and decay slowly so the buffer does not chase
+ * every sample and oscillate playback latency.
+ */
+export function evaluatePlaybackBufferAdaptation(previous, profileId, diagnostics = {}) {
+  const profile = screenShareProfile(profileId);
+  const current = previous?.profileId === profile.id
+    ? previous
+    : initialPlaybackBufferAdaptation(profile.id);
+  const finiteNonNegative = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+  const jitterMs = finiteNonNegative(diagnostics.jitterMs) ?? 0;
+  const freezeCount = finiteNonNegative(diagnostics.freezeCount);
+  const framesDropped = finiteNonNegative(diagnostics.framesDropped);
+  const freezeDelta = freezeCount !== null && current.freezeCount !== null
+    ? Math.max(0, freezeCount - current.freezeCount)
+    : 0;
+  const droppedDelta = framesDropped !== null && current.framesDropped !== null
+    ? Math.max(0, framesDropped - current.framesDropped)
+    : 0;
+  const pressure = freezeDelta > 0 || droppedDelta >= 2 || jitterMs >= 45;
+  const excessJitterMs = Math.max(0, jitterMs - 10);
+  const desiredMs = Math.min(
+    profile.maxPlaybackBufferMs,
+    Math.round(profile.playbackBufferMs + (excessJitterMs * 4) + (freezeDelta * 90) + (droppedDelta * 15)),
+  );
+  let targetMs = Number(current.targetMs) || profile.playbackBufferMs;
+  let stableSamples = pressure ? 0 : (Number(current.stableSamples) || 0) + 1;
+  let reason = current.reason;
+  if (pressure || desiredMs > targetMs + 15) {
+    targetMs = Math.max(targetMs, desiredMs);
+    stableSamples = 0;
+    reason = freezeDelta > 0 ? 'freeze-protection'
+      : droppedDelta >= 2 ? 'drop-protection'
+        : 'jitter-protection';
+  } else if (stableSamples >= 5 && targetMs > profile.playbackBufferMs) {
+    targetMs = Math.max(profile.playbackBufferMs, targetMs - 15);
+    stableSamples = 0;
+    reason = 'stable-decay';
+  } else if (targetMs === profile.playbackBufferMs) {
+    reason = 'baseline';
+  }
+  return {
+    profileId: profile.id,
+    targetMs,
+    stableSamples,
+    freezeCount,
+    framesDropped,
+    jitterMs,
+    freezeDelta,
+    droppedDelta,
+    reason,
+  };
+}
+
+/**
+ * Nominal video budget for one peer at the selected spatial level.
+ * Keep this independent from the last `maxBitrate` written to the sender: the
+ * network controller needs to compare capacity with the demand of the current
+ * operating point, otherwise a capped sender makes a weak link look healthy on
+ * the very next sample.
+ */
+export function screenShareEncodingBitrate(profileId, peerCount = 1, scale = 1) {
+  const profile = screenShareProfile(profileId);
+  const normalizedPeerCount = Math.max(1, Number(peerCount) || 1);
+  const meshFactor = Math.max(1, 1 + ((normalizedPeerCount - 1) * 0.55));
+  const spatialScale = Math.max(1, Number(scale) || 1);
+  // Cadence fallback is meant to buy more bits and encode time per frame. Do
+  // not lower the nominal budget with FPS: OpenH264 otherwise enters continual
+  // rate-control frame skipping precisely when the controller is trying to
+  // stabilize it. A constrained link is still capped strictly to 78% of the
+  // measured capacity below.
+  return Math.max(
+    profile.minimumAdaptiveBitrate,
+    Math.round(profile.maxBitrate / meshFactor / (spatialScale ** 2)),
+  );
 }
 
 export function screenCaptureConstraints(profileId, sourceId = '') {
@@ -190,8 +295,7 @@ export async function configureVideoSender(sender, profileId, peerCount = 1) {
   const encoding = parameters.encodings[0];
   // A mesh uploads one encoded stream per peer. Share the target budget when
   // the room grows so congestion does not collapse every stream at once.
-  const meshFactor = Math.max(1, 1 + ((Math.max(1, peerCount) - 1) * 0.55));
-  encoding.maxBitrate = Math.max(profile.minBitrate, Math.round(profile.maxBitrate / meshFactor));
+  encoding.maxBitrate = screenShareEncodingBitrate(profile.id, peerCount, 1);
   encoding.maxFramerate = profile.frameRate;
   // A sender is reused when screen share stops and the camera track comes
   // back. Never let an adaptive screen scale leak into that replacement (or
@@ -220,6 +324,10 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   const encoding = parameters.encodings[0];
   const currentScale = Math.max(1, Number(encoding.scaleResolutionDownBy) || 1);
   const requestedScale = Math.max(1, Number(diagnostics.adaptationScale) || 1);
+  const targetFrameRate = Math.max(
+    1,
+    Math.min(profile.frameRate, Number(diagnostics.targetFrameRate) || profile.frameRate),
+  );
   // `scaleResolutionDownBy` is relative to the real captured dimensions, not
   // to the nominal profile. An ultrawide 1280x536 source scaled by 2 would
   // become 640x268 and can cross Chromium's hardware-encoder floor. Prefer
@@ -241,14 +349,12 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
     sourceWidth,
     sourceHeight,
   }, profile.minimumEncodedHeight);
-  const meshFactor = Math.max(1, 1 + ((Math.max(1, peerCount) - 1) * 0.55));
-  const profileBudget = Math.round(profile.maxBitrate / meshFactor);
-  // Scale bitrate with pixel count. Otherwise a degraded 360p stream keeps a
-  // 480p/1080p-sized budget, looks unnecessarily pristine and can continue
-  // saturating the encoder or uplink without buying any more frames.
-  const resolutionBudget = Math.max(
-    profile.minBitrate,
-    Math.round(profileBudget / (adaptationScale ** 2)),
+  // Scale bitrate with pixels, but deliberately retain the per-level budget
+  // when cadence falls so software codecs receive more bits per frame.
+  const resolutionBudget = screenShareEncodingBitrate(
+    profile.id,
+    peerCount,
+    adaptationScale,
   );
   const available = Number(diagnostics.availableOutgoingBitrate) || 0;
   // Leave transport headroom for Opus, retransmissions and signaling. A
@@ -258,24 +364,25 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   // count again needlessly starves each individual receiver.
   const networkBudget = available > 0 ? Math.round(available * 0.78) : resolutionBudget;
   const targetBitrate = available > 0
-    ? Math.max(450_000, Math.min(resolutionBudget, networkBudget))
+    ? Math.max(32_000, Math.min(resolutionBudget, networkBudget))
     : resolutionBudget;
   const previousBitrate = Number(encoding.maxBitrate) || targetBitrate;
   // Bandwidth estimates are intentionally noisy. Chasing every sample makes
   // queues empty/fill in bursts and the receiver compensates by varying
-  // playout. Downshift decisively, but recover capacity in small steps.
-  const scalingDown = adaptationScale > currentScale + 0.01;
+  // playout. A falling estimate is a hard ceiling: stepping down over several
+  // samples leaves seconds of excess data queued and is perceived as a freeze.
+  // Capacity recovery remains deliberately gradual.
   const nextBitrate = targetBitrate < previousBitrate
-    ? (scalingDown ? targetBitrate : Math.max(targetBitrate, Math.round(previousBitrate * 0.68)))
-    : Math.min(targetBitrate, Math.round(previousBitrate * 1.08));
+    ? targetBitrate
+    : Math.min(targetBitrate, Math.round(previousBitrate * 1.15));
   const sameParameters = Math.abs(previousBitrate - nextBitrate) < 50_000
     && Math.abs(currentScale - adaptationScale) < 0.01
-    && Number(encoding.maxFramerate) === profile.frameRate
+    && Number(encoding.maxFramerate) === targetFrameRate
     && parameters.degradationPreference === profile.degradationPreference;
   if (sameParameters) return true;
 
   encoding.maxBitrate = nextBitrate;
-  encoding.maxFramerate = profile.frameRate;
+  encoding.maxFramerate = targetFrameRate;
   encoding.priority = 'high';
   encoding.networkPriority = 'high';
   // Never reconfigure the live desktop track here. Changing source constraints
@@ -292,9 +399,12 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
 }
 
 export function initialCaptureAdaptation(profileId) {
+  const profile = screenShareProfile(profileId);
   return {
-    profileId: screenShareProfile(profileId).id,
+    profileId: profile.id,
     level: 0,
+    temporalLevel: 0,
+    frameRate: profile.adaptationFrameRates[0],
     poorSamples: 0,
     stableSamples: 0,
     cooldownSamples: 0,
@@ -319,6 +429,14 @@ export function initialCaptureAdaptation(profileId) {
 export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {}) {
   const profile = screenShareProfile(profileId);
   const current = previous?.profileId === profile.id ? previous : initialCaptureAdaptation(profile.id);
+  const temporalLevel = Math.max(
+    0,
+    Math.min(
+      profile.adaptationFrameRates.length - 1,
+      Number.isInteger(current.temporalLevel) ? current.temporalLevel : 0,
+    ),
+  );
+  const targetFrameRate = profile.adaptationFrameRates[temporalLevel];
   // A zero reported by getStats is a real stall. Undefined/null means that a
   // Chromium build did not expose that stage and must not trigger a blind
   // resolution downgrade.
@@ -338,8 +456,8 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const fpsEma = hasFpsSample
     ? (hasPriorFpsSample ? (current.fpsEma * 0.58) + (measuredFps * 0.42) : measuredFps)
     : current.fpsEma;
-  const fpsRatio = hasFpsSample ? fpsEma / profile.frameRate : 1;
-  const encodeBudgetMs = 1000 / profile.frameRate;
+  const fpsRatio = hasFpsSample ? fpsEma / targetFrameRate : 1;
+  const encodeBudgetMs = 1000 / targetFrameRate;
   const measuredEncodeSample = numericFps(diagnostics.averageEncodeTimeMs);
   const measuredEncode = measuredEncodeSample ?? 0;
   const encodeEma = measuredEncode > 0 ? (current.encodeEma > 0 ? (current.encodeEma * 0.58) + (measuredEncode * 0.42) : measuredEncode) : current.encodeEma;
@@ -347,20 +465,60 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const encodeRatio = encodeEma / encodeBudgetMs;
   const limitation = diagnostics.qualityLimitationReason || 'none';
   const availableOutgoingBitrate = Number(diagnostics.availableOutgoingBitrate) || 0;
-  const configuredMaxBitrate = Number(diagnostics.configuredMaxBitrate) || 0;
-  const networkHeadroomRatio = availableOutgoingBitrate > 0 && configuredMaxBitrate > 0
-    ? availableOutgoingBitrate / configuredMaxBitrate
+  const requiredBitrate = screenShareEncodingBitrate(
+    profile.id,
+    diagnostics.peerCount,
+    profile.adaptationScales[current.level] || 1,
+  );
+  // Compare the estimate with the actual demand of this operating point, not
+  // with maxBitrate (which is itself capped to the previous estimate). This
+  // keeps sustained low capacity visible across samples.
+  const networkHeadroomRatio = availableOutgoingBitrate > 0 && requiredBitrate > 0
+    ? availableOutgoingBitrate / requiredBitrate
     : null;
-  const networkPressure = limitation === 'bandwidth'
-    && (networkHeadroomRatio === null || networkHeadroomRatio < 0.92);
-  const networkSamples = networkPressure ? (Number(current.networkSamples) || 0) + 1 : 0;
+  const networkPressure = networkHeadroomRatio !== null && networkHeadroomRatio < 0.92;
+  let networkSamples = networkPressure ? (Number(current.networkSamples) || 0) + 1 : 0;
   const actionableNetworkPressure = networkPressure
     && networkSamples >= profile.networkPressureSamples;
+  const recoveryScale = temporalLevel > 0
+    ? profile.adaptationScales[current.level]
+    : profile.adaptationScales[Math.max(0, current.level - 1)];
+  const recoveryFrameRate = temporalLevel > 0
+    ? profile.adaptationFrameRates[temporalLevel - 1]
+    : targetFrameRate;
+  const recoveryRequiredBitrate = screenShareEncodingBitrate(
+    profile.id,
+    diagnostics.peerCount,
+    recoveryScale,
+  );
+  // Require extra capacity before restoring a richer operating point. Merely
+  // fitting the current low level is not evidence that the next one will fit;
+  // without this gate the controller bounces between 30 and 60 FPS forever.
+  const networkRecoveryHeadroomRatio = availableOutgoingBitrate > 0
+    ? availableOutgoingBitrate / recoveryRequiredBitrate
+    : null;
+  const networkRecoveryReady = current.level === 0 && temporalLevel === 0
+    ? true
+    : networkRecoveryHeadroomRatio === null || networkRecoveryHeadroomRatio >= 1.12;
+  const currentScaleForRecovery = profile.adaptationScales[current.level] || 1;
+  const projectedRecoveryEncodeMs = encodeEma > 0
+    ? encodeEma * ((currentScaleForRecovery / recoveryScale) ** 2)
+    : null;
+  const recoveryEncodeBudgetMs = 1000 / recoveryFrameRate;
+  const encoderRecoveryReady = current.level === 0 && temporalLevel === 0
+    ? true
+    : projectedRecoveryEncodeMs === null
+      || projectedRecoveryEncodeMs < recoveryEncodeBudgetMs * 0.66;
   const hasPipelineFps = captureFps !== null && encodedFps !== null;
-  const captureRatio = captureFps !== null ? captureFps / profile.frameRate : 1;
-  const encodedRatio = encodedFps !== null ? encodedFps / profile.frameRate : 1;
+  const captureRatio = captureFps !== null ? captureFps / targetFrameRate : 1;
+  const encodedRatio = encodedFps !== null ? encodedFps / targetFrameRate : 1;
+  const expectedEncoderInputFps = captureFps === null
+    ? targetFrameRate
+    : Math.min(captureFps, targetFrameRate);
   const encoderDeliveryRatio = hasPipelineFps
-    ? (captureFps > 0 ? encodedFps / captureFps : (encodedFps === 0 ? 1 : 0))
+    ? (expectedEncoderInputFps > 0
+      ? encodedFps / expectedEncoderInputFps
+      : (encodedFps === 0 ? 1 : 0))
     : 1;
   // Sender scaling happens after desktop capture. If the encoder is already
   // delivering virtually every captured frame with ample encode headroom,
@@ -394,11 +552,18 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     && fpsRatio >= profile.stableFpsRatio - 0.02
     && encodeRatio < 0.66
     && limitation !== 'cpu'
-    && !networkPressure;
+    && !networkPressure
+    && networkRecoveryReady
+    && encoderRecoveryReady;
   const sampleCount = (Number(current.sampleCount) || 0) + 1;
   const observingStartup = sampleCount <= profile.startupSamples;
+  const encoderImplementation = String(diagnostics.encoderImplementation || '');
+  const softwareEncoder = diagnostics.powerEfficientEncoder === false
+    || /openh264|libvpx|ffmpeg|software/i.test(encoderImplementation);
   let level = current.level;
+  let nextTemporalLevel = temporalLevel;
   const levelBeforeDecision = level;
+  const temporalLevelBeforeDecision = nextTemporalLevel;
   let poorSamples = moderatePressure && !observingStartup ? current.poorSamples + 1 : 0;
   let stableSamples = stable ? current.stableSamples + 1 : 0;
   let sourceSamples = sourceLimited ? (Number(current.sourceSamples) || 0) + 1 : 0;
@@ -416,8 +581,8 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   let trialHandled = false;
   let bottleneck = 'unknown';
   if (sourceLimited) bottleneck = 'source';
-  else if (moderatePressure || severePressure) bottleneck = 'encoder';
   else if (networkPressure) bottleneck = 'network';
+  else if (moderatePressure || severePressure) bottleneck = 'encoder';
   else if (stable) bottleneck = 'healthy';
 
   // A spatial downscale is a hypothesis, not a permanent conclusion. Compare
@@ -529,6 +694,19 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
 
   if (trialHandled) {
     // Trial observation/result owns this sample.
+  } else if (softwareEncoder && sampleCount === 1 && level === 0 && nextTemporalLevel === 0) {
+    // An actual outbound stats sample is stronger evidence than the generic
+    // GPU feature flag. Start software codecs at a sustainable pixel rate so
+    // low-end devices do not spend 10–20 seconds visibly collapsing through
+    // every hardware-oriented level first. Normal recovery can still probe
+    // richer levels later when the measured encoder has headroom.
+    level = profile.softwareSafeStart.level;
+    nextTemporalLevel = profile.softwareSafeStart.temporalLevel;
+    poorSamples = 0;
+    stableSamples = 0;
+    cooldownSamples = 2;
+    reason = 'software-encoder-safe-start';
+    bottleneck = 'encoder';
   } else if (cooldownSamples > 0) {
     // Hold the current resolution long enough for congestion control and the
     // hardware encoder to settle before judging the next sample.
@@ -547,36 +725,74 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     sourceSamples = 0;
     cooldownSamples = 2;
     reason = 'source-limited-recovery';
+  } else if (actionableNetworkPressure) {
+    // Once the capacity deficit survives the startup/ramp-up window, reduce
+    // the encoded pixel rate instead of squeezing the same 720p/1080p stream
+    // into an ever smaller bitrate. Spatial detail is reduced first; cadence
+    // becomes the last-resort safety valve at the bottom spatial level.
+    if (level < profile.adaptationScales.length - 1) {
+      level += 1;
+      reason = 'network-spatial-downshift';
+    } else if (nextTemporalLevel < profile.adaptationFrameRates.length - 1) {
+      nextTemporalLevel += 1;
+      reason = 'network-temporal-downshift';
+    } else {
+      reason = 'network-minimum-operating-point';
+    }
+    poorSamples = 0;
+    stableSamples = 0;
+    networkSamples = 0;
+    cooldownSamples = 2;
+    bottleneck = 'network';
   } else if (severePressure) {
-    level += profile.severeStep;
+    if (level < profile.adaptationScales.length - 1) {
+      level += profile.severeStep;
+      reason = fpsPipelinePressure ? 'encoder-fps-severe' : 'encode-severe';
+      downscaleTriggerReason = reason;
+    } else if (nextTemporalLevel < profile.adaptationFrameRates.length - 1) {
+      nextTemporalLevel += 1;
+      reason = 'encoder-temporal-severe';
+    }
     poorSamples = 0;
     stableSamples = 0;
     cooldownSamples = 2;
-    reason = fpsPipelinePressure ? 'encoder-fps-severe' : 'encode-severe';
-    downscaleTriggerReason = reason;
   } else if (moderatePressure && poorSamples >= profile.pressureSamples) {
-    level += 1;
+    if (level < profile.adaptationScales.length - 1) {
+      level += 1;
+      reason = limitation === 'cpu' ? 'cpu' : instantEncodeRatio > 0.82 ? 'encode' : 'encoder-fps';
+      downscaleTriggerReason = reason;
+    } else if (nextTemporalLevel < profile.adaptationFrameRates.length - 1) {
+      nextTemporalLevel += 1;
+      reason = 'encoder-temporal';
+    }
     poorSamples = 0;
     stableSamples = 0;
     cooldownSamples = 2;
-    reason = limitation === 'cpu' ? 'cpu' : instantEncodeRatio > 0.82 ? 'encode' : 'encoder-fps';
-    downscaleTriggerReason = reason;
   } else if (stable && stableSamples >= profile.recoverySamples) {
-    level -= 1;
+    if (nextTemporalLevel > 0) {
+      nextTemporalLevel -= 1;
+      reason = 'temporal-recovery';
+    } else {
+      level -= 1;
+      reason = 'recovery';
+    }
     stableSamples = 0;
     poorSamples = 0;
     cooldownSamples = 5;
-    reason = 'recovery';
   } else if (sourceLimited) {
     reason = 'source-limited';
   } else if (networkPressure) {
-    // `adaptVideoSender` already follows the measured transport budget. A
-    // bandwidth-only signal must not destroy spatial quality without evidence
-    // that the encoder itself is failing to deliver captured frames.
+    // `adaptVideoSender` already follows the measured transport budget on the
+    // first sample. Wait for sustained pressure before also changing pixels or
+    // cadence, so a normal GCC startup ramp does not destroy spatial quality.
     reason = actionableNetworkPressure ? 'network-bitrate-only' : 'network-observation';
   }
 
   level = Math.max(0, Math.min(profile.adaptationScales.length - 1, level));
+  nextTemporalLevel = Math.max(
+    0,
+    Math.min(profile.adaptationFrameRates.length - 1, nextTemporalLevel),
+  );
   if (downscaleTriggerReason && level > levelBeforeDecision) {
     encoderTrial = {
       triggerReason: downscaleTriggerReason,
@@ -608,9 +824,11 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     };
   }
   const scale = profile.adaptationScales[level];
+  const frameRate = profile.adaptationFrameRates[nextTemporalLevel];
   return {
     profileId: profile.id,
     level,
+    temporalLevel: nextTemporalLevel,
     poorSamples,
     stableSamples,
     sourceSamples,
@@ -618,8 +836,9 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     sampleCount,
     cooldownSamples,
     scale,
+    frameRate,
     reason,
-    targetFps: profile.frameRate,
+    targetFps: frameRate,
     measuredFps,
     captureFps: captureFps ?? 0,
     encodedFps: encodedFps ?? 0,
@@ -629,6 +848,12 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     networkPressure,
     networkSustained: actionableNetworkPressure,
     networkHeadroomRatio,
+    requiredBitrate,
+    recoveryRequiredBitrate,
+    networkRecoveryHeadroomRatio,
+    networkRecoveryReady,
+    projectedRecoveryEncodeMs,
+    encoderRecoveryReady,
     encoderTrial,
     downscaleEffectiveness,
     averageEncodeTimeMs: measuredEncode,
@@ -636,6 +861,9 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     encodeEma,
     effectiveWidth: Math.round(profile.width / scale),
     effectiveHeight: Math.round(profile.height / scale),
+    temporalChanged: nextTemporalLevel !== temporalLevelBeforeDecision,
+    softwareEncoder,
+    encoderImplementation: encoderImplementation || null,
   };
 }
 
