@@ -6,6 +6,7 @@ import {
   evaluateCaptureAdaptation,
   initialCaptureAdaptation,
   screenCaptureConstraints,
+  screenSharePlaybackBuffer,
 } from '../src/media/screenShareProfiles.js';
 
 function fakeSender() {
@@ -24,7 +25,7 @@ test('fluid profile requests 1080p60 and a motion-sized bitrate', async () => {
 
   const sender = fakeSender();
   assert.equal(await configureVideoSender(sender, 'fluid', 1), true);
-  assert.equal(sender.parameters.encodings[0].maxBitrate, 12_000_000);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 10_000_000);
   assert.equal(sender.parameters.encodings[0].maxFramerate, 60);
   assert.equal(sender.parameters.degradationPreference, 'maintain-framerate');
 });
@@ -35,10 +36,10 @@ test('adaptive sender preserves FPS by scaling when flashing content saturates b
     availableOutgoingBitrate: 4_000_000,
     framesPerSecond: 24,
     qualityLimitationReason: 'bandwidth',
-    adaptationScale: 1.45,
+    adaptationScale: 1.5,
   }), true);
   assert.equal(sender.parameters.encodings[0].maxBitrate, 3_280_000);
-  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 1.45);
+  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 1.5);
   assert.equal(sender.parameters.encodings[0].maxFramerate, 60);
 });
 
@@ -48,28 +49,31 @@ test('adaptive sender respects a genuinely constrained uplink instead of queuein
     availableOutgoingBitrate: 1_000_000,
     framesPerSecond: 12,
     qualityLimitationReason: 'bandwidth',
-    adaptationScale: 1.75,
+    adaptationScale: 1.5,
   });
   assert.equal(sender.parameters.encodings[0].maxBitrate, 820_000);
-  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 1.75);
+  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 1.5);
 });
 
-test('capture controller reacts to low real FPS even when quality remains good', () => {
-  const initial = initialCaptureAdaptation('fluid');
-  const next = evaluateCaptureAdaptation(initial, 'fluid', {
+test('capture controller requires repeated low-FPS samples before one stable downshift', () => {
+  let state = initialCaptureAdaptation('fluid');
+  const lowFps = {
     captureFps: 27,
     framesPerSecond: 26,
     averageEncodeTimeMs: 7,
     qualityLimitationReason: 'none',
-  });
-  assert.equal(next.level, 2);
-  assert.equal(next.scale, 1.45);
-  assert.equal(next.reason, 'fps-severe');
+  };
+  state = evaluateCaptureAdaptation(state, 'fluid', lowFps);
+  assert.equal(state.level, 0);
+  state = evaluateCaptureAdaptation(state, 'fluid', lowFps);
+  assert.equal(state.level, 1);
+  assert.equal(state.scale, 1.25);
+  assert.equal(state.reason, 'fps-severe');
 });
 
 test('capture controller recovers resolution slowly after sustained 60 FPS', () => {
-  let state = { ...initialCaptureAdaptation('fluid'), level: 2, scale: 1.45 };
-  for (let sample = 0; sample < 6; sample += 1) {
+  let state = { ...initialCaptureAdaptation('fluid'), level: 2, scale: 1.5 };
+  for (let sample = 0; sample < 12; sample += 1) {
     state = evaluateCaptureAdaptation(state, 'fluid', {
       captureFps: 60,
       framesPerSecond: 59,
@@ -78,12 +82,21 @@ test('capture controller recovers resolution slowly after sustained 60 FPS', () 
     });
   }
   assert.equal(state.level, 1);
-  assert.equal(state.scale, 1.2);
+  assert.equal(state.scale, 1.25);
 });
 
-test('competitive profile starts at 720p60 for GPU-heavy games', () => {
+test('stable profile has lower native pixel cost and more playout margin for GPU-heavy games', () => {
   const constraints = screenCaptureConstraints('competitive', 'window:123:0');
-  assert.equal(constraints.mandatory.maxWidth, 1280);
-  assert.equal(constraints.mandatory.maxHeight, 720);
+  assert.equal(constraints.mandatory.maxWidth, 960);
+  assert.equal(constraints.mandatory.maxHeight, 540);
   assert.equal(constraints.mandatory.maxFrameRate, 60);
+  assert.equal(screenSharePlaybackBuffer('competitive'), 220);
+  assert.equal(screenSharePlaybackBuffer('fluid'), 140);
+});
+
+test('sender bitrate recovers gradually instead of following noisy estimates in bursts', async () => {
+  const sender = fakeSender();
+  sender.parameters.encodings[0].maxBitrate = 2_000_000;
+  await adaptVideoSender(sender, 'fluid', 1, { availableOutgoingBitrate: 20_000_000 });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_240_000);
 });

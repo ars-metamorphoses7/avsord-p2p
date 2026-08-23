@@ -997,6 +997,7 @@ function App() {
   const audioInputIdRef = useRef(selectedAudioInputId);
   const repairPeerMediaRef = useRef(null);
   const setPeerScreenDeliveryRef = useRef(null);
+  const setPeerPlaybackProfileRef = useRef(null);
 
   const updateComposerCursor = useCallback(() => {
     const input = composerInputRef.current;
@@ -1374,6 +1375,7 @@ function App() {
       camera: Boolean(cameraStreamRef.current),
       sharing: Boolean(screenStreamRef.current),
       sharingAudio: Boolean(screenAudioSessionRef.current),
+      sharingProfile: screenStreamRef.current ? videoProfileRef.current : '',
       ...overrides,
     });
   }, [broadcastRoomData]);
@@ -1556,6 +1558,7 @@ function App() {
         camera: Boolean(cameraStreamRef.current),
         sharing: Boolean(screenStreamRef.current),
         sharingAudio: Boolean(screenAudioSessionRef.current),
+        sharingProfile: screenStreamRef.current ? videoProfileRef.current : '',
       });
       requestDirectSync();
       messagesRef.current.forEach((message) => {
@@ -1680,7 +1683,9 @@ function App() {
           camera: Boolean(payload.camera),
           sharing: Boolean(payload.sharing),
           sharingAudio: Boolean(payload.sharingAudio),
+          sharingProfile: payload.sharing ? String(payload.sharingProfile || 'fluid') : '',
         };
+        if (nextMediaState.sharing) setPeerPlaybackProfileRef.current?.(peerId, nextMediaState.sharingProfile);
         const wasSharing = remoteSharingRef.current.get(peerId) === true;
         if (nextMediaState.sharing) remoteSharingRef.current.set(peerId, true);
         else remoteSharingRef.current.delete(peerId);
@@ -1793,6 +1798,7 @@ function App() {
     handlePeerSignal,
     replacePeerTrack,
     requestPeerNegotiation,
+    setPeerPlaybackProfile,
     setPeerScreenDelivery,
     setVideoEncodingProfile,
   } = usePeerMesh({
@@ -1812,6 +1818,7 @@ function App() {
     onPeerError: setPermissionError,
   });
   repairPeerMediaRef.current = requestPeerNegotiation;
+  setPeerPlaybackProfileRef.current = setPeerPlaybackProfile;
   setPeerScreenDeliveryRef.current = setPeerScreenDelivery;
 
   const handleSignalMessage = useCallback(async (message) => {

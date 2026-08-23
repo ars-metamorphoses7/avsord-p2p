@@ -1,17 +1,18 @@
 export const SCREEN_SHARE_PROFILES = {
   competitive: {
     id: 'competitive',
-    label: 'competitivo',
-    description: '720p · 60 FPS · jogo pesado',
-    width: 1280,
-    height: 720,
+    label: 'estável',
+    description: '540p · 60 FPS cadenciados',
+    width: 960,
+    height: 540,
     frameRate: 60,
-    maxBitrate: 8_000_000,
-    minBitrate: 1_800_000,
+    maxBitrate: 6_000_000,
+    minBitrate: 1_200_000,
     degradationPreference: 'maintain-framerate',
     contentHint: 'motion',
     codecOrder: ['video/H264', 'video/VP9', 'video/VP8'],
-    adaptationScales: [1, 1.2, 1.4, 1.65],
+    adaptationScales: [1, 1.2],
+    playbackBufferMs: 220,
   },
   fluid: {
     id: 'fluid',
@@ -20,12 +21,13 @@ export const SCREEN_SHARE_PROFILES = {
     width: 1920,
     height: 1080,
     frameRate: 60,
-    maxBitrate: 12_000_000,
-    minBitrate: 3_000_000,
+    maxBitrate: 10_000_000,
+    minBitrate: 2_200_000,
     degradationPreference: 'maintain-framerate',
     contentHint: 'motion',
     codecOrder: ['video/H264', 'video/VP9', 'video/VP8'],
-    adaptationScales: [1, 1.2, 1.45, 1.75, 2],
+    adaptationScales: [1, 1.25, 1.5],
+    playbackBufferMs: 140,
   },
   balanced: {
     id: 'balanced',
@@ -40,6 +42,7 @@ export const SCREEN_SHARE_PROFILES = {
     contentHint: 'motion',
     codecOrder: ['video/H264', 'video/VP9', 'video/VP8'],
     adaptationScales: [1, 1.2, 1.45],
+    playbackBufferMs: 180,
   },
   detail: {
     id: 'detail',
@@ -54,6 +57,7 @@ export const SCREEN_SHARE_PROFILES = {
     contentHint: 'detail',
     codecOrder: ['video/VP9', 'video/H264', 'video/VP8'],
     adaptationScales: [1, 1.15, 1.35],
+    playbackBufferMs: 260,
   },
 };
 
@@ -61,6 +65,10 @@ export const SCREEN_SHARE_ADAPT_INTERVAL_MS = 1_500;
 
 export function screenShareProfile(profileId) {
   return SCREEN_SHARE_PROFILES[profileId] || SCREEN_SHARE_PROFILES.balanced;
+}
+
+export function screenSharePlaybackBuffer(profileId) {
+  return screenShareProfile(profileId).playbackBufferMs;
 }
 
 export function screenCaptureConstraints(profileId, sourceId = '') {
@@ -120,20 +128,32 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   // mesh factor above accounts for the other uploads; dividing it by the peer
   // count again needlessly starves each individual receiver.
   const networkBudget = available > 0 ? Math.round(available * 0.82) : profileBudget;
-  const nextBitrate = available > 0
+  const targetBitrate = available > 0
     ? Math.max(600_000, Math.min(profileBudget, networkBudget))
     : profileBudget;
+  const previousBitrate = Number(encoding.maxBitrate) || targetBitrate;
+  // Bandwidth estimates are intentionally noisy. Chasing every sample makes
+  // queues empty/fill in bursts and the receiver compensates by varying
+  // playout. Downshift decisively, but recover capacity in small steps.
+  const nextBitrate = targetBitrate < previousBitrate
+    ? Math.max(targetBitrate, Math.round(previousBitrate * 0.76))
+    : Math.min(targetBitrate, Math.round(previousBitrate * 1.12));
   const adaptationScale = Math.max(1, Number(diagnostics.adaptationScale) || 1);
-  const captureScaled = diagnostics.captureScaled === true;
+  const currentScale = Math.max(1, Number(encoding.scaleResolutionDownBy) || 1);
+  const sameParameters = Math.abs(previousBitrate - nextBitrate) < 50_000
+    && Math.abs(currentScale - adaptationScale) < 0.01
+    && Number(encoding.maxFramerate) === profile.frameRate
+    && parameters.degradationPreference === profile.degradationPreference;
+  if (sameParameters) return true;
 
   encoding.maxBitrate = nextBitrate;
   encoding.maxFramerate = profile.frameRate;
   encoding.priority = 'high';
   encoding.networkPriority = 'high';
-  // Prefer scaling at the capture track because that saves capture/compositor
-  // work as well as encoder work. Sender scaling remains the fallback for
-  // Chromium builds that reject dynamic desktop-track constraints.
-  encoding.scaleResolutionDownBy = captureScaled ? 1 : adaptationScale;
+  // Never reconfigure the live desktop track here. Changing source constraints
+  // can restart capture timestamps; sender-side GPU scaling keeps cadence
+  // continuous while still reducing encoded pixels.
+  encoding.scaleResolutionDownBy = adaptationScale;
   parameters.degradationPreference = profile.degradationPreference;
   try {
     await sender.setParameters(parameters);
@@ -149,6 +169,9 @@ export function initialCaptureAdaptation(profileId) {
     level: 0,
     poorSamples: 0,
     stableSamples: 0,
+    cooldownSamples: 0,
+    fpsEma: 0,
+    encodeEma: 0,
     scale: 1,
     reason: 'initial',
   };
@@ -161,9 +184,12 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     .map(Number)
     .filter((value) => Number.isFinite(value) && value > 0);
   const measuredFps = fpsSamples.length ? Math.min(...fpsSamples) : 0;
-  const fpsRatio = measuredFps > 0 ? measuredFps / profile.frameRate : 1;
+  const fpsEma = measuredFps > 0 ? (current.fpsEma > 0 ? (current.fpsEma * 0.68) + (measuredFps * 0.32) : measuredFps) : current.fpsEma;
+  const fpsRatio = fpsEma > 0 ? fpsEma / profile.frameRate : 1;
   const encodeBudgetMs = 1000 / profile.frameRate;
-  const encodeRatio = (Number(diagnostics.averageEncodeTimeMs) || 0) / encodeBudgetMs;
+  const measuredEncode = Number(diagnostics.averageEncodeTimeMs) || 0;
+  const encodeEma = measuredEncode > 0 ? (current.encodeEma > 0 ? (current.encodeEma * 0.68) + (measuredEncode * 0.32) : measuredEncode) : current.encodeEma;
+  const encodeRatio = encodeEma / encodeBudgetMs;
   const limitation = diagnostics.qualityLimitationReason || 'none';
   const severePressure = fpsSamples.length > 0 && (fpsRatio < 0.58 || encodeRatio > 1.05);
   const moderatePressure = (fpsSamples.length > 0 && fpsRatio < 0.84)
@@ -176,22 +202,29 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   let level = current.level;
   let poorSamples = moderatePressure ? current.poorSamples + 1 : 0;
   let stableSamples = stable ? current.stableSamples + 1 : 0;
+  let cooldownSamples = Math.max(0, Number(current.cooldownSamples) - 1);
   let reason = current.reason;
 
-  if (severePressure) {
-    level += 2;
-    poorSamples = 0;
-    stableSamples = 0;
-    reason = fpsRatio < 0.58 ? 'fps-severe' : 'encode-severe';
-  } else if (moderatePressure && poorSamples >= 2) {
+  if (cooldownSamples > 0) {
+    // Hold the current resolution long enough for congestion control and the
+    // hardware encoder to settle before judging the next sample.
+  } else if (severePressure && poorSamples >= 2) {
     level += 1;
     poorSamples = 0;
     stableSamples = 0;
+    cooldownSamples = 3;
+    reason = fpsRatio < 0.58 ? 'fps-severe' : 'encode-severe';
+  } else if (moderatePressure && poorSamples >= 3) {
+    level += 1;
+    poorSamples = 0;
+    stableSamples = 0;
+    cooldownSamples = 3;
     reason = limitation !== 'none' ? limitation : encodeRatio > 0.82 ? 'encode' : 'fps';
-  } else if (stable && stableSamples >= 6) {
+  } else if (stable && stableSamples >= 12) {
     level -= 1;
     stableSamples = 0;
     poorSamples = 0;
+    cooldownSamples = 6;
     reason = 'recovery';
   }
 
@@ -201,27 +234,14 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     level,
     poorSamples,
     stableSamples,
+    cooldownSamples,
     scale: profile.adaptationScales[level],
     reason,
     measuredFps,
-    averageEncodeTimeMs: Number(diagnostics.averageEncodeTimeMs) || 0,
+    averageEncodeTimeMs: measuredEncode,
+    fpsEma,
+    encodeEma,
   };
-}
-
-export async function applyCaptureAdaptation(track, profileId, adaptation) {
-  if (!track?.applyConstraints) return false;
-  const profile = screenShareProfile(profileId);
-  const scale = Math.max(1, Number(adaptation?.scale) || 1);
-  try {
-    await track.applyConstraints({
-      width: { ideal: Math.round(profile.width / scale), max: Math.round(profile.width / scale) },
-      height: { ideal: Math.round(profile.height / scale), max: Math.round(profile.height / scale) },
-      frameRate: { ideal: profile.frameRate, max: profile.frameRate },
-    });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function preferVideoCodecs(transceiver, profileId) {

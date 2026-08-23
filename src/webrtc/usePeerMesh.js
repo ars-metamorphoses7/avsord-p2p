@@ -2,11 +2,11 @@ import { useCallback, useEffect, useRef } from 'react';
 import {
   SCREEN_SHARE_ADAPT_INTERVAL_MS,
   adaptVideoSender,
-  applyCaptureAdaptation,
   configureVideoSender,
   evaluateCaptureAdaptation,
   initialCaptureAdaptation,
   preferVideoCodecs,
+  screenSharePlaybackBuffer,
 } from '../media/screenShareProfiles.js';
 
 const ICE_RESTART_DELAY_MS = 4_000;
@@ -70,6 +70,27 @@ async function setSenderActive(sender, active) {
   }
 }
 
+function setReceiverPlaybackBuffer(receiver, targetMs) {
+  if (!receiver || !('jitterBufferTarget' in receiver)) return false;
+  try {
+    const nextTarget = Math.max(0, Number(targetMs) || 0);
+    if (Math.abs((Number(receiver.jitterBufferTarget) || 0) - nextTarget) < 1) return true;
+    receiver.jitterBufferTarget = nextTarget;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function applySlotPlaybackProfile(slot, profileId) {
+  if (!slot) return false;
+  slot.remotePlaybackProfile = profileId || 'fluid';
+  const targetMs = screenSharePlaybackBuffer(slot.remotePlaybackProfile);
+  const videoApplied = setReceiverPlaybackBuffer(slot.videoTransceiver?.receiver, targetMs);
+  const audioApplied = setReceiverPlaybackBuffer(slot.screenAudioTransceiver?.receiver, targetMs);
+  return videoApplied || audioApplied;
+}
+
 function remoteDescriptionHasTrack(pc, transceiver) {
   const mid = String(transceiver?.mid ?? '');
   if (!mid) return false;
@@ -124,7 +145,7 @@ export function usePeerMesh({
         return;
       }
       if (adaptationRef.current.trackId !== screenTrack.id || adaptationRef.current.profileId !== videoProfileRef.current) {
-        adaptationRef.current = { ...initialCaptureAdaptation(videoProfileRef.current), trackId: screenTrack.id, captureScaled: true };
+        adaptationRef.current = { ...initialCaptureAdaptation(videoProfileRef.current), trackId: screenTrack.id };
       }
       const samples = await Promise.all(slots.map(async (slot) => {
         try {
@@ -171,18 +192,13 @@ export function usePeerMesh({
       if (!Number.isFinite(aggregate.captureFps)) aggregate.captureFps = 0;
       if (!Number.isFinite(aggregate.framesPerSecond)) aggregate.framesPerSecond = 0;
       const nextAdaptation = evaluateCaptureAdaptation(adaptationRef.current, videoProfileRef.current, aggregate);
-      if (nextAdaptation.level !== adaptationRef.current.level) {
-        nextAdaptation.captureScaled = await applyCaptureAdaptation(screenTrack, videoProfileRef.current, nextAdaptation);
-      } else {
-        nextAdaptation.captureScaled = adaptationRef.current.captureScaled;
-      }
       nextAdaptation.trackId = screenTrack.id;
       adaptationRef.current = nextAdaptation;
       await Promise.all(samples.map(({ slot, diagnostics }) => adaptVideoSender(
         slot.videoSender,
         videoProfileRef.current,
         slots.length,
-        { ...diagnostics, adaptationScale: nextAdaptation.scale, captureScaled: nextAdaptation.captureScaled },
+        { ...diagnostics, adaptationScale: nextAdaptation.scale },
       )));
       running = false;
     };
@@ -239,14 +255,14 @@ export function usePeerMesh({
     }, 0);
   }, [makeOffer, peerConnectionsRef]);
 
-  const replacePeerTrack = useCallback(async (senderKey, track) => {
+  const replacePeerTrack = useCallback(async (senderKey, track, streamOverride = null) => {
     const failed = [];
     await Promise.all([...peerConnectionsRef.current.entries()].map(async ([peerId, slot]) => {
       const sender = slot?.[senderKey];
       if (!sender || ['closed', 'failed'].includes(slot.pc.connectionState)) return;
       try {
         const previousTrack = sender.track;
-        const outboundStream = track ? new MediaStream([track]) : null;
+        const outboundStream = track ? (streamOverride || new MediaStream([track])) : null;
         const transceiver = senderKey === 'audioSender'
           ? slot.audioTransceiver
           : senderKey === 'screenAudioSender'
@@ -281,10 +297,14 @@ export function usePeerMesh({
     videoProfileRef.current = profileId;
     adaptationRef.current = initialCaptureAdaptation(profileId);
     const slots = [...peerConnectionsRef.current.values()].filter((slot) => slot?.videoSender?.track);
-    const track = screenStreamRef.current?.getVideoTracks?.()[0];
-    if (track) adaptationRef.current.captureScaled = await applyCaptureAdaptation(track, profileId, adaptationRef.current);
     await Promise.all(slots.map((slot) => configureVideoSender(slot.videoSender, profileId, slots.length)));
-  }, [peerConnectionsRef, screenStreamRef, videoProfileRef]);
+  }, [peerConnectionsRef, videoProfileRef]);
+
+  const setPeerPlaybackProfile = useCallback((peerId, profileId) => {
+    const slot = peerConnectionsRef.current.get(peerId);
+    if (!slot || slot.pc.connectionState === 'closed') return false;
+    return applySlotPlaybackProfile(slot, profileId);
+  }, [peerConnectionsRef]);
 
   const setPeerScreenDelivery = useCallback(async (peerId, watching) => {
     const slot = peerConnectionsRef.current.get(peerId);
@@ -332,6 +352,7 @@ export function usePeerMesh({
       offerTimer: 0,
       iceRestartAttempts: 0,
       screenWatching: true,
+      remotePlaybackProfile: '',
       mediaReady: Promise.resolve(),
     };
     peerConnectionsRef.current.set(peerId, slot);
@@ -385,6 +406,7 @@ export function usePeerMesh({
     const audioStream = audioStreamRef.current;
     const videoStream = screenStreamRef.current || cameraStreamRef.current;
     const screenAudioStream = screenAudioSessionRef.current?.bridge?.stream || screenAudioSessionRef.current?.stream || null;
+    const outboundShareStream = screenAudioSessionRef.current?.outboundStream || videoStream;
     const audioTrack = audioStream?.getAudioTracks()[0] || null;
     const videoTrack = videoStream?.getVideoTracks()[0] || null;
     const screenAudioTrack = screenAudioStream?.getAudioTracks?.()[0] || null;
@@ -395,14 +417,14 @@ export function usePeerMesh({
       initialMediaTasks.push(slot.audioSender.replaceTrack(audioTrack));
     }
     if (videoTrack && slot.videoSender) {
-      slot.videoSender.setStreams?.(videoStream);
-      slot.videoSenderStream = videoStream;
+      slot.videoSender.setStreams?.(outboundShareStream);
+      slot.videoSenderStream = outboundShareStream;
       initialMediaTasks.push(slot.videoSender.replaceTrack(videoTrack));
       initialMediaTasks.push(configureVideoSender(slot.videoSender, videoProfileRef.current, peerConnectionsRef.current.size));
     }
     if (screenAudioTrack && slot.screenAudioSender) {
-      slot.screenAudioSender.setStreams?.(screenAudioStream);
-      slot.screenAudioSenderStream = screenAudioStream;
+      slot.screenAudioSender.setStreams?.(outboundShareStream);
+      slot.screenAudioSenderStream = outboundShareStream;
       initialMediaTasks.push(slot.screenAudioSender.replaceTrack(screenAudioTrack));
     }
     slot.mediaReady = Promise.all(initialMediaTasks);
@@ -478,6 +500,7 @@ export function usePeerMesh({
         slot.audioTransceiver ||= audioTransceivers[0] || null;
         slot.videoTransceiver ||= transceivers.find((transceiver) => transceiver.receiver.track?.kind === 'video') || null;
         slot.screenAudioTransceiver ||= audioTransceivers[1] || null;
+        if (slot.remotePlaybackProfile) applySlotPlaybackProfile(slot, slot.remotePlaybackProfile);
         if (slot.videoTransceiver) preferVideoCodecs(slot.videoTransceiver, videoProfileRef.current);
         slot.audioSender ||= slot.audioTransceiver?.sender || null;
         slot.videoSender ||= slot.videoTransceiver?.sender || null;
@@ -485,6 +508,7 @@ export function usePeerMesh({
         const audioStream = audioStreamRef.current;
         const videoStream = screenStreamRef.current || cameraStreamRef.current;
         const screenAudioStream = screenAudioSessionRef.current?.bridge?.stream || screenAudioSessionRef.current?.stream || null;
+        const outboundShareStream = screenAudioSessionRef.current?.outboundStream || videoStream;
         const audioTrack = audioStream?.getAudioTracks()[0] || null;
         const videoTrack = videoStream?.getVideoTracks()[0] || null;
         const screenAudioTrack = screenAudioStream?.getAudioTracks?.()[0] || null;
@@ -497,15 +521,15 @@ export function usePeerMesh({
         }
         if (videoTrack && slot.videoSender) {
           slot.videoTransceiver.direction = 'sendrecv';
-          slot.videoSender.setStreams?.(videoStream);
-          slot.videoSenderStream = videoStream;
+          slot.videoSender.setStreams?.(outboundShareStream);
+          slot.videoSenderStream = outboundShareStream;
           mediaTasks.push(slot.videoSender.replaceTrack(videoTrack));
           mediaTasks.push(configureVideoSender(slot.videoSender, videoProfileRef.current, peerConnectionsRef.current.size));
         }
         if (screenAudioTrack && slot.screenAudioSender) {
           slot.screenAudioTransceiver.direction = 'sendrecv';
-          slot.screenAudioSender.setStreams?.(screenAudioStream);
-          slot.screenAudioSenderStream = screenAudioStream;
+          slot.screenAudioSender.setStreams?.(outboundShareStream);
+          slot.screenAudioSenderStream = outboundShareStream;
           mediaTasks.push(slot.screenAudioSender.replaceTrack(screenAudioTrack));
         }
         slot.mediaReady = Promise.all(mediaTasks);
@@ -539,6 +563,7 @@ export function usePeerMesh({
     replacePeerTrack,
     requestPeerNegotiation,
     setPeerScreenDelivery,
+    setPeerPlaybackProfile,
     setVideoEncodingProfile,
   };
 }

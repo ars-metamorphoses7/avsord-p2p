@@ -50,7 +50,7 @@ export function useScreenShare({
     const fallbackTrack = cameraStreamRef.current?.getVideoTracks()[0] || null;
     void replacePeerTrack('videoSender', fallbackTrack);
     setIsSharing(false);
-    announceCallState({ sharing: false, sharingAudio: false });
+    announceCallState({ sharing: false, sharingAudio: false, sharingProfile: '' });
     if (wasSharing) onShareStopped?.();
   }, [announceCallState, cameraStreamRef, cancelPicker, onShareStopped, replacePeerTrack, screenStreamRef, setIsSharing, stopAudioSession]);
 
@@ -82,6 +82,8 @@ export function useScreenShare({
       setProfileId(selectedProfile);
       await setVideoEncodingProfile(selectedProfile);
 
+      let outboundShareStream = videoStream;
+
       if (withAudio) {
         if (!desktopCapture || !selectedAudio) throw new Error('Escolha uma fonte de áudio válida.');
         audioBridge = await createDesktopAudioBridge(desktop, {
@@ -90,23 +92,25 @@ export function useScreenShare({
           systemAudio: selectedAudio.type === 'screen',
         });
         const desktopAudioTrack = audioBridge.stream.getAudioTracks()[0];
+        outboundShareStream = new MediaStream([videoTrack, desktopAudioTrack]);
         screenAudioSessionRef.current = {
           bridge: audioBridge,
           stream: audioBridge.stream,
+          outboundStream: outboundShareStream,
           async stop() {
             await audioBridge.stop();
           },
         };
-        if (!(await replacePeerTrack('screenAudioSender', desktopAudioTrack))) throw new Error('Não foi possível enviar o áudio compartilhado aos participantes.');
+        if (!(await replacePeerTrack('screenAudioSender', desktopAudioTrack, outboundShareStream))) throw new Error('Não foi possível enviar o áudio compartilhado aos participantes.');
       }
 
       screenStreamRef.current = videoStream;
-      if (!(await replacePeerTrack('videoSender', videoTrack))) throw new Error('Não foi possível enviar a tela aos participantes.');
+      if (!(await replacePeerTrack('videoSender', videoTrack, outboundShareStream))) throw new Error('Não foi possível enviar a tela aos participantes.');
       videoTrack.onended = () => {
         if (screenStreamRef.current === videoStream) stopScreenShare();
       };
       setIsSharing(true);
-      announceCallState({ sharing: true, sharingAudio: withAudio });
+      announceCallState({ sharing: true, sharingAudio: withAudio, sharingProfile: selectedProfile });
       onShareStarted?.();
       return true;
     } catch (error) {

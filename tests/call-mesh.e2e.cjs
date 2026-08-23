@@ -58,8 +58,8 @@ async function stopServer() {
 async function createParticipant(index) {
   const window = new BrowserWindow({
     show: false,
-    width: 1100,
-    height: 760,
+    width: 1440,
+    height: 900,
     webPreferences: {
       backgroundThrottling: false,
       contextIsolation: true,
@@ -206,12 +206,64 @@ async function run() {
     const encoding = slot.videoSender?.getParameters?.().encodings?.[0];
     return Number(encoding?.maxBitrate) > 0 && Number(encoding?.maxFramerate) > 0;
   }))()`), 'perfil de bitrate e FPS aplicado aos remetentes', 20_000);
+  await waitFor(() => windows[0].webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].every((slot) => {
+    const videoStream = slot.videoSenderStream;
+    const audioStream = slot.screenAudioSenderStream;
+    return videoStream?.id && videoStream.id === audioStream?.id;
+  }))()`), 'áudio e vídeo publicados com a mesma linha do tempo', 20_000);
+  try {
+    await waitFor(() => Promise.all(windows.slice(1).map((window) => window.webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()]
+      .filter((slot) => slot.remoteMediaState?.sharing)
+      .every((slot) => {
+        const expected = { competitive: 220, fluid: 140, balanced: 180, detail: 260 }[slot.remoteMediaState.sharingProfile];
+        return slot.remotePlaybackProfile === slot.remoteMediaState.sharingProfile
+          && (!('jitterBufferTarget' in slot.videoTransceiver.receiver) || slot.videoTransceiver.receiver.jitterBufferTarget === expected)
+          && (!('jitterBufferTarget' in slot.screenAudioTransceiver.receiver) || slot.screenAudioTransceiver.receiver.jitterBufferTarget === expected);
+      }))()`))).then((values) => values.every(Boolean)), 'buffer de reprodução fixo e sincronizado', 20_000);
+  } catch (error) {
+    const playbackDiagnostics = await Promise.all(windows.slice(1).map((window) => window.webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].map((slot) => ({
+      sharing: slot.remoteMediaState?.sharing,
+      profile: slot.remotePlaybackProfile,
+      hasVideoTarget: 'jitterBufferTarget' in slot.videoTransceiver.receiver,
+      videoTarget: slot.videoTransceiver.receiver.jitterBufferTarget,
+      hasAudioTarget: 'jitterBufferTarget' in slot.screenAudioTransceiver.receiver,
+      audioTarget: slot.screenAudioTransceiver.receiver.jitterBufferTarget,
+    })))()`)));
+    process.stderr.write(`${JSON.stringify(playbackDiagnostics, null, 2)}\n`);
+    throw error;
+  }
+
+  await windows[1].webContents.executeJavaScript("document.querySelector('.chat-toggle-button.is-active')?.click()");
 
   await windows[1].webContents.executeJavaScript(`(() => {
     const card = [...document.querySelectorAll('.call-stream-card')].find((entry) => entry.textContent.includes('compartilhando a tela'));
     card?.querySelector('.call-stream-viewport')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
   })()`);
   await waitFor(() => count(windows[1], '.call-stream-grid.has-focused-stream .call-stream-card.is-focused'), 'transmissão maximizada dentro da chamada');
+  const focusedLayout = await windows[1].webContents.executeJavaScript(`(() => {
+    const grid = document.querySelector('.call-stream-grid.has-focused-stream');
+    const card = grid?.querySelector('.call-stream-card.is-focused');
+    const viewport = card?.querySelector('.call-stream-viewport');
+    const video = viewport?.querySelector('video');
+    const caption = card?.querySelector('.call-stream-caption');
+    if (!grid || !card || !viewport || !video || !caption) return null;
+    const cardRect = card.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    const captionRect = caption.getBoundingClientRect();
+    const visibleCards = [...grid.querySelectorAll('.call-stream-card')]
+      .filter((entry) => getComputedStyle(entry).display !== 'none').length;
+    return {
+      visibleCards,
+      objectFit: getComputedStyle(video).objectFit,
+      viewportInsideCard: viewportRect.top >= cardRect.top - 1 && viewportRect.bottom <= captionRect.top + 1,
+      captionInsideCard: captionRect.bottom <= cardRect.bottom + 1,
+      fillsStage: cardRect.height > 600 && viewportRect.width > 1000,
+    };
+  })()`);
+  if (!focusedLayout || focusedLayout.visibleCards !== 1 || focusedLayout.objectFit !== 'contain'
+    || !focusedLayout.viewportInsideCard || !focusedLayout.captionInsideCard || !focusedLayout.fillsStage) {
+    throw new Error(`Layout focado cortado ou com participantes duplicados: ${JSON.stringify(focusedLayout)}`);
+  }
   await captureDebug(windows[1], 'focused');
   await windows[1].webContents.executeJavaScript(`(() => {
     const card = document.querySelector('.call-stream-card.is-focused');
@@ -286,7 +338,7 @@ async function run() {
   await waitFor(() => Promise.all(windows.slice(1).map((window) => inboundRtpCount(window, 'video'))).then((values) => values.every((value) => value >= 1)), 'tela após reconexão', 20_000);
   await waitFor(() => Promise.all(windows.slice(1).map((window) => count(window, '.call-stream-share-audio'))).then((values) => values.every((value) => value === 1)), 'áudio separado após reconexão', 20_000);
 
-  process.stdout.write('OK: 3 participantes, áudio separado, foco, pausa, mixer, RTP e reconexão validados.\n');
+  process.stdout.write('OK: 3 participantes, A/V sincronizado, foco sem corte, pausa, mixer, RTP e reconexão validados.\n');
 }
 
 run().then(() => app.exit(0)).catch((error) => {

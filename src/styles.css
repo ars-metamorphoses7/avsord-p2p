@@ -4322,41 +4322,31 @@ body.is-resizing-call-chat, body.is-resizing-call-chat * { cursor: col-resize !i
 .call-stream-paused > button:active { box-shadow: var(--win98-inset-shadow); transform: translate(1px, 1px); }
 
 .call-stream-grid.has-focused-stream {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  grid-template-rows: minmax(260px, 1fr) minmax(92px, 126px);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   align-content: stretch;
   height: 100%;
 }
 
 .call-stream-grid.has-focused-stream .call-stream-card.is-focused {
-  grid-column: 1 / -1;
+  grid-column: 1;
   grid-row: 1;
   min-height: 0;
+  height: 100%;
 }
 
 .call-stream-grid.has-focused-stream .call-stream-card.is-focused .call-stream-viewport {
+  flex: 1 1 auto;
   min-height: 0;
-  height: 100%;
+  height: auto;
   aspect-ratio: auto;
 }
 
-.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) {
-  grid-row: 2;
-  min-height: 0;
-}
+.call-stream-grid.has-focused-stream .call-stream-card.is-focused .call-stream-caption { flex: 0 0 auto; }
 
-.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) .call-stream-viewport {
-  min-height: 0;
-  height: 100%;
-  aspect-ratio: auto;
-}
-
-.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) .call-stream-caption {
-  min-height: 25px;
-  padding: 5px;
-}
-.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) .call-stream-caption small { display: none; }
-.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) .call-stream-watch-toggle { display: none; }
+/* A lista da própria sidebar já representa os participantes. Durante o foco,
+   não gastamos altura do vídeo repetindo essas miniaturas abaixo dele. */
+.call-stream-grid.has-focused-stream .call-stream-card:not(.is-focused) { display: none; }
 
 .participant-volume-popover {
   position: fixed;
@@ -4403,12 +4393,7 @@ body.is-resizing-call-chat, body.is-resizing-call-chat * { cursor: col-resize !i
 .participant-volume-reset:active { box-shadow: var(--win98-inset-shadow); transform: translate(1px, 1px); }
 .participant-volume-body > small { color: #444; font-size: 10px; }
 
-@media (max-width: 900px) {
-  .call-stream-grid.has-focused-stream { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: minmax(220px, 1fr) minmax(82px, 112px); }
-}
-
 @media (max-width: 560px) {
-  .call-stream-grid.has-focused-stream { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .call-stream-watch-toggle { font-size: 0; }
 }
 
