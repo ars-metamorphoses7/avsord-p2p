@@ -357,6 +357,9 @@ wss.on('connection', (socket) => {
       const roomId = room.id;
       const roomName = room.name;
       const members = [...room.members.values()];
+      // Close mediasoup producers, consumers and transports while the room
+      // membership is still available to the SFU cleanup callbacks.
+      members.forEach((member) => screenSfu.closeSocket(member));
       rooms.delete(roomId);
       // The default room is always available, even after the last custom room
       // is deleted or someone removes Jump House itself.
