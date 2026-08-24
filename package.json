@@ -63,6 +63,7 @@
     "build": "vite build",
     "test:call": "npm run build && electron tests/call-mesh.e2e.cjs",
     "test:update": "node --test tests/update-controller.test.cjs",
+    "test:persistence": "node --test tests/rooms-persistence.test.cjs tests/room-session-store.test.cjs",
     "test:media": "node --test tests/screen-share-profiles.test.js tests/screen-share-telemetry.test.js tests/image-quality.test.cjs tests/call-sounds.test.js",
     "test:gpu": "electron tests/gpu-capabilities.e2e.cjs",
     "test:stream-benchmark": "npm run build && electron tests/screen-share-benchmark.e2e.cjs",

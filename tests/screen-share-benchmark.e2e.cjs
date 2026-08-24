@@ -304,6 +304,9 @@ async function stopServer() {
 function setupIpc() {
   ipcMain.handle('window:state', () => ({ maximized: false }));
   ipcMain.handle('update:state', () => ({ status: 'benchmark', revision: 0 }));
+  ipcMain.handle('room-session:remember', () => ({ ok: true }));
+  ipcMain.handle('room-session:forget', () => ({ ok: true }));
+  ipcMain.handle('room-session:list', () => []);
   ipcMain.handle('media:capabilities', () => {
     const features = app.getGPUFeatureStatus();
     return {

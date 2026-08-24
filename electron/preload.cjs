@@ -22,7 +22,10 @@ contextBridge.exposeInMainWorld('jumpDesktop', {
     ipcRenderer.on('window:state', listener);
     return () => ipcRenderer.removeListener('window:state', listener);
   },
-  getInviteUrl: (roomId) => ipcRenderer.invoke('invite:url', roomId),
+  getInviteUrl: (roomId, signalOrigin = '') => ipcRenderer.invoke('invite:url', roomId, signalOrigin),
+  rememberRoomSession: (session) => ipcRenderer.invoke('room-session:remember', session),
+  forgetRoomSession: (session) => ipcRenderer.invoke('room-session:forget', session),
+  getRecentRoomSessions: () => ipcRenderer.invoke('room-session:list'),
   getUpdateState: () => ipcRenderer.invoke('update:state'),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),

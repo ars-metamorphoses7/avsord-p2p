@@ -122,6 +122,14 @@ async function run() {
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(true));
   ipcMain.handle('window:state', () => ({ maximized: false }));
   ipcMain.handle('update:state', () => ({ status: 'dev', revision: 0 }));
+  ipcMain.handle('room-session:remember', () => ({ ok: true }));
+  ipcMain.handle('room-session:forget', () => ({ ok: true }));
+  ipcMain.handle('room-session:list', () => [{
+    roomId: 'sala-recente',
+    roomName: 'Sala Recente',
+    signal: 'http://10.0.0.7:8787',
+    lastVisitedAt: Date.now(),
+  }]);
   ipcMain.handle('media:capabilities', () => ({ hardwareAcceleration: true, hardwareVideoEncoding: true, videoEncode: 'enabled' }));
   ipcMain.handle('desktop:audio-start', () => ({ ok: true, mode: 'process', processId: process.pid }));
   ipcMain.handle('desktop:audio-stop', () => ({ ok: true }));
@@ -148,6 +156,7 @@ async function run() {
   for (let index = 0; index < 3; index += 1) await createParticipant(index);
   await waitFor(() => Promise.all(windows.map((window) => count(window, '.signal-badge.is-connected'))).then((values) => values.every(Boolean)), 'três clientes sinalizados');
   await waitFor(() => Promise.all(windows.map((window) => window.webContents.executeJavaScript("document.querySelector('.signal-badge')?.textContent.includes('3 conectados')"))).then((values) => values.every(Boolean)), 'sala com três participantes');
+  await waitFor(() => Promise.all(windows.map((window) => window.webContents.executeJavaScript("document.querySelector('.recent-room-list-row')?.textContent.includes('Sala Recente')"))).then((values) => values.every(Boolean)), 'catálogo de salas recentes persistidas');
 
   for (const window of windows) {
     await click(window, 'button[aria-label="Abrir chamada"]');

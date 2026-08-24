@@ -50,7 +50,7 @@ import { usePeerMesh } from './webrtc/usePeerMesh.js';
 
 const INITIAL_QUERY = new URLSearchParams(window.location.search);
 const DEFAULT_ROOM_ID = INITIAL_QUERY.get('room') || 'jump-house';
-const SIGNAL_ORIGIN = INITIAL_QUERY.get('signal') || '';
+const SIGNAL_ORIGIN = normalizeSignalOrigin(INITIAL_QUERY.get('signal'));
 const TONES = ['yellow', 'mint', 'violet', 'coral', 'blue'];
 const MAX_ROOM_MESSAGES = 50_000;
 const MAX_DIRECT_MESSAGES = 50_000;
@@ -86,6 +86,53 @@ const WIN_ICONS = {
   app: winAppIcon,
 };
 let messageDbPromise;
+
+function normalizeSignalOrigin(value) {
+  const clean = String(value || '').trim();
+  if (!clean) return '';
+  try {
+    const parsed = new URL(clean);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.origin : '';
+  } catch {
+    return '';
+  }
+}
+
+function roomLocation(roomId = '', signalOrigin = SIGNAL_ORIGIN) {
+  const query = new URLSearchParams();
+  if (roomId) query.set('room', roomId);
+  const normalizedSignal = normalizeSignalOrigin(signalOrigin);
+  if (normalizedSignal) query.set('signal', normalizedSignal);
+  const serialized = query.toString();
+  return `${window.location.pathname}${serialized ? `?${serialized}` : ''}`;
+}
+
+function rememberVisitedRoom(roomId, roomName) {
+  if (!roomId) return;
+  globalThis.jumpDesktop?.rememberRoomSession?.({ roomId, roomName, signal: SIGNAL_ORIGIN })
+    .then((result) => {
+      if (Array.isArray(result?.recent)) window.dispatchEvent(new CustomEvent('jump:room-sessions-changed', { detail: result.recent }));
+    })
+    .catch(() => {});
+}
+
+function forgetVisitedRoom(roomId) {
+  if (!roomId) return;
+  globalThis.jumpDesktop?.forgetRoomSession?.({ roomId, signal: SIGNAL_ORIGIN })
+    .then((result) => {
+      if (Array.isArray(result?.recent)) window.dispatchEvent(new CustomEvent('jump:room-sessions-changed', { detail: result.recent }));
+    })
+    .catch(() => {});
+}
+
+function roomSessionNetworkLabel(session) {
+  if (!session?.signal) return 'neste dispositivo';
+  try {
+    return new URL(session.signal).host;
+  } catch {
+    return 'rede externa';
+  }
+}
 
 function normalizePresenceStatus(value) {
   return PRESENCE_STATUSES.includes(value) ? value : 'online';
@@ -895,6 +942,7 @@ function App() {
   const [roomId, setRoomId] = useState(DEFAULT_ROOM_ID);
   const [roomName, setRoomName] = useState(prettyRoomName(DEFAULT_ROOM_ID));
   const [rooms, setRooms] = useState([]);
+  const [recentRoomSessions, setRecentRoomSessions] = useState([]);
   const [peers, setPeers] = useState([]);
   const [messages, setMessages] = useState([]);
   const [directPeerId, setDirectPeerId] = useState('');
@@ -1090,7 +1138,7 @@ function App() {
     const room = roomIdRef.current || DEFAULT_ROOM_ID;
     let invite = '';
     try {
-      invite = await globalThis.jumpDesktop?.getInviteUrl?.(room);
+      invite = await globalThis.jumpDesktop?.getInviteUrl?.(room, SIGNAL_ORIGIN);
     } catch {
       invite = '';
     }
@@ -1099,6 +1147,7 @@ function App() {
       url.search = '';
       url.hash = '';
       url.searchParams.set('room', room);
+      if (SIGNAL_ORIGIN) url.searchParams.set('signal', SIGNAL_ORIGIN);
       invite = url.toString();
     }
     try {
@@ -1181,6 +1230,16 @@ function App() {
     const unsubscribe = desktop?.onUpdateState(applyUpdateState);
     desktop?.getUpdateState?.().then(applyUpdateState).catch(() => {});
     return () => unsubscribe?.();
+  }, []);
+  useEffect(() => {
+    const desktop = globalThis.jumpDesktop;
+    const applySessions = (sessions) => {
+      if (Array.isArray(sessions)) setRecentRoomSessions(sessions);
+    };
+    const handleSessionsChanged = (event) => applySessions(event.detail);
+    desktop?.getRecentRoomSessions?.().then(applySessions).catch(() => {});
+    window.addEventListener('jump:room-sessions-changed', handleSessionsChanged);
+    return () => window.removeEventListener('jump:room-sessions-changed', handleSessionsChanged);
   }, []);
   useEffect(() => {
     if (!updateDialogOpen) return undefined;
@@ -1851,6 +1910,7 @@ function App() {
       setRoomNameDraft(roomNameRef.current);
       setRoomProtected(Boolean(message.protected));
       setRoomCreatedAt(Number(message.createdAt) || 0);
+      rememberVisitedRoom(message.roomId, roomNameRef.current);
       setPeers(nextPeers);
       nextPeers.forEach((peer) => rememberContact(peer, { connected: true, status: peer.status || 'online' }));
       addRoomEvent(roomCreatedMessage(message.roomId, message.createdAt, message.createdBy));
@@ -1880,6 +1940,7 @@ function App() {
         roomNameRef.current = message.name;
         setRoomName(message.name);
         setRoomNameDraft(message.name);
+        rememberVisitedRoom(message.roomId, message.name);
       }
       return;
     }
@@ -1887,6 +1948,7 @@ function App() {
       const remainingRooms = Array.isArray(message.rooms) ? message.rooms : [];
       setRooms(remainingRooms);
       if (message.roomId === roomIdRef.current) {
+        forgetVisitedRoom(message.roomId);
         await removeRoomMessages(message.roomId);
         forgetRoomPassword(message.roomId);
         setRoomInfoOpen(false);
@@ -1940,7 +2002,7 @@ function App() {
           setRoomProtected(false);
           setRoomCreatedAt(0);
           setCallPanelOpen(false);
-          window.history.replaceState({}, '', window.location.pathname);
+          window.history.replaceState({}, '', roomLocation());
           setPendingRoomFallback(null);
         }
       }
@@ -2266,7 +2328,7 @@ function App() {
     setRoomProtected(Boolean(normalizedPassword));
     setRoomCreatedAt(0);
     void loadRoomMessages(normalizedId);
-    window.history.replaceState({}, '', `${window.location.pathname}?room=${encodeURIComponent(normalizedId)}`);
+    window.history.replaceState({}, '', roomLocation(normalizedId));
     sendSignal({ type: 'join', roomId: normalizedId, roomName: normalizedName, password: normalizedPassword, name: displayNameRef.current, avatar: profileAvatarRef.current, status: profileStatusRef.current, clientId: clientIdRef.current });
     setMobileSidebarOpen(false);
   }, [closeAllPeers, closeDirectChat, leaveCall, loadRoomMessages, markUnreadAsRead, sendSignal]);
@@ -2595,6 +2657,15 @@ function App() {
     joinRoom(room.id, room.name, storedPassword);
   }, [joinRoom, markUnreadAsRead]);
 
+  const openRecentRoom = useCallback((session) => {
+    const targetSignal = normalizeSignalOrigin(session?.signal);
+    if (targetSignal === SIGNAL_ORIGIN) {
+      openRoom({ id: session.roomId, name: session.roomName, protected: false });
+      return;
+    }
+    window.location.assign(roomLocation(session.roomId, targetSignal));
+  }, [openRoom]);
+
   const submitRoomAccess = useCallback((event) => {
     event.preventDefault();
     const password = roomAccess?.password?.trim() || '';
@@ -2811,6 +2882,10 @@ function App() {
     return [{ id: roomId, name: roomName, count: peerCount, protected: roomProtected }, ...rooms];
   }, [peerCount, roomId, roomName, roomProtected, rooms]);
   const filteredRooms = directoryRooms.filter((room) => `${room.name} ${room.id}`.toLowerCase().includes(roomSearch.toLowerCase()));
+  const recentRooms = recentRoomSessions
+    .filter((session) => session.signal !== SIGNAL_ORIGIN || !directoryRooms.some((room) => room.id === session.roomId))
+    .slice(0, 8);
+  const filteredRecentRooms = recentRooms.filter((session) => `${session.roomName} ${session.roomId} ${session.signal}`.toLowerCase().includes(roomSearch.toLowerCase()));
   const filteredFriends = directoryFriends.filter((person) => `${person.name} ${person.clientId || person.peerId}`.toLowerCase().includes(roomSearch.toLowerCase()));
   const currentRoomDirectoryEntry = directoryRooms.find((room) => room.id === roomId);
   const infoCreatedAt = roomCreatedAt || currentRoomDirectoryEntry?.createdAt || 0;
@@ -2890,6 +2965,22 @@ function App() {
             </div>
             {filteredRooms.length === 0 && <div className="directory-empty"><WinIcon name="computer" size={25} /><span><strong>{signalStatus === 'connected' ? 'Nenhuma sala encontrada' : 'Conectando à rede...'}</strong><small>{signalStatus === 'connected' ? 'Tente outro nome ou crie uma sala.' : 'Aguarde alguns instantes.'}</small></span></div>}
           </section>
+
+          {recentRooms.length > 0 && <section className="directory-group unified-directory-section is-recent-rooms" aria-labelledby="recent-rooms-directory-title">
+            <div className="section-label directory-caption">
+              <span className="directory-caption-title"><WinIcon name="globe" size={19} /><strong id="recent-rooms-directory-title">salas recentes</strong><small>· {recentRooms.length}</small></span>
+              <span className="directory-presence">salvas</span>
+            </div>
+            <div className="directory-list" role="list" aria-label="Salas recentes">
+              {filteredRecentRooms.map((session) => (
+                <button type="button" className="directory-row recent-room-list-row" key={`${session.signal || 'local'}:${session.roomId}`} onClick={() => openRecentRoom(session)}>
+                  <span className="directory-item-icon room-item-icon"><WinIcon name="globe" size={25} /></span>
+                  <span className="directory-item-copy"><strong>{session.roomName}</strong><small>{roomSessionNetworkLabel(session)}</small></span>
+                </button>
+              ))}
+            </div>
+            {filteredRecentRooms.length === 0 && <div className="directory-empty"><WinIcon name="globe" size={25} /><span><strong>Nenhuma sala recente encontrada</strong><small>Tente buscar pelo nome ou endereço da rede.</small></span></div>}
+          </section>}
 
           <section className="directory-group unified-directory-section is-friends" aria-labelledby="friends-directory-title">
             <div className="section-label directory-caption">
