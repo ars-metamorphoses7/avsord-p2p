@@ -22,6 +22,19 @@ function fixture({
   jitter = 0,
   remoteJitter = 0,
   rtt = 0,
+  packetsLost = 0,
+  retransmittedPacketsSent = 0,
+  keyFramesEncoded = 1,
+  keyFramesDecoded = 1,
+  hugeFramesSent = 0,
+  outboundNackCount = 0,
+  outboundPliCount = 0,
+  outboundFirCount = 0,
+  inboundNackCount = 0,
+  inboundPliCount = 0,
+  inboundFirCount = 0,
+  freezeCount = 0,
+  totalFreezesDuration = 0,
 } = {}) {
   return new Map([
     ['codec-in', {
@@ -34,7 +47,7 @@ function fixture({
     }],
     ['remote-in', {
       id: 'remote-in', type: 'remote-inbound-rtp', kind: 'video', timestamp,
-      localId: 'out', ssrc: 42, packetsLost: 0, jitter: remoteJitter, roundTripTime: 0,
+      localId: 'out', ssrc: 42, packetsLost, jitter: remoteJitter, roundTripTime: 0,
     }],
     ['source', {
       id: 'source', type: 'media-source', kind: 'video', timestamp,
@@ -48,9 +61,11 @@ function fixture({
       id: 'in', type: 'inbound-rtp', kind: 'video', timestamp, ssrc: 77,
       transportId: 'transport', codecId: 'codec-in', framesReceived: received,
       framesDecoded: decoded, framesDropped: 0, bytesReceived: receivedBytes,
+      keyFramesDecoded,
       totalDecodeTime: decodeTime, qpSum: decodeQp, framesPerSecond: reportedFps,
       packetsLost: 0, jitter, jitterBufferDelay: 0, jitterBufferEmittedCount: 0,
-      freezeCount: 0, totalFreezesDuration: 0,
+      freezeCount, totalFreezesDuration,
+      nackCount: inboundNackCount, pliCount: inboundPliCount, firCount: inboundFirCount,
     }],
     ['codec-out', {
       id: 'codec-out', type: 'codec', timestamp, mimeType: 'video/H264', payloadType: 96,
@@ -60,10 +75,13 @@ function fixture({
       id: 'out', type: 'outbound-rtp', kind: 'video', timestamp, ssrc: 42,
       mediaSourceId: 'source', remoteId: 'remote-in', transportId: 'transport',
       codecId: 'codec-out', framesEncoded: encoded, framesSent: sent,
+      keyFramesEncoded, hugeFramesSent,
       packetsSent: sent, bytesSent: sentBytes, totalEncodeTime: encodeTime,
       totalPacketSendDelay: encodeTime, qpSum: encodeQp,
       framesPerSecond: reportedFps, frameWidth: 854, frameHeight: 480,
       qualityLimitationReason: 'none', retransmittedBytesSent: 0,
+      retransmittedPacketsSent,
+      nackCount: outboundNackCount, pliCount: outboundPliCount, firCount: outboundFirCount,
       targetBitrate: 0, encoderImplementation: 'ExternalEncoder', powerEfficientEncoder: true,
     }],
   ]);
@@ -129,6 +147,19 @@ test('derives stage FPS, bitrates, time per frame, QP and jitter from deltas', (
     jitter: 0.012,
     remoteJitter: 0.007,
     rtt: 0.025,
+    packetsLost: 2,
+    retransmittedPacketsSent: 4,
+    keyFramesEncoded: 4,
+    keyFramesDecoded: 3,
+    hugeFramesSent: 2,
+    outboundNackCount: 7,
+    outboundPliCount: 2,
+    outboundFirCount: 1,
+    inboundNackCount: 5,
+    inboundPliCount: 3,
+    inboundFirCount: 2,
+    freezeCount: 2,
+    totalFreezesDuration: 0.35,
   }), previous);
 
   assert.equal(current.sequence, 1);
@@ -146,6 +177,21 @@ test('derives stage FPS, bitrates, time per frame, QP and jitter from deltas', (
   assert.equal(current.derived.inboundJitterMs, 12);
   assert.equal(current.derived.remoteInboundJitterMs, 7);
   assert.equal(current.derived.currentRoundTripTimeMs, 25);
+  assert.equal(current.derived.packetLossRatio, 2 / 42);
+  assert.equal(current.derived.retransmissionRatio, 4 / 42);
+  assert.equal(current.derived.keyFramesEncoded, 3);
+  assert.equal(current.derived.keyFramesDecoded, 2);
+  assert.equal(current.derived.keyFramesPerMinute, 120);
+  assert.equal(current.derived.keyFrameRatio, 3 / 42);
+  assert.equal(current.derived.hugeFramesSent, 2);
+  assert.equal(current.derived.outboundNackCount, 7);
+  assert.equal(current.derived.outboundPliCount, 2);
+  assert.equal(current.derived.outboundFirCount, 1);
+  assert.equal(current.derived.inboundNackCount, 5);
+  assert.equal(current.derived.inboundPliCount, 3);
+  assert.equal(current.derived.inboundFirCount, 2);
+  assert.equal(current.derived.freezeCount, 2);
+  assert.equal(current.derived.freezeDurationMs, 350);
 });
 
 test('returns zero rates for unchanged counters and null averages without new frames', () => {

@@ -9,10 +9,12 @@ import {
   evaluateCaptureAdaptation,
   initialCaptureAdaptation,
   initialPlaybackBufferAdaptation,
+  isSoftwareH264Encoder,
   normalizeScreenShareProfileId,
   safeVideoSenderScale,
   screenCaptureConstraints,
   screenShareEncodingBitrate,
+  screenShareCodecOrder,
   screenSharePlaybackBuffer,
 } from '../src/media/screenShareProfiles.js';
 
@@ -30,6 +32,50 @@ test('picker exposes only performance and quality automatic modes', () => {
   assert.equal(SCREEN_SHARE_PROFILES.quality.frameRate, 30);
   assert.deepEqual(SCREEN_SHARE_PROFILES.performance.adaptationFrameRates, [60, 30, 20, 15]);
   assert.deepEqual(SCREEN_SHARE_PROFILES.quality.adaptationFrameRates, [30, 20, 15]);
+});
+
+test('codec policy keeps H.264 first when hardware encoding is available', () => {
+  assert.deepEqual(screenShareCodecOrder('performance', {
+    hardwareVideoEncoding: true,
+    videoEncode: 'enabled',
+  }), ['video/H264', 'video/VP9', 'video/VP8']);
+});
+
+test('codec policy avoids OpenH264 when the runtime reports software-only encoding', () => {
+  assert.deepEqual(screenShareCodecOrder('performance', {
+    hardwareVideoEncoding: false,
+    videoEncode: 'disabled_software',
+  }), ['video/VP8', 'video/H264', 'video/VP9']);
+});
+
+test('software codec policy can be overridden by the benchmark matrix', () => {
+  assert.deepEqual(screenShareCodecOrder('quality', {
+    hardwareVideoEncoding: false,
+    videoEncode: 'disabled_software',
+  }), ['video/VP8', 'video/H264', 'video/VP9']);
+  assert.deepEqual(screenShareCodecOrder('quality', {
+    hardwareVideoEncoding: false,
+    videoEncode: 'disabled_software',
+    preferredSoftwareCodec: 'VP8',
+  }), ['video/VP8', 'video/H264', 'video/VP9']);
+});
+
+test('actual H.264 implementation overrides an optimistic GPU capability probe', () => {
+  assert.equal(isSoftwareH264Encoder({
+    codec: { mimeType: 'video/H264' },
+    encoderImplementation: 'OpenH264',
+    powerEfficientEncoder: false,
+  }), true);
+  assert.equal(isSoftwareH264Encoder({
+    codec: { mimeType: 'video/H264' },
+    encoderImplementation: 'VaapiVideoEncoder',
+    powerEfficientEncoder: true,
+  }), false);
+  assert.equal(isSoftwareH264Encoder({
+    codec: { mimeType: 'video/VP8' },
+    encoderImplementation: 'libvpx',
+    powerEfficientEncoder: false,
+  }), false);
 });
 
 test('performance mode lowers native capture cost before the encoder', async () => {
@@ -243,9 +289,9 @@ test('actual software encoder stats start from a conservative operating point', 
     powerEfficientEncoder: false,
   });
   assert.equal(performance.level, 1);
-  assert.equal(performance.temporalLevel, 0);
+  assert.equal(performance.temporalLevel, 1);
   assert.equal(performance.scale, 4 / 3);
-  assert.equal(performance.frameRate, 60);
+  assert.equal(performance.frameRate, 30);
   assert.equal(performance.reason, 'software-encoder-safe-start');
   assert.equal(performance.softwareEncoder, true);
 
@@ -257,9 +303,9 @@ test('actual software encoder stats start from a conservative operating point', 
     powerEfficientEncoder: false,
   });
   assert.equal(quality.level, 2);
-  assert.equal(quality.temporalLevel, 0);
+  assert.equal(quality.temporalLevel, 1);
   assert.equal(quality.scale, 1.5);
-  assert.equal(quality.frameRate, 30);
+  assert.equal(quality.frameRate, 20);
 });
 
 test('hardware encoder retains the full startup operating point', () => {
@@ -423,7 +469,50 @@ test('material encode-cost reduction keeps a downscale without delivery change',
   assert.equal(state.level, 1);
   assert.equal(state.reason, 'encoder-downscale-effective');
   assert.equal(state.downscaleEffectiveness.materialEncodeCostReduction, true);
+  assert.equal(state.downscaleEffectiveness.encodeDeadlineRescued, true);
   assert.ok(state.downscaleEffectiveness.encodeCostReductionRatio > 0.29);
+});
+
+test('cheaper encode alone preserves spatial quality when frame deadlines were already met', () => {
+  const nearBudget = {
+    captureFps: 30,
+    framesPerSecond: 29,
+    averageEncodeTimeMs: 29,
+    qualityLimitationReason: 'cpu',
+  };
+  const cheaperWithoutDeliveryGain = {
+    ...nearBudget,
+    averageEncodeTimeMs: 15,
+    qualityLimitationReason: 'none',
+  };
+  let state = {
+    ...initialCaptureAdaptation('performance'),
+    level: 1,
+    temporalLevel: 1,
+    scale: 4 / 3,
+    frameRate: 30,
+    sampleCount: 4,
+  };
+  for (let sample = 0; sample < 2; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', nearBudget);
+  }
+  assert.equal(state.level, 2);
+  for (let sample = 0; sample < 3; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', cheaperWithoutDeliveryGain);
+  }
+
+  assert.equal(state.level, 1);
+  assert.equal(state.reason, 'encoder-downscale-ineffective-rollback');
+  assert.equal(state.downscaleEffectiveness.materialEncodeCostReduction, true);
+  assert.equal(state.downscaleEffectiveness.encodeDeadlineRescued, false);
+  assert.ok(state.downscaleEffectiveness.baselineEncodeRatio < 1);
+
+  for (let sample = 0; sample < 12; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', nearBudget);
+  }
+  assert.equal(state.level, 1);
+  assert.equal(state.reason, 'encoder-downscale-ineffective-hold');
+  assert.equal(state.encoderTrial, null);
 });
 
 test('performance adaptation never crosses Chromium hardware encode 360p floor', () => {
@@ -596,8 +685,95 @@ test('temporal recovery waits for capacity headroom for the richer level', () =>
 test('sender bitrate recovers gradually instead of following noisy estimates in bursts', async () => {
   const sender = fakeSender();
   sender.parameters.encodings[0].maxBitrate = 2_000_000;
+  sender.parameters.encodings[0].maxFramerate = 60;
   await adaptVideoSender(sender, 'performance', 1, { availableOutgoingBitrate: 20_000_000 });
-  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_300_000);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_800_000);
+});
+
+test('sender coalesces bitrate-only recovery updates to avoid keyframe churn', async () => {
+  const sender = fakeSender();
+  await configureVideoSender(sender, 'performance', 1);
+  sender.parameters.encodings[0].maxBitrate = 2_000_000;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 20_000_000,
+    allowBitrateIncrease: false,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_000_000);
+});
+
+test('structural recovery applies its matching bitrate despite the coalescing window', async () => {
+  const sender = fakeSender();
+  sender.parameters.encodings[0].maxBitrate = 2_000_000;
+  sender.parameters.encodings[0].scaleResolutionDownBy = 2;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 10_000_000,
+    adaptationScale: 4 / 3,
+    allowBitrateIncrease: false,
+  });
+  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 4 / 3);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 4_500_000);
+});
+
+test('spatial rollback restores its safe measured bitrate without a long quality ramp', async () => {
+  const sender = fakeSender();
+  sender.parameters.encodings[0].maxBitrate = 2_128_061;
+  sender.parameters.encodings[0].scaleResolutionDownBy = 2;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 10_000_000,
+    adaptationScale: 4 / 3,
+  });
+  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 4 / 3);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 4_500_000);
+});
+
+test('small capacity dips stay inside the sender bitrate hysteresis', async () => {
+  const sender = fakeSender();
+  sender.parameters.encodings[0].maxBitrate = 4_000_000;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 5_000_000,
+    adaptationScale: 1,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 4_000_000);
+});
+
+test('packet loss reserves retransmission headroom and triggers network protection', async () => {
+  const sender = fakeSender();
+  sender.parameters.encodings[0].maxBitrate = 4_000_000;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 5_000_000,
+    packetLossRatio: 0.03,
+    adaptationScale: 1,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 3_500_000);
+
+  let state = initialCaptureAdaptation('performance');
+  for (let sample = 0; sample < 2; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', {
+      captureFps: 60,
+      framesPerSecond: 59,
+      averageEncodeTimeMs: 3,
+      availableOutgoingBitrate: 10_000_000,
+      packetLossRatio: 0.03,
+    });
+  }
+  assert.equal(state.capacityPressure, false);
+  assert.equal(state.packetLossPressure, true);
+  assert.equal(state.transportPressure, true);
+  assert.equal(state.level, 1);
+  assert.equal(state.reason, 'network-spatial-downshift');
+});
+
+test('discarded pacer packets trigger immediate protection despite bandwidth headroom', () => {
+  const state = evaluateCaptureAdaptation(initialCaptureAdaptation('performance'), 'performance', {
+    captureFps: 60,
+    framesPerSecond: 59,
+    averageEncodeTimeMs: 3,
+    availableOutgoingBitrate: 10_000_000,
+    packetsDiscardedOnSend: 1,
+  });
+  assert.equal(state.discardedPacketPressure, true);
+  assert.equal(state.networkSustained, true);
+  assert.equal(state.level, 1);
 });
 
 test('legacy profile ids migrate without breaking old clients or saved settings', () => {

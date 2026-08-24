@@ -1,4 +1,4 @@
-const TELEMETRY_VERSION = 1;
+const TELEMETRY_VERSION = 2;
 
 function finiteNumber(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -148,6 +148,13 @@ function perFrame(currentTotal, previousTotal, currentFrames, previousFrames, mu
   return (totalDelta * multiplier) / frameDelta;
 }
 
+function ratioOfDeltas(currentNumerator, previousNumerator, currentDenominator, previousDenominator) {
+  const numeratorDelta = counterDelta(currentNumerator, previousNumerator);
+  const denominatorDelta = counterDelta(currentDenominator, previousDenominator);
+  if (numeratorDelta === null || denominatorDelta === null || denominatorDelta <= 0) return null;
+  return numeratorDelta / denominatorDelta;
+}
+
 function fallback(primary, fallbackValue) {
   return primary === null ? fallbackValue : primary;
 }
@@ -186,25 +193,43 @@ function buildCounters(resolved, snapshotTimestamp) {
   const sourceTimestamp = reportTimestamp(resolved.mediaSource, snapshotTimestamp);
   const outboundTimestamp = reportTimestamp(resolved.outbound, snapshotTimestamp);
   const inboundTimestamp = reportTimestamp(resolved.inbound, snapshotTimestamp);
+  const remoteInboundTimestamp = reportTimestamp(resolved.remoteInbound, snapshotTimestamp);
+  const candidatePairTimestamp = reportTimestamp(resolved.candidatePair, snapshotTimestamp);
   return {
     captureFrames: counter(resolved.mediaSource?.frames, sourceTimestamp),
     framesEncoded: counter(resolved.outbound?.framesEncoded, outboundTimestamp),
+    keyFramesEncoded: counter(resolved.outbound?.keyFramesEncoded, outboundTimestamp),
+    hugeFramesSent: counter(resolved.outbound?.hugeFramesSent, outboundTimestamp),
     framesSent: counter(resolved.outbound?.framesSent, outboundTimestamp),
     packetsSent: counter(resolved.outbound?.packetsSent, outboundTimestamp),
+    retransmittedPacketsSent: counter(resolved.outbound?.retransmittedPacketsSent, outboundTimestamp),
     bytesSent: counter(resolved.outbound?.bytesSent, outboundTimestamp),
     retransmittedBytesSent: counter(resolved.outbound?.retransmittedBytesSent, outboundTimestamp),
     totalEncodeTime: counter(resolved.outbound?.totalEncodeTime, outboundTimestamp),
     totalPacketSendDelay: counter(resolved.outbound?.totalPacketSendDelay, outboundTimestamp),
     encodeQpSum: counter(resolved.outbound?.qpSum, outboundTimestamp),
+    outboundNackCount: counter(resolved.outbound?.nackCount, outboundTimestamp),
+    outboundPliCount: counter(resolved.outbound?.pliCount, outboundTimestamp),
+    outboundFirCount: counter(resolved.outbound?.firCount, outboundTimestamp),
+    remotePacketsLost: counter(resolved.remoteInbound?.packetsLost, remoteInboundTimestamp),
     framesReceived: counter(resolved.inbound?.framesReceived, inboundTimestamp),
     framesDecoded: counter(resolved.inbound?.framesDecoded, inboundTimestamp),
+    keyFramesDecoded: counter(resolved.inbound?.keyFramesDecoded, inboundTimestamp),
     framesRendered: counter(resolved.inbound?.framesRendered, inboundTimestamp),
     bytesReceived: counter(resolved.inbound?.bytesReceived, inboundTimestamp),
+    packetsReceived: counter(resolved.inbound?.packetsReceived, inboundTimestamp),
+    inboundPacketsLost: counter(resolved.inbound?.packetsLost, inboundTimestamp),
     totalDecodeTime: counter(resolved.inbound?.totalDecodeTime, inboundTimestamp),
     totalProcessingDelay: counter(resolved.inbound?.totalProcessingDelay, inboundTimestamp),
     jitterBufferDelay: counter(resolved.inbound?.jitterBufferDelay, inboundTimestamp),
     jitterBufferEmittedCount: counter(resolved.inbound?.jitterBufferEmittedCount, inboundTimestamp),
     decodeQpSum: counter(resolved.inbound?.qpSum, inboundTimestamp),
+    inboundNackCount: counter(resolved.inbound?.nackCount, inboundTimestamp),
+    inboundPliCount: counter(resolved.inbound?.pliCount, inboundTimestamp),
+    inboundFirCount: counter(resolved.inbound?.firCount, inboundTimestamp),
+    freezeCount: counter(resolved.inbound?.freezeCount, inboundTimestamp),
+    totalFreezesDuration: counter(resolved.inbound?.totalFreezesDuration, inboundTimestamp),
+    packetsDiscardedOnSend: counter(resolved.candidatePair?.packetsDiscardedOnSend, candidatePairTimestamp),
   };
 }
 
@@ -224,6 +249,18 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
   const captureReportedFps = reportNumber(resolved.mediaSource, 'framesPerSecond');
   const encodeReportedFps = reportNumber(resolved.outbound, 'framesPerSecond');
   const decodeReportedFps = reportNumber(resolved.inbound, 'framesPerSecond');
+  const encodedKeyFrames = counterDelta(
+    counters.keyFramesEncoded,
+    previousCounters.keyFramesEncoded,
+  );
+  const decodedKeyFrames = counterDelta(
+    counters.keyFramesDecoded,
+    previousCounters.keyFramesDecoded,
+  );
+  const encodedKeyFrameSeconds = elapsedSeconds(
+    counters.keyFramesEncoded,
+    previousCounters.keyFramesEncoded,
+  );
 
   const derived = {
     captureFps: fallback(captureFpsDelta, captureReportedFps),
@@ -232,11 +269,79 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
     receiveFps: perSecond(counters.framesReceived, previousCounters.framesReceived),
     decodeFps: fallback(decodeFpsDelta, decodeReportedFps),
     renderFps: perSecond(counters.framesRendered, previousCounters.framesRendered),
+    keyFramesEncoded: encodedKeyFrames,
+    keyFramesDecoded: decodedKeyFrames,
+    keyFramesPerMinute: encodedKeyFrames === null || encodedKeyFrameSeconds === null
+      ? null : (encodedKeyFrames * 60) / encodedKeyFrameSeconds,
+    keyFrameRatio: ratioOfDeltas(
+      counters.keyFramesEncoded,
+      previousCounters.keyFramesEncoded,
+      counters.framesEncoded,
+      previousCounters.framesEncoded,
+    ),
+    hugeFramesSent: counterDelta(counters.hugeFramesSent, previousCounters.hugeFramesSent),
+    outboundNackCount: counterDelta(
+      counters.outboundNackCount,
+      previousCounters.outboundNackCount,
+    ),
+    outboundPliCount: counterDelta(
+      counters.outboundPliCount,
+      previousCounters.outboundPliCount,
+    ),
+    outboundFirCount: counterDelta(
+      counters.outboundFirCount,
+      previousCounters.outboundFirCount,
+    ),
+    inboundNackCount: counterDelta(
+      counters.inboundNackCount,
+      previousCounters.inboundNackCount,
+    ),
+    inboundPliCount: counterDelta(
+      counters.inboundPliCount,
+      previousCounters.inboundPliCount,
+    ),
+    inboundFirCount: counterDelta(
+      counters.inboundFirCount,
+      previousCounters.inboundFirCount,
+    ),
+    freezeCount: counterDelta(counters.freezeCount, previousCounters.freezeCount),
+    freezeDurationMs: (() => {
+      const seconds = counterDelta(
+        counters.totalFreezesDuration,
+        previousCounters.totalFreezesDuration,
+      );
+      return seconds === null ? null : seconds * 1000;
+    })(),
     sendBitrateBps: perSecond(counters.bytesSent, previousCounters.bytesSent, 8),
     retransmitBitrateBps: perSecond(
       counters.retransmittedBytesSent,
       previousCounters.retransmittedBytesSent,
       8,
+    ),
+    packetLossRatio: (() => {
+      const lost = counterDelta(counters.remotePacketsLost, previousCounters.remotePacketsLost);
+      const sent = counterDelta(counters.packetsSent, previousCounters.packetsSent);
+      // remote-inbound loss is a subset of the sender's packetsSent total;
+      // unlike local inbound packetsReceived, it must not be added to the
+      // denominator a second time.
+      if (lost === null || sent === null || sent <= 0) return null;
+      return lost / sent;
+    })(),
+    retransmissionRatio: ratioOfDeltas(
+      counters.retransmittedPacketsSent,
+      previousCounters.retransmittedPacketsSent,
+      counters.packetsSent,
+      previousCounters.packetsSent,
+    ),
+    inboundPacketLossRatio: (() => {
+      const lost = counterDelta(counters.inboundPacketsLost, previousCounters.inboundPacketsLost);
+      const received = counterDelta(counters.packetsReceived, previousCounters.packetsReceived);
+      if (lost === null || received === null || lost + received <= 0) return null;
+      return lost / (lost + received);
+    })(),
+    packetsDiscardedOnSend: counterDelta(
+      counters.packetsDiscardedOnSend,
+      previousCounters.packetsDiscardedOnSend,
     ),
     receiveBitrateBps: perSecond(counters.bytesReceived, previousCounters.bytesReceived, 8),
     averageEncodeTimeMs: perFrame(
@@ -318,6 +423,7 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
     outbound: {
       ssrc: reportNumber(resolved.outbound, 'ssrc'),
       framesEncoded: reportNumber(resolved.outbound, 'framesEncoded'),
+      keyFramesEncoded: reportNumber(resolved.outbound, 'keyFramesEncoded'),
       framesSent: reportNumber(resolved.outbound, 'framesSent'),
       packetsSent: reportNumber(resolved.outbound, 'packetsSent'),
       bytesSent: reportNumber(resolved.outbound, 'bytesSent'),
@@ -337,6 +443,7 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
       encoderImplementation: resolved.outbound?.encoderImplementation ?? null,
       powerEfficientEncoder: resolved.outbound?.powerEfficientEncoder ?? null,
       retransmittedBytesSent: reportNumber(resolved.outbound, 'retransmittedBytesSent'),
+      retransmittedPacketsSent: reportNumber(resolved.outbound, 'retransmittedPacketsSent'),
       nackCount: reportNumber(resolved.outbound, 'nackCount'),
       pliCount: reportNumber(resolved.outbound, 'pliCount'),
       firCount: reportNumber(resolved.outbound, 'firCount'),
@@ -351,6 +458,7 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
       ssrc: reportNumber(resolved.inbound, 'ssrc'),
       framesReceived: reportNumber(resolved.inbound, 'framesReceived'),
       framesDecoded: reportNumber(resolved.inbound, 'framesDecoded'),
+      keyFramesDecoded: reportNumber(resolved.inbound, 'keyFramesDecoded'),
       framesRendered: reportNumber(resolved.inbound, 'framesRendered'),
       framesDropped: reportNumber(resolved.inbound, 'framesDropped'),
       bytesReceived: reportNumber(resolved.inbound, 'bytesReceived'),

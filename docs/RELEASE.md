@@ -131,4 +131,4 @@ O updater não funciona em modo de desenvolvimento (`electron .`); ele exige o a
 
 ## Estado conhecido deste repositório
 
-A release confirmada mais recente é `v1.0.18`. A branch de trabalho correspondente é `feat/stream-modes-resume`, e o processo acima já foi usado para publicar os instaladores e o `latest.yml` dessa versão.
+A release confirmada mais recente antes deste ciclo é `v1.0.19`. A próxima versão preparada é `v1.0.20`; suas implementações, resultados e limitações estão registrados em [`RELEASE_NOTES_v1.0.20.md`](./RELEASE_NOTES_v1.0.20.md).

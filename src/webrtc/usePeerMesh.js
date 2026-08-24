@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react';
 import {
   SCREEN_SHARE_ADAPT_INTERVAL_MS,
+  SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS,
   adaptVideoSender,
   configureVideoSender,
   evaluatePlaybackBufferAdaptation,
   evaluateCaptureAdaptation,
   initialPlaybackBufferAdaptation,
   initialCaptureAdaptation,
+  isSoftwareH264Encoder,
   preferVideoCodecs,
   screenShareProfile,
   screenSharePlaybackBuffer,
@@ -44,6 +46,93 @@ function enqueueSenderMutation(slot, senderKey, task) {
   return result;
 }
 
+function senderParameterSnapshot(sender) {
+  if (!sender?.getParameters) return null;
+  const parameters = sender.getParameters();
+  return {
+    trackId: sender.track?.id || null,
+    degradationPreference: parameters.degradationPreference || null,
+    encodings: (parameters.encodings || []).map((encoding) => ({
+      active: encoding.active ?? null,
+      maxBitrate: Number(encoding.maxBitrate) || null,
+      maxFramerate: Number(encoding.maxFramerate) || null,
+      scaleResolutionDownBy: Number(encoding.scaleResolutionDownBy) || null,
+      scalabilityMode: encoding.scalabilityMode || null,
+    })),
+  };
+}
+
+function primaryEncoding(snapshot) {
+  return snapshot?.encodings?.[0] || {};
+}
+
+function encodingValueChanged(before, after, key) {
+  return primaryEncoding(before)[key] !== primaryEncoding(after)[key];
+}
+
+function recordVideoSenderMutation(slot, type, before, after, details = {}) {
+  if (!slot || !after) return null;
+  const trackChanged = before?.trackId !== after.trackId;
+  const structural = trackChanged
+    || encodingValueChanged(before, after, 'maxFramerate')
+    || encodingValueChanged(before, after, 'scaleResolutionDownBy')
+    || before?.degradationPreference !== after.degradationPreference;
+  const bitrate = encodingValueChanged(before, after, 'maxBitrate');
+  const active = encodingValueChanged(before, after, 'active');
+  if (!structural && !bitrate && !active && type === 'adapt') return null;
+
+  slot.videoMutationCounts ||= { total: 0, structural: 0, bitrate: 0, active: 0, track: 0 };
+  slot.videoMutationCounts.total += 1;
+  if (structural) slot.videoMutationCounts.structural += 1;
+  if (bitrate) slot.videoMutationCounts.bitrate += 1;
+  if (active) slot.videoMutationCounts.active += 1;
+  if (trackChanged) slot.videoMutationCounts.track += 1;
+  const event = {
+    sequence: slot.videoMutationCounts.total,
+    type,
+    timestampMs: Date.now(),
+    peerId: slot.peerId || '',
+    structural,
+    bitrate,
+    active,
+    trackChanged,
+    before,
+    after,
+    countersBeforeNextSample: {
+      keyFramesEncoded: slot.videoTelemetry?.outbound?.keyFramesEncoded ?? null,
+      hugeFramesSent: slot.videoTelemetry?.outbound?.hugeFramesSent ?? null,
+      nackCount: slot.videoTelemetry?.outbound?.nackCount ?? null,
+      pliCount: slot.videoTelemetry?.outbound?.pliCount ?? null,
+      firCount: slot.videoTelemetry?.outbound?.firCount ?? null,
+      bytesSent: slot.videoTelemetry?.outbound?.bytesSent ?? null,
+    },
+    ...details,
+  };
+  slot.lastVideoMutation = event;
+  const beforeBitrate = Number(primaryEncoding(before).maxBitrate) || 0;
+  const afterBitrate = Number(primaryEncoding(after).maxBitrate) || 0;
+  if (bitrate && afterBitrate > beforeBitrate) {
+    slot.lastVideoBitrateIncreaseAtMs = event.timestampMs;
+  }
+  slot.videoMutationHistory ||= [];
+  slot.videoMutationHistory.push(event);
+  if (slot.videoMutationHistory.length > 64) slot.videoMutationHistory.shift();
+  if (globalThis.__jumpStreamTelemetry) {
+    const events = globalThis.__jumpStreamTelemetry.events ||= [];
+    events.push({ type: 'sender-mutation', ...event });
+    if (events.length > 1_000) events.shift();
+  }
+  return event;
+}
+
+async function mutateVideoSender(slot, type, sender, operation, details = {}) {
+  const before = senderParameterSnapshot(sender);
+  const result = await operation(sender);
+  const after = senderParameterSnapshot(sender);
+  recordVideoSenderMutation(slot, type, before, after, details);
+  return result;
+}
+
 function addIncomingTrack(stream, event) {
   const tracks = [...(event.streams?.[0]?.getTracks?.() || []), event.track];
   tracks.forEach((track) => {
@@ -68,7 +157,9 @@ function publishRemoteTrack(slot, peerId, event, remoteStreamsRef, setRemoteStre
   slot.remoteBundle ||= { stream: incoming, videoStream: null, microphoneStream: null, screenAudioStream: null };
   slot.remoteBundle.stream = incoming;
   const role = remoteTrackRole(slot.pc, event.transceiver, event.track);
-  slot.remoteBundle[`${role}Stream`] = streamForTrack(event.track);
+  const roleStream = streamForTrack(event.track);
+  if (role === 'video') slot.p2pVideoStream = roleStream;
+  slot.remoteBundle[`${role}Stream`] = roleStream;
   if (mountedRef.current) setRemoteStreams((current) => ({ ...current, [peerId]: { ...slot.remoteBundle } }));
 }
 
@@ -118,6 +209,21 @@ function remoteDescriptionHasTrack(pc, transceiver) {
   return sections.some((section) => section.includes(`a=mid:${mid}`) && /(?:^|\r?\n)a=msid:/m.test(section));
 }
 
+function codecCapabilitiesForRemotePolicy(policyKey, localCapabilities = {}) {
+  const key = String(policyKey || '').toLowerCase();
+  if (!key.startsWith('software-only:') && !key.startsWith('runtime-software:')) {
+    return localCapabilities;
+  }
+  const requested = key.split(':').at(-1);
+  return {
+    ...localCapabilities,
+    hardwareVideoEncoding: false,
+    videoEncode: 'disabled_software',
+    preferredSoftwareCodec: ['h264', 'vp8', 'vp9'].includes(requested)
+      ? requested.toUpperCase() : 'VP8',
+  };
+}
+
 /**
  * Owns the WebRTC mesh lifecycle. Chat/DataChannel protocol handling stays in
  * App, while SDP ordering, ICE recovery and media senders live here.
@@ -139,9 +245,20 @@ export function usePeerMesh({
   onPeerError,
 }) {
   const mountedRef = useRef(true);
+  const mediaCapabilitiesRef = useRef(null);
 
   useEffect(() => () => {
     mountedRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const getMediaCapabilities = globalThis.jumpDesktop?.getMediaCapabilities;
+    if (typeof getMediaCapabilities !== 'function') return undefined;
+    void getMediaCapabilities().then((capabilities) => {
+      if (!cancelled) mediaCapabilitiesRef.current = capabilities || null;
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -160,7 +277,7 @@ export function usePeerMesh({
         const screenTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
         const slots = [...peerConnectionsRef.current.values()].filter((slot) => (
           screenTrack && slot?.videoSender?.track === screenTrack && slot.pc.connectionState !== 'closed'
-          && slot.screenWatching !== false
+          && slot.screenWatching !== false && slot.screenViaSfu !== true
         ));
         if (!slots.length) return;
         const activePeerCount = slots.length;
@@ -190,6 +307,10 @@ export function usePeerMesh({
               codec: telemetry.codec,
               sendBitrateBps: telemetry.derived.sendBitrateBps,
               remotePacketsLost: telemetry.remoteInbound.packetsLost,
+              packetLossRatio: telemetry.derived.packetLossRatio,
+              retransmissionRatio: telemetry.derived.retransmissionRatio,
+              averagePacketSendDelayMs: telemetry.derived.averagePacketSendDelayMs,
+              packetsDiscardedOnSend: telemetry.derived.packetsDiscardedOnSend,
               roundTripTimeMs: telemetry.derived.currentRoundTripTimeMs,
               peerCount: activePeerCount,
               encoderImplementation: telemetry.outbound.encoderImplementation,
@@ -197,7 +318,12 @@ export function usePeerMesh({
             };
             const hasFpsSample = diagnostics.captureFps !== null
               || diagnostics.framesPerSecond !== null;
-            return { slot, diagnostics, hasFpsSample, telemetry };
+            const softwareH264 = isSoftwareH264Encoder({
+              codec: telemetry.codec,
+              encoderImplementation: telemetry.outbound.encoderImplementation,
+              powerEfficientEncoder: telemetry.outbound.powerEfficientEncoder,
+            });
+            return { slot, diagnostics, hasFpsSample, telemetry, softwareH264 };
           } catch {
             // Never replay a stale measurement: one failed getStats call must
             // not advance startup guards or count three times inside a trial.
@@ -207,11 +333,28 @@ export function usePeerMesh({
         // Each RTCPeerConnection has its own encoder, congestion controller and
         // uplink estimate. A single weak viewer must not reduce quality for every
         // other viewer, so adaptation state and sender scale stay per peer.
-        await Promise.all(samples.map(({ slot, diagnostics, hasFpsSample, telemetry }) => (
+        await Promise.all(samples.map(({ slot, diagnostics, hasFpsSample, telemetry, softwareH264 }) => (
           enqueueSenderMutation(slot, 'videoSender', async (sender) => {
             const liveTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
             if (!sender || liveTrack !== screenTrack || sender.track !== screenTrack
                 || slot.screenWatching === false || slot.pc.connectionState === 'closed') return false;
+
+            if (softwareH264 && !String(slot.videoCodecPolicyKey).startsWith('runtime-software:')) {
+              preferVideoCodecs(slot.videoTransceiver, videoProfileRef.current, {
+                hardwareVideoEncoding: false,
+                videoEncode: 'disabled_software',
+                preferredSoftwareCodec: 'VP8',
+              });
+              slot.videoCodecPolicyKey = `runtime-software:${videoProfileRef.current}:vp8`;
+              slot.videoTelemetry = null;
+              slot.videoDiagnostics = null;
+              slot.videoAdaptation = {
+                ...initialCaptureAdaptation(videoProfileRef.current),
+                trackId: screenTrack.id,
+              };
+              slot.requestNegotiation?.();
+              return true;
+            }
 
             slot.videoTelemetry = telemetry;
             slot.videoDiagnostics = diagnostics;
@@ -245,16 +388,24 @@ export function usePeerMesh({
               });
               if (events.length > 1_000) events.shift();
             }
-            return adaptVideoSender(
+            return mutateVideoSender(slot, 'adapt', sender, () => adaptVideoSender(
               sender,
               videoProfileRef.current,
               activePeerCount,
               {
                 ...diagnostics,
+                allowBitrateIncrease: !slot.lastVideoBitrateIncreaseAtMs
+                  || Date.now() - slot.lastVideoBitrateIncreaseAtMs
+                    >= SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS,
                 adaptationScale: nextAdaptation.scale,
                 targetFrameRate: nextAdaptation.frameRate,
               },
-            );
+            ), {
+              profileId: videoProfileRef.current,
+              adaptationReason: nextAdaptation.reason,
+              adaptationLevel: nextAdaptation.level,
+              temporalLevel: nextAdaptation.temporalLevel,
+            });
           })
         )));
       } finally {
@@ -340,7 +491,15 @@ export function usePeerMesh({
         slot.needsIceRestart = false;
         const offer = await slot.pc.createOffer(restart ? { iceRestart: true } : undefined);
         await slot.pc.setLocalDescription(offer);
-        sendSignal({ type: 'signal', target: peerId, data: { type: 'offer', sdp: slot.pc.localDescription } });
+        sendSignal({
+          type: 'signal',
+          target: peerId,
+          data: {
+            type: 'offer',
+            sdp: slot.pc.localDescription,
+            codecPolicy: slot.videoCodecPolicyKey || 'hardware-or-unknown',
+          },
+        });
         return true;
       } finally {
         slot.makingOffer = false;
@@ -380,11 +539,23 @@ export function usePeerMesh({
           if (track && transceiver) transceiver.direction = 'sendrecv';
           sender.setStreams?.(...(outboundStream ? [outboundStream] : []));
           slot[`${senderKey}Stream`] = outboundStream;
-          await sender.replaceTrack(track || null);
-          if (senderKey === 'videoSender' && track) {
-            await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
-            const isScreenTrack = track === screenStreamRef.current?.getVideoTracks?.()[0];
-            await setSenderActive(sender, isScreenTrack ? slot.screenWatching !== false : true);
+          const replaceAndConfigure = async () => {
+            await sender.replaceTrack(track || null);
+            if (senderKey === 'videoSender' && track) {
+              await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
+              const isScreenTrack = track === screenStreamRef.current?.getVideoTracks?.()[0];
+              await setSenderActive(sender, isScreenTrack ? slot.screenWatching !== false : true);
+            }
+            return true;
+          };
+          if (senderKey === 'videoSender') {
+            await mutateVideoSender(slot, 'replace-track', sender, replaceAndConfigure, {
+              previousTrackId: previousTrack?.id || null,
+              nextTrackId: track?.id || null,
+              profileId: videoProfileRef.current,
+            });
+          } else {
+            await replaceAndConfigure();
           }
           if (senderKey === 'screenAudioSender' && track) {
             await setSenderActive(sender, slot.screenWatching !== false);
@@ -393,7 +564,10 @@ export function usePeerMesh({
           // when a transceiver was negotiated without an msid. Only the sender
           // that attaches the first real track renegotiates; the receiver never
           // mirrors this from call-state, avoiding the old offer storm.
-          if (!previousTrack && track) requestPeerNegotiation(peerId);
+          const codecPolicyChanged = senderKey === 'videoSender'
+            && slot.videoCodecRenegotiationPending;
+          if (codecPolicyChanged) slot.videoCodecRenegotiationPending = false;
+          if ((!previousTrack && track) || codecPolicyChanged) requestPeerNegotiation(peerId);
           return true;
         });
       } catch {
@@ -404,16 +578,34 @@ export function usePeerMesh({
     return failed.length === 0;
   }, [onPeerError, peerConnectionsRef, requestPeerNegotiation, screenStreamRef, videoProfileRef]);
 
-  const setVideoEncodingProfile = useCallback(async (profileId) => {
+  const setVideoEncodingProfile = useCallback(async (profileId, mediaCapabilities = {}) => {
     const normalizedProfileId = screenShareProfile(profileId).id;
+    if (mediaCapabilities && Object.keys(mediaCapabilities).length) {
+      mediaCapabilitiesRef.current = mediaCapabilities;
+    }
+    const effectiveCapabilities = mediaCapabilities && Object.keys(mediaCapabilities).length
+      ? mediaCapabilities
+      : mediaCapabilitiesRef.current || {};
     videoProfileRef.current = normalizedProfileId;
-    const slots = [...peerConnectionsRef.current.values()].filter((slot) => slot?.videoSender?.track);
+    const slots = [...peerConnectionsRef.current.values()].filter((slot) => slot?.videoSender);
     await Promise.all(slots.map((slot) => enqueueSenderMutation(slot, 'videoSender', async (sender) => {
-      if (!sender?.track || slot.pc.connectionState === 'closed') return false;
+      if (!sender || slot.pc.connectionState === 'closed') return false;
+      const nextCodecPolicyKey = effectiveCapabilities.hardwareVideoEncoding === false
+        || String(effectiveCapabilities.videoEncode || '').toLowerCase() === 'disabled_software'
+        ? `software-only:${normalizedProfileId}:${String(effectiveCapabilities.preferredSoftwareCodec || 'auto').toLowerCase()}`
+        : 'hardware-or-unknown';
+      if (slot.videoCodecPolicyKey !== nextCodecPolicyKey) {
+        preferVideoCodecs(slot.videoTransceiver, normalizedProfileId, effectiveCapabilities);
+        slot.videoCodecPolicyKey = nextCodecPolicyKey;
+        slot.videoCodecRenegotiationPending = true;
+      }
       slot.videoAdaptation = initialCaptureAdaptation(normalizedProfileId);
       slot.videoTelemetry = null;
       slot.videoDiagnostics = null;
-      return configureVideoSender(sender, normalizedProfileId, slots.length);
+      if (!sender.track) return true;
+      return mutateVideoSender(slot, 'profile', sender, () => (
+        configureVideoSender(sender, normalizedProfileId, slots.length)
+      ), { profileId: normalizedProfileId });
     })));
   }, [peerConnectionsRef, videoProfileRef]);
 
@@ -447,12 +639,17 @@ export function usePeerMesh({
         if (nextWatching) {
           const activePeerCount = [...peerConnectionsRef.current.values()].filter((candidate) => (
             candidate?.videoSender?.track === activeScreenTrack
-            && candidate.screenWatching !== false
+            && candidate.screenWatching !== false && candidate.screenViaSfu !== true
             && candidate.pc.connectionState !== 'closed'
           )).length;
-          await configureVideoSender(sender, videoProfileRef.current, activePeerCount);
+          await mutateVideoSender(slot, 'resume-configure', sender, () => (
+            configureVideoSender(sender, videoProfileRef.current, activePeerCount)
+          ), { profileId: videoProfileRef.current });
         }
-        return setSenderActive(sender, nextWatching);
+        const active = nextWatching && slot.screenViaSfu !== true;
+        return mutateVideoSender(slot, active ? 'resume' : 'pause', sender, () => (
+          setSenderActive(sender, active)
+        ), { watching: nextWatching, screenViaSfu: slot.screenViaSfu === true });
       }));
     }
     if (slot.screenAudioSender?.track) {
@@ -463,6 +660,26 @@ export function usePeerMesh({
     await Promise.all(tasks);
     return true;
   }, [peerConnectionsRef, screenStreamRef, videoProfileRef]);
+
+  const setPeerScreenTransport = useCallback(async (peerId, viaSfu) => {
+    const slot = peerConnectionsRef.current.get(peerId);
+    if (!slot || slot.pc.connectionState === 'closed') return false;
+    slot.screenViaSfu = Boolean(viaSfu);
+    const activeScreenTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
+    if (!activeScreenTrack || slot.videoSender?.track !== activeScreenTrack) return true;
+    return enqueueSenderMutation(slot, 'videoSender', (sender) => (
+      mutateVideoSender(
+        slot,
+        slot.screenViaSfu ? 'sfu-handoff' : 'mesh-fallback',
+        sender,
+        () => setSenderActive(
+          sender,
+          slot.screenViaSfu !== true && slot.screenWatching !== false,
+        ),
+        { screenViaSfu: slot.screenViaSfu },
+      )
+    ));
+  }, [peerConnectionsRef, screenStreamRef]);
 
   const createPeerConnection = useCallback((peerId, initiator = false) => {
     const existing = peerConnectionsRef.current.get(peerId);
@@ -477,7 +694,11 @@ export function usePeerMesh({
     // Desktop audio uses its own m-line. Receivers can now pause or change the
     // stream volume without muting the person's microphone.
     const screenAudioTransceiver = initiator ? pc.addTransceiver('audio', { direction: 'sendrecv' }) : null;
-    if (videoTransceiver) preferVideoCodecs(videoTransceiver, videoProfileRef.current);
+    if (videoTransceiver) preferVideoCodecs(
+      videoTransceiver,
+      videoProfileRef.current,
+      mediaCapabilitiesRef.current || {},
+    );
     const slot = {
       peerId,
       pc,
@@ -499,6 +720,10 @@ export function usePeerMesh({
       offerTimer: 0,
       iceRestartAttempts: 0,
       screenWatching: true,
+      screenViaSfu: false,
+      videoCodecPolicyKey: 'hardware-or-unknown',
+      videoCodecRenegotiationPending: false,
+      requestNegotiation: (options = {}) => requestPeerNegotiation(peerId, options),
       remotePlaybackProfile: '',
       mediaReady: Promise.resolve(),
     };
@@ -572,9 +797,11 @@ export function usePeerMesh({
         if (!sender) return false;
         sender.setStreams?.(outboundShareStream);
         slot.videoSenderStream = outboundShareStream;
-        await sender.replaceTrack(videoTrack);
-        await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
-        return true;
+        return mutateVideoSender(slot, 'initial-track', sender, async () => {
+          await sender.replaceTrack(videoTrack);
+          await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
+          return true;
+        }, { profileId: videoProfileRef.current, nextTrackId: videoTrack.id });
       }));
     }
     if (screenAudioTrack && slot.screenAudioSender) {
@@ -660,7 +887,14 @@ export function usePeerMesh({
         slot.videoTransceiver ||= transceivers.find((transceiver) => transceiver.receiver.track?.kind === 'video') || null;
         slot.screenAudioTransceiver ||= audioTransceivers[1] || null;
         if (slot.remotePlaybackProfile) applySlotPlaybackProfile(slot, slot.remotePlaybackProfile);
-        if (slot.videoTransceiver) preferVideoCodecs(slot.videoTransceiver, videoProfileRef.current);
+        if (slot.videoTransceiver) preferVideoCodecs(
+          slot.videoTransceiver,
+          videoProfileRef.current,
+          codecCapabilitiesForRemotePolicy(
+            data.codecPolicy,
+            mediaCapabilitiesRef.current || {},
+          ),
+        );
         slot.audioSender ||= slot.audioTransceiver?.sender || null;
         slot.videoSender ||= slot.videoTransceiver?.sender || null;
         slot.screenAudioSender ||= slot.screenAudioTransceiver?.sender || null;
@@ -688,9 +922,11 @@ export function usePeerMesh({
             if (!sender) return false;
             sender.setStreams?.(outboundShareStream);
             slot.videoSenderStream = outboundShareStream;
-            await sender.replaceTrack(videoTrack);
-            await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
-            return true;
+            return mutateVideoSender(slot, 'answer-track', sender, async () => {
+              await sender.replaceTrack(videoTrack);
+              await configureVideoSender(sender, videoProfileRef.current, peerConnectionsRef.current.size);
+              return true;
+            }, { profileId: videoProfileRef.current, nextTrackId: videoTrack.id });
           }));
         }
         if (screenAudioTrack && slot.screenAudioSender) {
@@ -734,6 +970,7 @@ export function usePeerMesh({
     replacePeerTrack,
     requestPeerNegotiation,
     setPeerScreenDelivery,
+    setPeerScreenTransport,
     setPeerPlaybackProfile,
     setVideoEncodingProfile,
   };

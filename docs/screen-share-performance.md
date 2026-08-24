@@ -4,7 +4,7 @@
 **Runtime mantido:** Electron 43.4.1 / Chromium 150.0.7871.224  
 **Decisão experimental:** não promover Electron 44.0.0-beta.6 e não ativar `WebRtcAllowWgcUsingTexture` em produção  
 **Backend de tela inteira no Windows:** DXGI Desktop Duplication; WGC permanece para janelas  
-**Escopo:** captura de janela/tela no Windows, envio P2P WebRTC e reprodução no receptor
+**Escopo:** captura de janela/tela no Windows e Linux, codecs multi-hardware, transporte híbrido P2P/SFU e reprodução no receptor
 
 ## Resumo executivo
 
@@ -44,6 +44,38 @@ Foram encontrados quatro defeitos adicionais de generalização:
 A correção compara a capacidade com a demanda nominal do nível, aplica quedas de bitrate imediatamente com 22% de headroom, usa safe-start espacial quando os stats confirmam encoder por software, acrescenta escadas temporais e exige 12% de folga de rede mais custo de encode projetado antes da recuperação. No receptor, `jitterBufferTarget` agora cresce rapidamente sob jitter/drop/freeze e decai 15 ms somente após cinco amostras estáveis, limitado a 360 ms no desempenho e 480 ms na qualidade.
 
 No run curto final da UHD 620, desempenho apresentou 29,24 FPS com 41,4% de CPU agregada (contra 27,59/46,1% no run diagnóstico inicial) e qualidade apresentou 18,11 FPS com 44,7% (contra 13,88/47,9%). SSIM ficou em 0,9607 e 0,9767, respectivamente. A melhora de qualidade foi obtida sem voltar a comprimir linearmente o budget ao reduzir FPS, pois isso reativava os descartes do rate control OpenH264.
+
+### Atualização: codec real, keyframes e SFU híbrido
+
+Uma terceira rodada de diagnóstico mostrou que a indicação global `video_encode = enabled` não prova qual implementação o WebRTC escolheu. Na UHD 620, ativar `AcceleratedVideoEncoder` tornou o probe do Electron otimista, mas o `RTCStats` continuou reportando `OpenH264`. Por isso, a UI agora chama esse estado de **GPU candidata** e a decisão final usa `encoderImplementation` e `powerEfficientEncoder` do stream real.
+
+O A/B curto de software mediu VP8 como a opção mais estável neste host: 24,19 FPS apresentados no perfil desempenho, CV de bitrate 0,156 e um keyframe em 12 s, contra as rajadas observadas com OpenH264. A política resultante é:
+
+- H.264 primeiro quando o encoder de hardware é confirmado;
+- VP8 primeiro quando a plataforma informa software-only;
+- troca de H.264/OpenH264 para VP8 após inspeção do encoder real, inclusive no produtor SFU;
+- Linux VA-API apenas opt-in com `JUMP_LINUX_VIDEO_ACCELERATION=vaapi`, sem desativar blocklist ou workarounds do Chromium.
+
+Para três ou mais espectadores, o vídeo da tela usa um SFU `mediasoup`: o publicador codifica e envia uma vez, e o servidor encaminha o RTP. Áudio, câmera, chat, arquivos e controle permanecem P2P. O handoff é híbrido: cada perna de vídeo P2P só é pausada depois que o consumer SFU correspondente confirma que está pronto; falha/pausa/fechamento do consumer restaura essa perna P2P. Abaixo de três espectadores, o caminho existente permanece exclusivamente mesh.
+
+No A/B diagnóstico de 1 transmissor + 3 espectadores no mesmo Intel/Linux, após aplicar ao SFU o mesmo safe-start e controlador stage-aware do mesh, foram feitas três repetições de 30 s por perfil:
+
+| Mediana | Mesh | SFU adaptativo | Variação |
+|---|---:|---:|---:|
+| Desempenho — upload total | 3,32 Mb/s | 2,11 Mb/s | −36,3% |
+| Desempenho — FPS apresentados | 12,05 | 15,79 | +31,1% |
+| Desempenho — CV do upload | 0,406 | 0,270 | −33,5% |
+| Desempenho — CPU do renderer transmissor | 17,79% | 11,11% | −37,5% |
+| Qualidade — upload total | 3,77 Mb/s | 3,08 Mb/s | −18,3% |
+| Qualidade — FPS apresentados | 5,60 | 8,92 | +59,2% |
+| Qualidade — CV do upload | 0,445 | 0,359 | −19,5% |
+| Qualidade — CPU do renderer transmissor | 33,40% | 17,71% | −47,0% |
+| Congelamentos no receiver amostrado | 2 + 2 | 0 + 0 | removidos neste A/B |
+| Senders mesh de tela ativos após handoff | 3 | 0 | confirmado em 6/6 rodadas SFU |
+
+Todas as rodadas usaram VP8/libvpx; qualidade permaneceu em 1280×698 e desempenho convergiu majoritariamente para aproximadamente 660×360. A fixture interna ficou abaixo de 90% da cadência declarada porque quatro janelas Electron e a fonte competiam na mesma máquina; portanto as 12 rodadas são A/B diagnósticas, não certificação de release. Elas comprovam a topologia e o ganho neste host, mas a matriz multi-hardware/multimáquina continua obrigatória.
+
+Separadamente, o caminho de um espectador passou no protocolo longo de cinco repetições de 60 s por perfil: 10/10 rodadas válidas, zero perda e zero freezes. As medianas foram 27,81 FPS/SSIM 0,9658/CV 0,128 em desempenho e 14,37 FPS/SSIM 0,9756/CV 0,196 em qualidade. Isso preserva o caminho P2P básico enquanto o SFU atua somente no caso de grupo.
 
 ## Como ler as evidências
 
@@ -150,16 +182,18 @@ desktopCapturer / getDisplayMedia
         ▼
 MediaStreamTrack de tela
         │
-        ├─ uma RTCRtpSender por peer
-        ├─ H.264 > VP9 > VP8
-        ├─ maxFramerate e maxBitrate por perfil/peer
-        ├─ scaleResolutionDownBy controlado pelo app
-        ▼
-Chromium WebRTC + hardware encoder quando disponível
-        │
-        ├─ GCC/TWCC/pacer do WebRTC
-        ▼
-receptor
+        ├─ 1–2 espectadores: sender P2P por peer
+        └─ 3+ espectadores: um producer → SFU mediasoup
+                   │                     ├─ consumer 1
+                   │                     ├─ consumer 2
+                   │                     └─ consumer N
+                   ├─ P2P permanece pronto até consumer-ready
+                   ├─ H.264 em hardware / VP8 em software
+                   ├─ GCC/TWCC/pacer do WebRTC
+                   └─ controlador stage-aware compartilhado
+                                             │
+                                             ▼
+receptores
         ├─ jitterBufferTarget por perfil
         └─ requestVideoFrameCallback para FPS/latência apresentados
 ```
@@ -180,8 +214,9 @@ receptor
 - Encode time é comparado ao orçamento do nível temporal atual (60/30/20/15 FPS).
 - Cada downshift de encoder abre um trial de três amostras. Ele só permanece com ganho de delivery ≥8 pontos percentuais, recuperação para ≥0,92 ou queda de custo de encode ≥15%; caso contrário volta exatamente ao nível anterior e entra em cooldown.
 - Downshift comprovadamente eficaz é rápido; recuperação exige 12% de headroom para o próximo nível, custo de encode projetado seguro e cooldown.
-- Queda de bitrate acompanha a estimativa imediatamente; recuperação sobe 15% por amostra. O budget acompanha pixels, preserva 22% de headroom e não cai linearmente com FPS para evitar frame skip do OpenH264.
+- Queda material de bitrate acompanha a estimativa imediatamente; pequenas oscilações abaixo de 10% são absorvidas por histerese. A recuperação é agrupada em intervalos mínimos de 6 s e pode subir até 40% por passo, reduzindo reconfigurações/keyframes sem alongar excessivamente a retomada. O budget acompanha pixels, preserva 22% de headroom e não cai linearmente com FPS.
 - Cada peer possui seu próprio estado, encoder e congestion controller. Um peer ruim não altera diretamente o perfil dos demais.
+- O producer SFU reutiliza o safe-start e o controlador stage-aware com `peerCount = 1`; o número de viewers não multiplica encode nem upload do publicador.
 - O receptor adapta o jitter buffer entre 140–360 ms (desempenho) ou 180–480 ms (qualidade), subindo com jitter/drop/freeze e recuando lentamente.
 
 ### 2.3 O que a arquitetura atual não é
@@ -189,7 +224,7 @@ receptor
 - Não é um pipeline nativo zero-readback.
 - Não escolhe diretamente presets NVENC/AMF/Quick Sync.
 - Não garante hardware encode apenas porque `video_encode` aparece como enabled; o campo `encoderImplementation` do stream deve confirmar.
-- Não usa simulcast espacial. Para um receptor P2P, isso duplicaria encode/pixel-rate sem benefício claro.
+- Não usa simulcast espacial. O SFU encaminha a camada única adaptada pelo publicador; simulcast/SVC fica para uma etapa posterior com medições em redes heterogêneas.
 - Não substitui o GCC/pacer do WebRTC por um controlador próprio.
 
 ## 3. Perfis e trade-offs
@@ -259,16 +294,20 @@ O estado fica em `globalThis.__jumpStreamTelemetry` e é somente diagnóstico. F
 
 O harness `tests/screen-share-benchmark.e2e.cjs`:
 
-- cria sender e receiver Electron via loopback;
+- cria um sender e `JUMP_BENCH_VIEWERS` receivers Electron via loopback;
 - usa uma fixture determinística 1920×1080/60;
 - alterna a ordem dos perfis entre repetições;
 - coleta stats a cada 250 ms;
+- resume perda, retransmissão, atraso do pacer, descartes e distribuições/CV de bitrate e FPS;
 - mede apresentação com `requestVideoFrameCallback`;
 - suporta pressão WebGL sintética;
 - suporta fonte externa Chrome ou ffplay para exercitar WGC entre processos;
 - mede CPU/memória por processo Electron e, quando disponível, utilização/VRAM/potência/temperatura da GPU via `nvidia-smi`;
 - alterna `window|screen` e permite A/B de features do Chromium sem alterar o app;
 - grava manifesto de runtime, OS, CPU, GPU, display, configuração, commit e working tree.
+- mede o upload agregado de todas as pernas do publicador e registra a topologia (`meshScreenSenders`, `meshActiveScreenSenders`, viewers SFU);
+- torna a rodada inválida se o SFU esperado não assumir todos os viewers ou se algum upload P2P de tela continuar ativo após o handoff;
+- permite o controle A/B idêntico com `JUMP_BENCH_SFU=0`.
 
 ### 5.1 Testes rápidos
 
@@ -288,6 +327,18 @@ $env:JUMP_BENCH_PRETTY = '1'
 $env:JUMP_BENCH_OUTPUT = 'artifacts/bench-m150-release.json'
 npm run test:stream-benchmark
 ```
+
+Para comparar mesh e SFU com três espectadores:
+
+```bash
+JUMP_BENCH_VIEWERS=3 JUMP_BENCH_SFU=0 JUMP_BENCH_PROFILES=performance \
+  JUMP_BENCH_OUTPUT=artifacts/bench-mesh-3view.json npm run test:stream-benchmark
+
+JUMP_BENCH_VIEWERS=3 JUMP_BENCH_SFU=1 JUMP_BENCH_PROFILES=performance \
+  JUMP_BENCH_OUTPUT=artifacts/bench-sfu-3view.json npm run test:stream-benchmark
+```
+
+O host do SFU deve anunciar um IPv4 alcançável em `JUMP_SFU_ANNOUNCED_ADDRESS`. O range padrão do worker é UDP/TCP `40000–49999`; pode ser limitado com `JUMP_SFU_RTC_MIN_PORT` e `JUMP_SFU_RTC_MAX_PORT`.
 
 Com `JUMP_BENCH_OUTPUT`, o JSON completo vai somente para o arquivo para não inundar o terminal. Defina `JUMP_BENCH_STDOUT=1` quando um runner de CI precisar consumir o relatório por stdout.
 
@@ -391,6 +442,21 @@ PresentMon.exe `
 ```
 
 Usar [GPUView](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/using-gpuview) quando houver stalls, cópia cross-adapter ou device contention.
+
+### 5.9 Perda, fila e limitação de banda reproduzíveis
+
+O harness pode aplicar condições somente ao renderer remetente via Chrome DevTools Protocol, sem alterar `lo`, Wi-Fi, VPN ou outras conexões do sistema:
+
+```powershell
+$env:JUMP_BENCH_PACKET_LOSS_PERCENT = '3'
+$env:JUMP_BENCH_PACKET_QUEUE_LENGTH = '128'
+$env:JUMP_BENCH_NETWORK_LATENCY_MS = '20'
+$env:JUMP_BENCH_UPLOAD_KBPS = '5000'
+$env:JUMP_BENCH_OUTPUT = 'artifacts/bench-network-3pct.json'
+npm run test:stream-benchmark
+```
+
+`JUMP_BENCH_DOWNLOAD_KBPS=0` e `JUMP_BENCH_UPLOAD_KBPS=0` significam ilimitado. `JUMP_BENCH_PACKET_REORDERING=1` ativa reordenação. O relatório registra se usou `Network.emulateNetworkConditionsByRule` ou o fallback legado. O contador `packetsLost` pode continuar zero quando o emulador descarta antes do ponto contado pelo `RTCStats`; nesse caso, a pressão continua observável pela capacidade estimada, atraso do pacer, cadência e adaptação, mas o relatório não deve afirmar uma taxa de perda efetivamente recebida.
 
 ## 6. Resultados empíricos
 
@@ -579,6 +645,22 @@ Ensaio pendente da seção 6.6/6.7 executado em 2026-08-23 na branch `feat/strea
 **Conclusão medida:** nas dez rodadas válidas, `encoderImplementation` permaneceu `MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)` com escala de adaptação 1 — nenhum fallback para software sob tela inteira isolada + contenção de GPU. Os dois trade-offs voltaram a aparecer simultaneamente: ~1,96× a cadência apresentada no desempenho e fidelidade objetivamente maior na qualidade (ΔSSIM ≈ +0,0063, ΔPSNR ≈ +3,7 dB). Isto fecha o item "repetir com tela inteira isolada e carga GPU"; o gate de jogos reais (Forza/Ultrakill com PresentMon) e a matriz de hardware continuam pendentes.
 
 Correção no harness durante esta rodada: `measureVisualQuality` passava a exigir o parâmetro `captureSource` (fonte do `desktopCapturer`), mas `measureRun` não o repassava — o benchmark padrão abortava com `TypeError` no fim da primeira rodada medida. O `fixtureSource` agora atravessa `measureRun` até `measureVisualQuality`.
+
+### 6.10 Estabilidade de pacotes e início seguro em OpenH264
+
+Rodada diagnóstica local em Linux/OpenH264, três repetições de 12 s por versão, fixture WebGL idêntica (`JUMP_BENCH_GPU_LOAD=32`):
+
+| Mediana | Antes | Depois | Variação |
+|---|---:|---:|---:|
+| CV do bitrate enviado | 0,368 | 0,236 | −35,7% |
+| Intervalo apresentado p95 | 79,3 ms | 66,7 ms | −15,9% |
+| FPS apresentados | 26,89 | 27,28 | +1,5% |
+| Resolução final | 660×360 | 960×524 | +2,12× pixels |
+| QP médio | 37,28 | 32,49 | −4,79 |
+
+A fixture ficou abaixo de 90% da cadência declarada sob essa carga, portanto estas seis rodadas são A/B diagnósticas, não gate de release. Uma rodada sem carga artificial foi válida e preservou 960×524/30, sem perda, retransmissão ou congelamento. A variabilidade residual do bitrate acompanha o conteúdo VBR e o OpenH264; o benchmark agora separa isso de mudanças no `maxBitrate`, atraso do pacer e troca de nível.
+
+Com 3% de perda solicitada pelo emulador e fila de 128 pacotes, a rodada final também terminou sem congelamentos. O `RTCStats` reportou zero perda/retransmissão porque os descartes ocorreram antes desses contadores, mas houve redução de capacidade estimada/pressão de pacer e o controlador chegou ao ponto seguro 360p/15 sem interromper a reprodução. O gate real de WAN continua exigindo duas máquinas e uma matriz Intel/AMD/NVIDIA.
 
 ## 7. Decisão: manter M150; não ativar a feature
 

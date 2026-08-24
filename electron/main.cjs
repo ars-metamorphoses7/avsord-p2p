@@ -3,12 +3,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { autoUpdater } = require('electron-updater');
+const { createRoomSessionStore, normalizeRoomId, normalizeSignalOrigin } = require('./room-session-store.cjs');
 const { createUpdateController } = require('./update-controller.cjs');
 const { setupDesktopMedia } = require('./desktop-media.cjs');
 
 let mainWindow;
 let signalingServer;
 let desktopMedia;
+let roomSessionStore;
 let signalingPort = Number(process.env.PORT || 8787);
 let pendingDeepLink = process.argv.find((argument) => argument.startsWith('jump://')) || '';
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -17,6 +19,22 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 // an invisible renderer's priority, which can starve desktop capture even when
 // the network and hardware encoder still have capacity.
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
+
+// Linux VA-API remains an unsupported/driver-dependent Chromium path. Keep it
+// opt-in until the release matrix proves Intel and AMD configurations, and do
+// not bypass the GPU blocklist or driver workarounds. The renderer still checks
+// `video_encode` plus RTCStats before presenting the path as hardware-backed.
+const requestedLinuxVideoAcceleration = String(
+  process.env.JUMP_LINUX_VIDEO_ACCELERATION || '',
+).trim().toLowerCase();
+if (process.platform === 'linux' && requestedLinuxVideoAcceleration === 'vaapi') {
+  const enabledFeatures = new Set(app.commandLine.getSwitchValue('enable-features')
+    .split(',')
+    .map((feature) => feature.trim())
+    .filter(Boolean));
+  enabledFeatures.add('AcceleratedVideoEncoder');
+  app.commandLine.appendSwitch('enable-features', [...enabledFeatures].join(','));
+}
 
 // On Windows 11 24H2 Chromium M150 silently prefers WGC for whole-screen
 // capture. A repeated external-source A/B on this runtime measured the DXGI
@@ -64,9 +82,12 @@ function parseDeepLink(value) {
   try {
     const parsed = new URL(value);
     if (parsed.protocol !== 'jump:') return null;
+    const rawSignal = parsed.searchParams.get('signal') || '';
+    const signal = normalizeSignalOrigin(rawSignal);
+    if (rawSignal && !signal) return null;
     return {
-      room: parsed.searchParams.get('room') || 'jump-house',
-      signal: parsed.searchParams.get('signal') || '',
+      room: normalizeRoomId(parsed.searchParams.get('room')),
+      signal,
     };
   } catch {
     return null;
@@ -81,10 +102,19 @@ async function openDeepLink(value) {
   await mainWindow.loadURL(`http://127.0.0.1:${signalingPort}/?${query.toString()}`);
 }
 
+function setupRoomSessionPersistence() {
+  roomSessionStore = createRoomSessionStore({
+    filePath: path.join(app.getPath('userData'), 'room-sessions.json'),
+  });
+  ipcMain.handle('room-session:remember', (_event, value) => roomSessionStore.remember(value));
+  ipcMain.handle('room-session:forget', (_event, value) => roomSessionStore.forget(value));
+  ipcMain.handle('room-session:list', () => roomSessionStore.listRecent());
+}
+
 function setupUpdater() {
-  ipcMain.handle('invite:url', (_event, roomId) => {
-    const signal = `http://${preferredNetworkAddress()}:${signalingPort}`;
-    return `jump://join?signal=${encodeURIComponent(signal)}&room=${encodeURIComponent(String(roomId || 'jump-house'))}`;
+  ipcMain.handle('invite:url', (_event, roomId, currentSignal = '') => {
+    const signal = normalizeSignalOrigin(currentSignal) || `http://${preferredNetworkAddress()}:${signalingPort}`;
+    return `jump://join?signal=${encodeURIComponent(signal)}&room=${encodeURIComponent(normalizeRoomId(roomId))}`;
   });
 
   autoUpdater.autoDownload = false;
@@ -121,6 +151,11 @@ function setupMediaDiagnostics() {
       hardwareVideoEncoding: enabledStates.has(videoEncode),
       videoEncode,
       gpu,
+      linuxVideoAcceleration: {
+        requested: requestedLinuxVideoAcceleration || 'off',
+        acceleratedVideoEncoderRequested: process.platform === 'linux'
+          && requestedLinuxVideoAcceleration === 'vaapi',
+      },
     };
   });
 }
@@ -160,9 +195,14 @@ async function createWindow() {
   });
   mainWindow.on('maximize', publishWindowState);
   mainWindow.on('unmaximize', publishWindowState);
-  const invite = parseDeepLink(pendingDeepLink);
-  const query = new URLSearchParams({ room: invite?.room || 'jump-house' });
-  if (invite?.signal) query.set('signal', invite.signal);
+  const explicitInvite = parseDeepLink(pendingDeepLink);
+  const rememberedSession = explicitInvite ? null : roomSessionStore?.getActive();
+  const initialSession = explicitInvite || (rememberedSession ? {
+    room: rememberedSession.roomId,
+    signal: rememberedSession.signal,
+  } : null);
+  const query = new URLSearchParams({ room: initialSession?.room || 'jump-house' });
+  if (initialSession?.signal) query.set('signal', initialSession.signal);
   await mainWindow.loadURL(`http://127.0.0.1:${signalingPort}/?${query.toString()}`);
   pendingDeepLink = '';
   mainWindow.on('closed', () => { mainWindow = null; });
@@ -197,6 +237,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    setupRoomSessionPersistence();
     setupUpdater();
     setupWindowControls();
     setupMediaDiagnostics();

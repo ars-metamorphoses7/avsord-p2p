@@ -122,6 +122,14 @@ async function run() {
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(true));
   ipcMain.handle('window:state', () => ({ maximized: false }));
   ipcMain.handle('update:state', () => ({ status: 'dev', revision: 0 }));
+  ipcMain.handle('room-session:remember', () => ({ ok: true }));
+  ipcMain.handle('room-session:forget', () => ({ ok: true }));
+  ipcMain.handle('room-session:list', () => [{
+    roomId: 'sala-recente',
+    roomName: 'Sala Recente',
+    signal: 'http://10.0.0.7:8787',
+    lastVisitedAt: Date.now(),
+  }]);
   ipcMain.handle('media:capabilities', () => ({ hardwareAcceleration: true, hardwareVideoEncoding: true, videoEncode: 'enabled' }));
   ipcMain.handle('desktop:audio-start', () => ({ ok: true, mode: 'process', processId: process.pid }));
   ipcMain.handle('desktop:audio-stop', () => ({ ok: true }));
@@ -148,6 +156,7 @@ async function run() {
   for (let index = 0; index < 3; index += 1) await createParticipant(index);
   await waitFor(() => Promise.all(windows.map((window) => count(window, '.signal-badge.is-connected'))).then((values) => values.every(Boolean)), 'três clientes sinalizados');
   await waitFor(() => Promise.all(windows.map((window) => window.webContents.executeJavaScript("document.querySelector('.signal-badge')?.textContent.includes('3 conectados')"))).then((values) => values.every(Boolean)), 'sala com três participantes');
+  await waitFor(() => Promise.all(windows.map((window) => window.webContents.executeJavaScript("document.querySelector('.recent-room-list-row')?.textContent.includes('Sala Recente')"))).then((values) => values.every(Boolean)), 'catálogo de salas recentes persistidas');
 
   for (const window of windows) {
     await click(window, 'button[aria-label="Abrir chamada"]');
@@ -246,9 +255,41 @@ async function run() {
   }
   await waitFor(() => windows[0].webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].every((slot) => (
     slot.videoAdaptation?.profileId === 'performance'
-    && slot.videoAdaptation?.targetFps === 60
+    && [60, 30, 20, 15].includes(slot.videoAdaptation?.targetFps)
+    && slot.videoAdaptation?.targetFps === slot.videoAdaptation?.frameRate
+    && Number(slot.videoAdaptation?.sampleCount) > 0
     && Number(slot.videoAdaptation?.effectiveWidth) <= 1280
   )))()`), 'controlador automático de desempenho ativo', 20_000);
+
+  await windows[0].webContents.executeJavaScript(`(async () => {
+    const input = document.querySelector('.hidden-file-input');
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#000080"/><circle cx="320" cy="180" r="100" fill="#ffff00"/></svg>';
+    const file = new File([svg], 'imagem-expandida.svg', { type: 'image/svg+xml' });
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    Object.defineProperty(input, 'files', { configurable: true, value: transfer.files });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor(() => Promise.all(windows.map((window) => count(window, '.message-expandable-image'))).then((values) => values.every(Boolean)), 'imagem distribuída no chat', 20_000);
+  await windows[1].webContents.executeJavaScript("document.querySelector('.message-expandable-image')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))");
+  await waitFor(() => count(windows[1], '.image-viewer-overlay .image-viewer-canvas img'), 'imagem ampliada com clique duplo');
+  const expandedImageLayout = await windows[1].webContents.executeJavaScript(`(() => {
+    const dialog = document.querySelector('.image-viewer-dialog');
+    const canvas = document.querySelector('.image-viewer-canvas');
+    const image = canvas?.querySelector('img');
+    if (!dialog || !canvas || !image) return null;
+    const bounds = dialog.getBoundingClientRect();
+    return {
+      modal: dialog.getAttribute('aria-modal'),
+      objectFit: getComputedStyle(image).objectFit,
+      fillsWindow: bounds.width >= innerWidth * 0.85 && bounds.height >= innerHeight * 0.85,
+    };
+  })()`);
+  if (!expandedImageLayout || expandedImageLayout.modal !== 'true' || expandedImageLayout.objectFit !== 'contain' || !expandedImageLayout.fillsWindow) {
+    throw new Error(`Visualização expandida inválida: ${JSON.stringify(expandedImageLayout)}`);
+  }
+  await windows[1].webContents.executeJavaScript("document.querySelector('.image-viewer-canvas')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))");
+  await waitFor(async () => (await count(windows[1], '.image-viewer-overlay')) === 0, 'imagem restaurada após segundo clique duplo');
 
   await windows[1].webContents.executeJavaScript("document.querySelector('.chat-toggle-button.is-active')?.click()");
 
@@ -281,6 +322,38 @@ async function run() {
     || !focusedLayout.viewportInsideCard || !focusedLayout.captionInsideCard || !focusedLayout.fillsStage) {
     throw new Error(`Layout focado cortado ou com participantes duplicados: ${JSON.stringify(focusedLayout)}`);
   }
+  await windows[1].webContents.executeJavaScript(`(() => {
+    const viewport = document.querySelector('.call-stream-card.is-focused .call-stream-viewport');
+    const bounds = viewport?.getBoundingClientRect();
+    viewport?.dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      deltaY: -120,
+      clientX: bounds ? bounds.left + bounds.width * 0.75 : 400,
+      clientY: bounds ? bounds.top + bounds.height * 0.4 : 300,
+    }));
+  })()`);
+  await waitFor(() => windows[1].webContents.executeJavaScript(`(() => {
+    const video = document.querySelector('.call-stream-card.is-focused .call-stream-media');
+    const indicator = document.querySelector('.call-stream-card.is-focused .call-stream-zoom-indicator');
+    return new DOMMatrix(getComputedStyle(video).transform).a > 1.2 && indicator?.textContent.includes('125%');
+  })()`), 'zoom da transmissão ampliado pela roda do mouse');
+  await windows[1].webContents.executeJavaScript(`(() => {
+    const viewport = document.querySelector('.call-stream-card.is-focused .call-stream-viewport');
+    const bounds = viewport?.getBoundingClientRect();
+    viewport?.dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      deltaY: 120,
+      clientX: bounds ? bounds.left + bounds.width * 0.75 : 400,
+      clientY: bounds ? bounds.top + bounds.height * 0.4 : 300,
+    }));
+  })()`);
+  await waitFor(() => windows[1].webContents.executeJavaScript(`(() => {
+    const video = document.querySelector('.call-stream-card.is-focused .call-stream-media');
+    const indicator = document.querySelector('.call-stream-card.is-focused .call-stream-zoom-indicator');
+    return Math.abs(new DOMMatrix(getComputedStyle(video).transform).a - 1) < 0.01 && indicator?.textContent.includes('100%');
+  })()`), 'zoom da transmissão reduzido pela roda do mouse');
   await captureDebug(windows[1], 'focused');
   await windows[1].webContents.executeJavaScript(`(() => {
     const card = document.querySelector('.call-stream-card.is-focused');

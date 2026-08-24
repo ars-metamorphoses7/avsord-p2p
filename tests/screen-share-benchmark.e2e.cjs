@@ -80,6 +80,18 @@ function integerEnv(name, fallback, minimum = 0, maximum = Number.MAX_SAFE_INTEG
   return Math.max(minimum, Math.min(maximum, Math.round(parsed)));
 }
 
+function numberEnv(name, fallback, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minimum, Math.min(maximum, parsed));
+}
+
+function booleanEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  return ['1', 'true', 'on', 'yes'].includes(String(raw).trim().toLowerCase());
+}
+
 const requestedProfiles = String(process.env.JUMP_BENCH_PROFILES || 'performance,quality')
   .split(',')
   .map((value) => value.trim().toLowerCase())
@@ -91,14 +103,34 @@ if (!['window', 'screen'].includes(captureType)) {
   throw new Error('JUMP_BENCH_CAPTURE_TYPE precisa ser window ou screen.');
 }
 const disableFeatures = String(process.env.JUMP_BENCH_DISABLE_FEATURES || '').trim();
+const enableFeatures = String(process.env.JUMP_BENCH_ENABLE_FEATURES || '').trim();
+const preferredSoftwareCodec = String(process.env.JUMP_BENCH_SOFTWARE_CODEC || '').trim().toUpperCase();
+if (preferredSoftwareCodec && !['H264', 'VP8', 'VP9'].includes(preferredSoftwareCodec)) {
+  throw new Error('JUMP_BENCH_SOFTWARE_CODEC precisa ser H264, VP8 ou VP9.');
+}
 const nvidiaSmiEnabled = !['0', 'false', 'off', 'no'].includes(
   String(process.env.JUMP_BENCH_NVIDIA_SMI || '1').trim().toLowerCase(),
 );
+const networkEmulation = {
+  packetLossPercent: numberEnv('JUMP_BENCH_PACKET_LOSS_PERCENT', 0, 0, 100),
+  packetQueueLength: integerEnv('JUMP_BENCH_PACKET_QUEUE_LENGTH', 0, 0, 100_000),
+  packetReordering: booleanEnv('JUMP_BENCH_PACKET_REORDERING'),
+  latencyMs: numberEnv('JUMP_BENCH_NETWORK_LATENCY_MS', 0, 0, 60_000),
+  downloadKbps: numberEnv('JUMP_BENCH_DOWNLOAD_KBPS', 0, 0, 100_000_000),
+  uploadKbps: numberEnv('JUMP_BENCH_UPLOAD_KBPS', 0, 0, 100_000_000),
+};
+networkEmulation.enabled = networkEmulation.packetLossPercent > 0
+  || networkEmulation.packetQueueLength > 0
+  || networkEmulation.packetReordering
+  || networkEmulation.latencyMs > 0
+  || networkEmulation.downloadKbps > 0
+  || networkEmulation.uploadKbps > 0;
 
 const config = {
   warmupMs: integerEnv('JUMP_BENCH_WARMUP_MS', 15_000, 0, 300_000),
   durationMs: integerEnv('JUMP_BENCH_DURATION_MS', 60_000, 500, 3_600_000),
   repeats: integerEnv('JUMP_BENCH_REPEATS', 5, 1, 100),
+  viewers: integerEnv('JUMP_BENCH_VIEWERS', 1, 1, 6),
   sampleMs: integerEnv('JUMP_BENCH_SAMPLE_MS', 250, 100, 5_000),
   resourceSampleMs: integerEnv('JUMP_BENCH_RESOURCE_SAMPLE_MS', 1_000, 250, 30_000),
   sourceFps: integerEnv('JUMP_BENCH_SOURCE_FPS', 60, 1, 240),
@@ -114,12 +146,28 @@ const config = {
   externalSourceMode: String(process.env.JUMP_BENCH_EXTERNAL_SOURCE || '').toLowerCase() === 'chrome' ? 'chrome' : 'ffplay',
   captureType,
   disableFeatures,
+  enableFeatures,
+  preferredSoftwareCodec,
   nvidiaSmiEnabled,
+  networkEmulation,
   profiles,
   outputPath: process.env.JUMP_BENCH_OUTPUT ? path.resolve(projectRoot, process.env.JUMP_BENCH_OUTPUT) : '',
   pretty: process.env.JUMP_BENCH_PRETTY === '1',
   stdout: process.env.JUMP_BENCH_STDOUT === '1',
 };
+config.sfuEnabled = booleanEnv('JUMP_BENCH_SFU', true);
+config.expectSfu = config.sfuEnabled && config.viewers >= 3;
+
+const networkEmulationState = {
+  requested: networkEmulation.enabled,
+  active: false,
+  target: null,
+  mode: null,
+  ruleIds: [],
+  fallbackReason: null,
+  error: null,
+};
+const attachedDebuggers = new Set();
 
 app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');
@@ -128,6 +176,7 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 if (config.disableFeatures) app.commandLine.appendSwitch('disable-features', config.disableFeatures);
+if (config.enableFeatures) app.commandLine.appendSwitch('enable-features', config.enableFeatures);
 fs.mkdirSync(benchmarkUserData, { recursive: true });
 app.setPath('userData', benchmarkUserData);
 
@@ -274,6 +323,10 @@ async function startServer() {
       HOST: '127.0.0.1',
       PORT: String(port),
       JUMP_DATA_DIR: benchmarkServerData,
+      JUMP_SFU_ANNOUNCED_ADDRESS: process.env.JUMP_SFU_ANNOUNCED_ADDRESS || '127.0.0.1',
+      JUMP_SFU_MIN_VIEWERS: config.expectSfu
+        ? (process.env.JUMP_SFU_MIN_VIEWERS || '3')
+        : '12',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -304,12 +357,16 @@ async function stopServer() {
 function setupIpc() {
   ipcMain.handle('window:state', () => ({ maximized: false }));
   ipcMain.handle('update:state', () => ({ status: 'benchmark', revision: 0 }));
+  ipcMain.handle('room-session:remember', () => ({ ok: true }));
+  ipcMain.handle('room-session:forget', () => ({ ok: true }));
+  ipcMain.handle('room-session:list', () => []);
   ipcMain.handle('media:capabilities', () => {
     const features = app.getGPUFeatureStatus();
     return {
       hardwareAcceleration: app.isHardwareAccelerationEnabled(),
       hardwareVideoEncoding: String(features.video_encode || '').startsWith('enabled'),
       videoEncode: features.video_encode || 'unknown',
+      preferredSoftwareCodec: config.preferredSoftwareCodec || undefined,
     };
   });
   ipcMain.handle('desktop:audio-start', () => ({ ok: false, message: 'Áudio desativado no benchmark.' }));
@@ -531,6 +588,77 @@ async function createParticipant(role, index) {
   return participant;
 }
 
+function networkThroughputBytesPerSecond(kbps) {
+  return kbps > 0 ? (kbps * 1_000) / 8 : -1;
+}
+
+function networkConditionParameters() {
+  return {
+    latency: networkEmulation.latencyMs,
+    downloadThroughput: networkThroughputBytesPerSecond(networkEmulation.downloadKbps),
+    uploadThroughput: networkThroughputBytesPerSecond(networkEmulation.uploadKbps),
+    packetLoss: networkEmulation.packetLossPercent,
+    packetQueueLength: networkEmulation.packetQueueLength,
+    packetReordering: networkEmulation.packetReordering,
+  };
+}
+
+async function applyNetworkEmulation(participant, target) {
+  if (!networkEmulation.enabled) return;
+  const devtools = participant.webContents.debugger;
+  try {
+    if (!devtools.isAttached()) devtools.attach('1.3');
+    attachedDebuggers.add(devtools);
+    await devtools.sendCommand('Network.enable');
+    const conditions = networkConditionParameters();
+    try {
+      const result = await devtools.sendCommand('Network.emulateNetworkConditionsByRule', {
+        offline: false,
+        emulateOfflineServiceWorker: false,
+        matchedNetworkConditions: [{
+          urlPattern: '',
+          offline: false,
+          ...conditions,
+        }],
+      });
+      networkEmulationState.mode = 'Network.emulateNetworkConditionsByRule';
+      networkEmulationState.ruleIds = result?.ruleIds || [];
+    } catch (error) {
+      networkEmulationState.fallbackReason = String(error?.message || error);
+      await devtools.sendCommand('Network.emulateNetworkConditions', {
+        offline: false,
+        ...conditions,
+      });
+      networkEmulationState.mode = 'Network.emulateNetworkConditions';
+    }
+    networkEmulationState.active = true;
+    networkEmulationState.target = target;
+    progress(`emulação de rede ativa em ${target}: perda ${networkEmulation.packetLossPercent}%, latência ${networkEmulation.latencyMs} ms, fila ${networkEmulation.packetQueueLength || 'ilimitada'}, upload ${networkEmulation.uploadKbps || 'ilimitado'} kbps`);
+  } catch (error) {
+    networkEmulationState.error = String(error?.message || error);
+    throw new Error(`Falha ao ativar emulação WebRTC no benchmark: ${networkEmulationState.error}`);
+  }
+}
+
+async function releaseNetworkEmulation() {
+  for (const devtools of attachedDebuggers) {
+    if (!devtools.isAttached()) continue;
+    try {
+      await devtools.sendCommand('Network.emulateNetworkConditions', {
+        offline: false,
+        latency: 0,
+        downloadThroughput: -1,
+        uploadThroughput: -1,
+        packetLoss: 0,
+        packetQueueLength: 0,
+        packetReordering: false,
+      });
+    } catch { /* Detaching also clears target-scoped emulation. */ }
+    try { devtools.detach(); } catch { /* Target may already be gone. */ }
+  }
+  attachedDebuggers.clear();
+}
+
 async function click(window, selector) {
   const clicked = await window.webContents.executeJavaScript(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
@@ -590,6 +718,7 @@ const INSTALL_STATS_SAMPLER = String.raw`(() => {
     'id', 'timestamp', 'state', 'nominated', 'writable', 'bytesSent', 'bytesReceived',
     'currentRoundTripTime', 'totalRoundTripTime', 'responsesReceived', 'availableOutgoingBitrate',
     'availableIncomingBitrate', 'requestsReceived', 'requestsSent', 'localCandidateId', 'remoteCandidateId',
+    'packetsDiscardedOnSend', 'bytesDiscardedOnSend',
   ];
   const candidateFields = ['id', 'timestamp', 'candidateType', 'protocol', 'networkType', 'address', 'port', 'priority', 'url', 'relayProtocol'];
   const codecFields = ['id', 'timestamp', 'payloadType', 'mimeType', 'clockRate', 'channels', 'sdpFmtpLine'];
@@ -598,17 +727,53 @@ const INSTALL_STATS_SAMPLER = String.raw`(() => {
   globalThis.__jumpBenchmarkSample = async (role) => {
     const peers = [...(globalThis.__jumpPeerMesh?.peerConnectionsRef.current || [])];
     if (!peers.length) return null;
-    let selected = null;
-    for (const [peerId, slot] of peers) {
+    const meshSamples = await Promise.all(peers.map(async ([peerId, slot]) => {
       const reports = await slot.pc.getStats();
       const values = [...reports.values()];
       const outbound = largest(values.filter((report) => report.type === 'outbound-rtp' && kindOf(report) === 'video' && !report.isRemote), 'bytesSent');
       const inbound = largest(values.filter((report) => report.type === 'inbound-rtp' && kindOf(report) === 'video' && !report.isRemote), 'bytesReceived');
-      const score = role === 'sender' ? Number(outbound?.bytesSent || 0) : Number(inbound?.bytesReceived || 0);
-      if (!selected || score > selected.score) selected = { peerId, slot, reports, values, outbound, inbound, score };
+      const parameters = slot.videoSender?.getParameters?.() || {};
+      const hasActiveEncoding = (parameters.encodings || []).some((encoding) => encoding.active !== false);
+      const hasScreenSender = Boolean(slot.videoSender?.track?.kind === 'video');
+      return {
+        peerId,
+        slot,
+        reports,
+        values,
+        outbound,
+        inbound,
+        hasScreenSender,
+        activeScreenSender: hasScreenSender
+          && hasActiveEncoding
+          && slot.screenWatching !== false
+          && slot.screenViaSfu !== true,
+      };
+    }));
+    const meshBytesSentTotal = meshSamples.reduce((sum, entry) => (
+      sum + Number(entry.outbound?.bytesSent || 0)
+    ), 0);
+    let selected = null;
+    const sfuState = globalThis.__jumpScreenSfu;
+    const sfuEntry = role === 'sender'
+      ? (sfuState?.producerRef.current ? { endpoint: sfuState.producerRef.current, peerId: 'sfu' } : null)
+      : [...(sfuState?.consumersRef.current.values() || [])][0] || null;
+    if (sfuEntry) {
+      const endpoint = sfuEntry.endpoint || sfuEntry.consumer;
+      const reports = await endpoint.getStats();
+      const values = [...reports.values()];
+      const outbound = largest(values.filter((report) => report.type === 'outbound-rtp' && kindOf(report) === 'video' && !report.isRemote), 'bytesSent');
+      const inbound = largest(values.filter((report) => report.type === 'inbound-rtp' && kindOf(report) === 'video' && !report.isRemote), 'bytesReceived');
+      const peerId = sfuEntry.peerId || endpoint.appData?.producerPeerId || 'sfu';
+      const slot = peers.find(([id]) => id === peerId)?.[1] || peers[0][1];
+      selected = { peerId, slot, reports, values, outbound, inbound, score: Number(outbound?.bytesSent || inbound?.bytesReceived || 0), sfuEndpoint: endpoint, transportMode: 'sfu' };
+    } else {
+      for (const { peerId, slot, reports, values, outbound, inbound } of meshSamples) {
+        const score = role === 'sender' ? Number(outbound?.bytesSent || 0) : Number(inbound?.bytesReceived || 0);
+        if (!selected || score > selected.score) selected = { peerId, slot, reports, values, outbound, inbound, score, transportMode: 'mesh' };
+      }
     }
     if (!selected) return null;
-    const { peerId, slot, reports, values, outbound, inbound } = selected;
+    const { peerId, slot, reports, values, outbound, inbound, sfuEndpoint, transportMode } = selected;
     const source = outbound?.mediaSourceId ? reports.get(outbound.mediaSourceId) : largest(values.filter((report) => report.type === 'media-source' && kindOf(report) === 'video'), 'frames');
     const remoteInbound = outbound?.remoteId ? reports.get(outbound.remoteId) : largest(values.filter((report) => report.type === 'remote-inbound-rtp' && kindOf(report) === 'video'), 'reportsReceived');
     const remoteOutbound = inbound?.remoteId ? reports.get(inbound.remoteId) : largest(values.filter((report) => report.type === 'remote-outbound-rtp' && kindOf(report) === 'video'), 'reportsSent');
@@ -620,14 +785,15 @@ const INSTALL_STATS_SAMPLER = String.raw`(() => {
       : values.find((report) => report.type === 'candidate-pair' && report.nominated && report.state === 'succeeded');
     const localCandidate = pair?.localCandidateId ? reports.get(pair.localCandidateId) : null;
     const remoteCandidate = pair?.remoteCandidateId ? reports.get(pair.remoteCandidateId) : null;
-    const senderTrack = slot.videoSender?.track || null;
-    const receiverTrack = slot.videoTransceiver?.receiver?.track
+    const senderTrack = sfuEndpoint?.track || slot.videoSender?.track || null;
+    const receiverTrack = sfuEndpoint?.track || slot.videoTransceiver?.receiver?.track
       || slot.pc.getReceivers().find((receiver) => receiver.track?.kind === 'video')?.track
       || null;
     const track = role === 'sender' ? senderTrack : receiverTrack;
     let senderParameters = null;
-    if (role === 'sender' && slot.videoSender?.getParameters) {
-      const parameters = slot.videoSender.getParameters();
+    const statsSender = sfuEndpoint?.rtpSender || slot.videoSender;
+    if (role === 'sender' && statsSender?.getParameters) {
+      const parameters = statsSender.getParameters();
       senderParameters = {
         degradationPreference: parameters.degradationPreference,
         transactionId: parameters.transactionId,
@@ -646,6 +812,7 @@ const INSTALL_STATS_SAMPLER = String.raw`(() => {
     return {
       collectedAt: performance.timeOrigin + performance.now(),
       role,
+      transportMode,
       peerId,
       connectionState: slot.pc.connectionState,
       iceConnectionState: slot.pc.iceConnectionState,
@@ -660,10 +827,28 @@ const INSTALL_STATS_SAMPLER = String.raw`(() => {
         constraints: { ...track.getConstraints?.() },
       } : null,
       senderParameters,
-      adaptation: slot.videoAdaptation ? { ...slot.videoAdaptation } : null,
+      adaptation: transportMode === 'sfu'
+        ? (sfuState?.producerAdaptationRef.current ? { ...sfuState.producerAdaptationRef.current } : null)
+        : slot.videoAdaptation ? { ...slot.videoAdaptation } : null,
+      videoCodecPolicyKey: transportMode === 'sfu'
+        ? sfuState?.producerCodecPolicyRef.current || null
+        : slot.videoCodecPolicyKey || null,
+      videoMutationCounts: slot.videoMutationCounts ? { ...slot.videoMutationCounts } : null,
+      lastVideoMutation: slot.lastVideoMutation ? { ...slot.lastVideoMutation } : null,
       jitterBufferTarget: slot.videoTransceiver?.receiver && 'jitterBufferTarget' in slot.videoTransceiver.receiver
         ? slot.videoTransceiver.receiver.jitterBufferTarget
         : null,
+      topology: {
+        sfuViewerCount: sfuState?.sfuViewersRef.current?.size || 0,
+        sfuConsumerCount: sfuState?.consumersRef.current?.size || 0,
+        meshScreenSenders: meshSamples.filter((entry) => entry.hasScreenSender).length,
+        meshActiveScreenSenders: meshSamples.filter((entry) => entry.activeScreenSender).length,
+        meshViaSfuCount: meshSamples.filter((entry) => entry.slot.screenViaSfu === true).length,
+        meshBytesSentTotal,
+        publisherUploadBytes: role === 'sender'
+          ? meshBytesSentTotal + (transportMode === 'sfu' ? Number(outbound?.bytesSent || 0) : 0)
+          : null,
+      },
       reports: {
         source: pick(source, sourceFields),
         outbound: pick(outbound, outboundFields),
@@ -1103,6 +1288,14 @@ async function startShare(sender, receiver, profile, captureSource) {
     return Number(senderSample?.reports?.outbound?.framesEncoded) > 0
       && Number(receiverSample?.reports?.inbound?.framesDecoded) > 0;
   }, 'RTP de vídeo mensurável', 30_000);
+  if (config.expectSfu) {
+    await waitFor(() => sender.webContents.executeJavaScript(`(() => (
+      Boolean(globalThis.__jumpScreenSfu?.producerRef.current)
+      && globalThis.__jumpScreenSfu.sfuViewersRef.current.size === ${config.viewers}
+      && [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()]
+        .filter((slot) => slot.screenViaSfu === true).length === ${config.viewers}
+    ))()`), 'handoff de todos os espectadores para o SFU', 30_000);
+  }
 }
 
 async function stopShare(sender, receiver) {
@@ -1131,11 +1324,19 @@ function median(values) {
 
 function distribution(values) {
   const finiteValues = values.map(finiteOrNull).filter((value) => value !== null);
+  const mean = finiteValues.length
+    ? finiteValues.reduce((total, value) => total + value, 0) / finiteValues.length
+    : null;
+  const standardDeviation = mean === null ? null : Math.sqrt(
+    finiteValues.reduce((total, value) => total + ((value - mean) ** 2), 0) / finiteValues.length,
+  );
   return {
     count: finiteValues.length,
-    mean: finiteValues.length
-      ? finiteValues.reduce((total, value) => total + value, 0) / finiteValues.length
-      : null,
+    mean,
+    standardDeviation,
+    coefficientOfVariation: mean && standardDeviation !== null ? standardDeviation / Math.abs(mean) : null,
+    min: finiteValues.length ? Math.min(...finiteValues) : null,
+    p05: quantile(finiteValues, 0.05),
     p50: quantile(finiteValues, 0.5),
     p95: quantile(finiteValues, 0.95),
     max: finiteValues.length ? Math.max(...finiteValues) : null,
@@ -1161,6 +1362,47 @@ function divide(numerator, denominator, multiplier = 1) {
 
 function series(samples, reportName, field) {
   return samples.map((sample) => finiteOrNull(sample?.reports?.[reportName]?.[field])).filter((value) => value !== null);
+}
+
+function intervalCounterSeries(samples, reportName, field, multiplier = 1) {
+  const values = [];
+  for (let index = 1; index < samples.length; index += 1) {
+    const previous = samples[index - 1];
+    const current = samples[index];
+    const elapsedSeconds = divide(current.collectedAt - previous.collectedAt, 1000);
+    const previousReport = previous?.reports?.[reportName] ?? previous?.[reportName];
+    const currentReport = current?.reports?.[reportName] ?? current?.[reportName];
+    const counterDelta = delta(previousReport, currentReport, field);
+    const rate = divide(counterDelta, elapsedSeconds, multiplier);
+    if (rate !== null) values.push(rate);
+  }
+  return values;
+}
+
+function intervalAverageSeries(samples, reportName, totalField, countField, multiplier = 1) {
+  const values = [];
+  for (let index = 1; index < samples.length; index += 1) {
+    const previousReport = samples[index - 1]?.reports?.[reportName];
+    const currentReport = samples[index]?.reports?.[reportName];
+    const totalDelta = delta(previousReport, currentReport, totalField);
+    const countDelta = delta(previousReport, currentReport, countField);
+    const average = divide(totalDelta, countDelta, multiplier);
+    if (average !== null) values.push(average);
+  }
+  return values;
+}
+
+function intervalLossRatioSeries(samples, reportName, lostField, receivedField) {
+  const values = [];
+  for (let index = 1; index < samples.length; index += 1) {
+    const previousReport = samples[index - 1]?.reports?.[reportName];
+    const currentReport = samples[index]?.reports?.[reportName];
+    const lost = delta(previousReport, currentReport, lostField);
+    const received = delta(previousReport, currentReport, receivedField);
+    if (lost === null || received === null || lost + received <= 0) continue;
+    values.push(lost / (lost + received));
+  }
+  return values;
 }
 
 function summarizeResources(resourceSamples) {
@@ -1328,22 +1570,35 @@ function summarizeRun(senderSamples, receiverSamples, renderSamples, sourceStart
   const sourceSeconds = divide((sourceEnd?.nowMs || 0) - (sourceStart?.nowMs || 0), 1000);
   const sourceFrames = delta(firstSender?.reports?.source, lastSender?.reports?.source, 'frames');
   const encodedFrames = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'framesEncoded');
+  const encodedKeyFrames = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'keyFramesEncoded');
+  const hugeFramesSent = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'hugeFramesSent');
   const sentFrames = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'framesSent');
   const sentBytes = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'bytesSent');
   const retransmittedBytes = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'retransmittedBytesSent') || 0;
+  const sentPackets = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'packetsSent');
+  const retransmittedPackets = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'retransmittedPacketsSent');
   const encodeTime = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'totalEncodeTime');
   const senderQp = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'qpSum');
+  const senderNackCount = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'nackCount');
+  const senderPliCount = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'pliCount');
+  const senderFirCount = delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'firCount');
   const receivedFrames = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'framesReceived');
   const decodedFrames = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'framesDecoded');
+  const decodedKeyFrames = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'keyFramesDecoded');
   const renderedFrames = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'framesRendered');
   const droppedFrames = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'framesDropped');
   const receivedBytes = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'bytesReceived');
+  const receivedPackets = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'packetsReceived');
+  const lostPackets = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'packetsLost');
   const decodeTime = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'totalDecodeTime');
   const processingTime = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'totalProcessingDelay');
   const jitterDelay = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'jitterBufferDelay');
   const jitterTargetDelay = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'jitterBufferTargetDelay');
   const jitterMinimumDelay = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'jitterBufferMinimumDelay');
   const jitterEmitted = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'jitterBufferEmittedCount');
+  const receiverNackCount = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'nackCount');
+  const receiverPliCount = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'pliCount');
+  const receiverFirCount = delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'firCount');
   const validRender = renderSamples.filter((sample) => Number.isFinite(sample.expectedDisplayTime));
   const intervals = validRender.slice(1).map((sample, index) => sample.expectedDisplayTime - validRender[index].expectedDisplayTime).filter((value) => value > 0);
   const captureToCompositor = validRender
@@ -1399,13 +1654,35 @@ function summarizeRun(senderSamples, receiverSamples, renderSamples, sourceStart
       height: finiteOrNull(lastSender?.reports?.source?.height),
     },
     sender: {
+      transportMode: lastSender?.transportMode || 'mesh',
+      totalUploadBitrateBps: divide(
+        delta(firstSender?.topology, lastSender?.topology, 'publisherUploadBytes'),
+        senderSeconds,
+        8,
+      ),
+      topology: lastSender?.topology || null,
       encodeFps: divide(encodedFrames, senderSeconds),
       sendFps: divide(sentFrames, senderSeconds),
       bitrateBps: divide(Math.max(0, (sentBytes || 0) - retransmittedBytes), senderSeconds, 8),
       retransmittedBitrateBps: divide(retransmittedBytes, senderSeconds, 8),
+      packetsSent: sentPackets,
+      retransmittedPacketsSent: retransmittedPackets,
+      retransmissionRatio: divide(retransmittedPackets, sentPackets),
       averageEncodeTimeMs: divide(encodeTime, encodedFrames, 1000),
+      averagePacketSendDelayMs: divide(
+        delta(firstSender?.reports?.outbound, lastSender?.reports?.outbound, 'totalPacketSendDelay'),
+        sentPackets,
+        1000,
+      ),
       averageQp: divide(senderQp, encodedFrames),
       framesEncoded: encodedFrames,
+      keyFramesEncoded: encodedKeyFrames,
+      keyFramesPerMinute: divide(encodedKeyFrames, senderSeconds, 60),
+      keyFrameRatio: divide(encodedKeyFrames, encodedFrames),
+      hugeFramesSent,
+      nackCount: senderNackCount,
+      pliCount: senderPliCount,
+      firCount: senderFirCount,
       framesSent: sentFrames,
       frameWidth: finiteOrNull(lastSender?.reports?.outbound?.frameWidth),
       frameHeight: finiteOrNull(lastSender?.reports?.outbound?.frameHeight),
@@ -1416,11 +1693,21 @@ function summarizeRun(senderSamples, receiverSamples, renderSamples, sourceStart
       encoderImplementation: lastSender?.reports?.outbound?.encoderImplementation || null,
       powerEfficientEncoder: lastSender?.reports?.outbound?.powerEfficientEncoder ?? null,
       codec: lastSender?.reports?.codec || null,
+      codecPolicy: lastSender?.videoCodecPolicyKey || null,
       adaptation: lastSender?.adaptation || null,
       settings: lastSender?.track?.settings || null,
       parameters: lastSender?.senderParameters || null,
+      mutations: {
+        total: delta(firstSender?.videoMutationCounts, lastSender?.videoMutationCounts, 'total'),
+        structural: delta(firstSender?.videoMutationCounts, lastSender?.videoMutationCounts, 'structural'),
+        bitrate: delta(firstSender?.videoMutationCounts, lastSender?.videoMutationCounts, 'bitrate'),
+        active: delta(firstSender?.videoMutationCounts, lastSender?.videoMutationCounts, 'active'),
+        track: delta(firstSender?.videoMutationCounts, lastSender?.videoMutationCounts, 'track'),
+        last: lastSender?.lastVideoMutation || null,
+      },
     },
     receiver: {
+      transportMode: lastReceiver?.transportMode || 'mesh',
       receiveFps: divide(receivedFrames, receiverSeconds),
       decodeFps: divide(decodedFrames, receiverSeconds),
       statsRenderFps: divide(renderedFrames, receiverSeconds),
@@ -1432,13 +1719,20 @@ function summarizeRun(senderSamples, receiverSamples, renderSamples, sourceStart
       averageJitterBufferMinimumMs: divide(jitterMinimumDelay, jitterEmitted, 1000),
       framesReceived: receivedFrames,
       framesDecoded: decodedFrames,
+      keyFramesDecoded: decodedKeyFrames,
       framesRendered: renderedFrames,
       framesDropped: droppedFrames,
       frameWidth: finiteOrNull(lastReceiver?.reports?.inbound?.frameWidth),
       frameHeight: finiteOrNull(lastReceiver?.reports?.inbound?.frameHeight),
       packetsLost: delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'packetsLost'),
+      packetsReceived: receivedPackets,
+      packetLossRatio: lostPackets === null || receivedPackets === null
+        ? null : divide(lostPackets, lostPackets + receivedPackets),
       freezeCount: delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'freezeCount'),
       totalFreezesDuration: delta(firstReceiver?.reports?.inbound, lastReceiver?.reports?.inbound, 'totalFreezesDuration'),
+      nackCount: receiverNackCount,
+      pliCount: receiverPliCount,
+      firCount: receiverFirCount,
       decoderImplementation: lastReceiver?.reports?.inbound?.decoderImplementation || null,
       powerEfficientDecoder: lastReceiver?.reports?.inbound?.powerEfficientDecoder ?? null,
       jitterBufferTarget: lastReceiver?.jitterBufferTarget ?? null,
@@ -1473,6 +1767,23 @@ function summarizeRun(senderSamples, receiverSamples, renderSamples, sourceStart
       encodedPerCaptured: divide(encodedFrames, sourceFrames),
       decodedPerEncoded: divide(decodedFrames, encodedFrames),
       presentedPerCaptured: divide(presentedFrames, sourceFrames),
+    },
+    transport: {
+      sendBitrateBps: distribution(intervalCounterSeries(senderSamples, 'outbound', 'bytesSent', 8)),
+      totalUploadBitrateBps: distribution(intervalCounterSeries(senderSamples, 'topology', 'publisherUploadBytes', 8)),
+      retransmitBitrateBps: distribution(intervalCounterSeries(senderSamples, 'outbound', 'retransmittedBytesSent', 8)),
+      sendFps: distribution(intervalCounterSeries(senderSamples, 'outbound', 'framesSent')),
+      keyFramesEncoded: distribution(intervalCounterSeries(senderSamples, 'outbound', 'keyFramesEncoded')),
+      pliRequests: distribution(intervalCounterSeries(senderSamples, 'outbound', 'pliCount')),
+      firRequests: distribution(intervalCounterSeries(senderSamples, 'outbound', 'firCount')),
+      receiveBitrateBps: distribution(intervalCounterSeries(receiverSamples, 'inbound', 'bytesReceived', 8)),
+      receiveFps: distribution(intervalCounterSeries(receiverSamples, 'inbound', 'framesReceived')),
+      packetSendDelayMs: distribution(intervalAverageSeries(senderSamples, 'outbound', 'totalPacketSendDelay', 'packetsSent', 1000)),
+      packetLossRatio: distribution(intervalLossRatioSeries(receiverSamples, 'inbound', 'packetsLost', 'packetsReceived')),
+      availableOutgoingBitrate: distribution(series(senderSamples, 'candidatePair', 'availableOutgoingBitrate')),
+      roundTripTimeMs: distribution(series(senderSamples, 'candidatePair', 'currentRoundTripTime').map((value) => value * 1000)),
+      packetsDiscardedOnSend: delta(firstSender?.reports?.candidatePair, lastSender?.reports?.candidatePair, 'packetsDiscardedOnSend'),
+      bytesDiscardedOnSend: delta(firstSender?.reports?.candidatePair, lastSender?.reports?.candidatePair, 'bytesDiscardedOnSend'),
     },
     resources: summarizeResources(resourceSamples),
   };
@@ -1547,6 +1858,13 @@ function evaluateRunValidity(profile, summary, sourceEnd) {
   const expected = PROFILE_EXPECTATIONS[profile];
   const reasons = [];
   const warnings = [];
+  if (config.expectSfu) {
+    if (summary?.sender?.transportMode !== 'sfu') reasons.push('sfu-not-active');
+    if (Number(summary?.sender?.topology?.sfuViewerCount) !== config.viewers) reasons.push('sfu-viewer-count-mismatch');
+    if (Number(summary?.sender?.topology?.meshActiveScreenSenders) !== 0) reasons.push('mesh-screen-upload-still-active');
+  } else if (summary?.sender?.transportMode === 'sfu') {
+    reasons.push('unexpected-sfu-transport');
+  }
   const width = finiteOrNull(summary?.sender?.frameWidth);
   const height = finiteOrNull(summary?.sender?.frameHeight);
   const codec = summary?.sender?.codec?.mimeType || 'unknown-codec';
@@ -1578,6 +1896,23 @@ function evaluateRunValidity(profile, summary, sourceEnd) {
     reasons.push(`gpu-load-inactive:${sourceEnd?.gpuLoadError || 'unknown'}`);
   }
   if ((finiteOrNull(summary?.receiver?.packetsLost) || 0) > 3) warnings.push('receiver-packet-loss');
+  if ((finiteOrNull(summary?.receiver?.packetLossRatio) || 0) > 0.01) warnings.push('receiver-packet-loss-ratio');
+  if ((finiteOrNull(summary?.sender?.retransmissionRatio) || 0) > 0.05) warnings.push('sender-retransmission-ratio');
+  if ((finiteOrNull(summary?.sender?.keyFramesEncoded) || 0) >= 2
+      && (finiteOrNull(summary?.sender?.keyFramesPerMinute) || 0) > 6) {
+    warnings.push('sender-keyframe-storm');
+  }
+  if (((finiteOrNull(summary?.sender?.pliCount) || 0) + (finiteOrNull(summary?.sender?.firCount) || 0)) >= 3) {
+    warnings.push('receiver-keyframe-feedback-storm');
+  }
+  const structuralMutations = finiteOrNull(summary?.sender?.mutations?.structural) || 0;
+  const elapsedSeconds = finiteOrNull(summary?.elapsedSeconds) || 0;
+  if (structuralMutations >= 2 && structuralMutations > Math.ceil(elapsedSeconds / 6)) {
+    warnings.push('sender-structural-reconfiguration-churn');
+  }
+  if ((finiteOrNull(summary?.transport?.sendBitrateBps?.coefficientOfVariation) || 0) > 0.25) warnings.push('sender-bitrate-oscillation');
+  if ((finiteOrNull(summary?.transport?.packetSendDelayMs?.p95) || 0) > 20) warnings.push('sender-pacer-delay');
+  if ((finiteOrNull(summary?.transport?.packetsDiscardedOnSend) || 0) > 0) warnings.push('sender-packets-discarded');
   if ((finiteOrNull(summary?.receiver?.freezeCount) || 0) > 0) warnings.push('receiver-freeze-observed');
   if (!summary?.visualQuality?.available) warnings.push(`visual-quality-unavailable:${summary?.visualQuality?.reason || 'unknown'}`);
   else if (!summary.visualQuality.valid) warnings.push(`visual-quality-invalid:${summary.visualQuality.reason || 'unknown'}`);
@@ -1585,6 +1920,7 @@ function evaluateRunValidity(profile, summary, sourceEnd) {
     ?? finiteOrNull(summary?.sender?.adaptation?.scale)
     ?? 1;
   const stratum = {
+    transportMode: summary?.sender?.transportMode || 'mesh',
     codec,
     encoder,
     resolution: width === null || height === null ? 'unknown' : `${width}x${height}`,
@@ -1607,6 +1943,19 @@ function aggregateRuns(runs) {
     'source.captureFps',
     'sender.encodeFps',
     'sender.bitrateBps',
+    'sender.totalUploadBitrateBps',
+    'sender.retransmissionRatio',
+    'sender.keyFramesPerMinute',
+    'sender.keyFrameRatio',
+    'sender.pliCount',
+    'sender.firCount',
+    'sender.mutations.total',
+    'sender.mutations.structural',
+    'sender.mutations.bitrate',
+    'receiver.packetLossRatio',
+    'transport.sendBitrateBps.coefficientOfVariation',
+    'transport.packetSendDelayMs.p95',
+    'transport.packetLossRatio.p95',
     'sender.averageEncodeTimeMs',
     'receiver.decodeFps',
     'receiver.averageJitterBufferMs',
@@ -1736,6 +2085,7 @@ async function environmentManifest(fixtureSource) {
         : 'visible-on-noncaptured-or-window-safe-display',
       loopbackSameMachine: true,
     },
+    networkEmulation: { ...networkEmulationState },
     displays: screen.getAllDisplays().map((display) => ({
       id: display.id,
       bounds: display.bounds,
@@ -1760,11 +2110,17 @@ async function runBenchmark() {
   const fixture = config.externalSource ? await createExternalMotionSource() : await createMotionSource();
   const fixtureSource = await ensureFixtureSource();
   const sender = await createParticipant('sender', 0);
-  const receiver = await createParticipant('receiver', 1);
-  await waitFor(() => Promise.all([sender, receiver].map((window) => count(window, '.signal-badge.is-connected'))).then((values) => values.every(Boolean)), 'dois clientes sinalizados');
-  await Promise.all([joinCall(sender), joinCall(receiver)]);
-  await waitFor(() => Promise.all([sender, receiver].map((window) => window.webContents.executeJavaScript('globalThis.__jumpPeerMesh?.peerConnectionsRef.current.size === 1'))).then((values) => values.every(Boolean)), 'peer connection loopback');
+  const receivers = [];
+  for (let index = 0; index < config.viewers; index += 1) {
+    receivers.push(await createParticipant('receiver', index + 1));
+  }
+  const receiver = receivers[0];
+  const participants = [sender, ...receivers];
+  await waitFor(() => Promise.all(participants.map((window) => count(window, '.signal-badge.is-connected'))).then((values) => values.every(Boolean)), `${participants.length} clientes sinalizados`);
+  await Promise.all(participants.map(joinCall));
+  await waitFor(() => Promise.all(participants.map((window) => window.webContents.executeJavaScript(`globalThis.__jumpPeerMesh?.peerConnectionsRef.current.size === ${participants.length - 1}`))).then((values) => values.every(Boolean)), 'peer connections loopback');
   await installCollectors(sender, receiver);
+  await applyNetworkEmulation(sender, 'sender-renderer');
   receiver.showInactive();
   if (config.captureType === 'screen' && !fixture.external) {
     fixture.showInactive();
@@ -1799,12 +2155,14 @@ async function runBenchmark() {
       const cpuMean = finiteOrNull(measured.summary.resources.global.cpuPercentSum.mean);
       const gpuMean = finiteOrNull(measured.summary.resources.nvidia.gpuUtilizationPercentMax.mean);
       const ssim = finiteOrNull(measured.summary.visualQuality?.ssim?.p50);
-      progress(`${runId}: apresentado ${finiteOrNull(measured.summary.render.presentedFps)?.toFixed(2) ?? 'n/a'} FPS, encode ${finiteOrNull(measured.summary.sender.encodeFps)?.toFixed(2) ?? 'n/a'} FPS, SSIM ${ssim?.toFixed(4) ?? 'n/a'}, CPU ${cpuMean?.toFixed(1) ?? 'n/a'}%, GPU ${gpuMean?.toFixed(1) ?? 'n/a'}%, validade ${validity.validForPerformance ? 'ok' : validity.reasons.join(',')}`);
+      const lossPercent = (finiteOrNull(measured.summary.receiver.packetLossRatio) || 0) * 100;
+      const bitrateCv = finiteOrNull(measured.summary.transport.sendBitrateBps.coefficientOfVariation);
+      progress(`${runId}: apresentado ${finiteOrNull(measured.summary.render.presentedFps)?.toFixed(2) ?? 'n/a'} FPS, encode ${finiteOrNull(measured.summary.sender.encodeFps)?.toFixed(2) ?? 'n/a'} FPS, perda ${lossPercent.toFixed(2)}%, bitrate CV ${bitrateCv?.toFixed(3) ?? 'n/a'}, SSIM ${ssim?.toFixed(4) ?? 'n/a'}, CPU ${cpuMean?.toFixed(1) ?? 'n/a'}%, GPU ${gpuMean?.toFixed(1) ?? 'n/a'}%, validade ${validity.validForPerformance ? 'ok' : validity.reasons.join(',')}`);
     }
   }
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 5,
     benchmark: 'jump-screen-share-loopback',
     config,
     environment: await environmentManifest(fixtureSource),
@@ -1819,6 +2177,7 @@ async function cleanup() {
     { targetPath: benchmarkUserData, expectedPrefix: 'jump-stream-benchmark-electron-' },
     { targetPath: externalSourceProfile, expectedPrefix: 'jump-stream-benchmark-chrome-' },
   ];
+  await releaseNetworkEmulation();
   for (const window of windows.splice(0)) {
     if (!window.isDestroyed()) window.destroy();
   }
