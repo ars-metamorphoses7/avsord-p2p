@@ -88,7 +88,7 @@ export function ScreenShareDialog({
           </div>
 
           <fieldset className="screen-share-quality">
-            <legend><Gauge size={13} /> modo automático <span className={mediaCapabilities?.hardwareVideoEncoding ? 'is-accelerated' : ''}>{mediaCapabilities?.hardwareVideoEncoding ? 'GPU ativa' : mediaCapabilities ? 'encoder por software' : ''}</span></legend>
+            <legend><Gauge size={13} /> modo automático <span className={mediaCapabilities?.hardwareVideoEncoding ? 'is-accelerated' : ''}>{mediaCapabilities?.hardwareVideoEncoding ? 'GPU candidata' : mediaCapabilities ? 'encoder por software' : ''}</span></legend>
             <div>
               {Object.values(SCREEN_SHARE_PROFILES).map((profile) => (
                 <button type="button" key={profile.id} className={profileId === profile.id ? 'is-selected' : ''} aria-pressed={profileId === profile.id} onClick={() => onProfile(profile.id)}><strong>{profile.label}</strong><small>{profile.description}</small></button>

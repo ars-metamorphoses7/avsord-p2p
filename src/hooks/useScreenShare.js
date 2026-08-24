@@ -149,7 +149,7 @@ export function useScreenShare({
         });
       }
       setProfileId(profile.id);
-      await setVideoEncodingProfile(profile.id);
+      await setVideoEncodingProfile(profile.id, mediaCapabilities);
 
       let outboundShareStream = videoStream;
 
@@ -201,7 +201,7 @@ export function useScreenShare({
       if (error?.name !== 'AbortError') setPermissionError(error?.message || 'Não foi possível iniciar o compartilhamento de tela.');
       return false;
     }
-  }, [announceCallState, cameraStreamRef, cancelPicker, onShareStarted, profileId, replacePeerTrack, screenAudioSessionRef, screenStreamRef, setIsSharing, setPermissionError, setProfileId, setVideoEncodingProfile, stopScreenShare]);
+  }, [announceCallState, cameraStreamRef, cancelPicker, mediaCapabilities, onShareStarted, profileId, replacePeerTrack, screenAudioSessionRef, screenStreamRef, setIsSharing, setPermissionError, setProfileId, setVideoEncodingProfile, stopScreenShare]);
 
   const toggleScreenShare = useCallback(async () => {
     if (screenStreamRef.current) {

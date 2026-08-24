@@ -20,6 +20,22 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 // the network and hardware encoder still have capacity.
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
+// Linux VA-API remains an unsupported/driver-dependent Chromium path. Keep it
+// opt-in until the release matrix proves Intel and AMD configurations, and do
+// not bypass the GPU blocklist or driver workarounds. The renderer still checks
+// `video_encode` plus RTCStats before presenting the path as hardware-backed.
+const requestedLinuxVideoAcceleration = String(
+  process.env.JUMP_LINUX_VIDEO_ACCELERATION || '',
+).trim().toLowerCase();
+if (process.platform === 'linux' && requestedLinuxVideoAcceleration === 'vaapi') {
+  const enabledFeatures = new Set(app.commandLine.getSwitchValue('enable-features')
+    .split(',')
+    .map((feature) => feature.trim())
+    .filter(Boolean));
+  enabledFeatures.add('AcceleratedVideoEncoder');
+  app.commandLine.appendSwitch('enable-features', [...enabledFeatures].join(','));
+}
+
 // On Windows 11 24H2 Chromium M150 silently prefers WGC for whole-screen
 // capture. A repeated external-source A/B on this runtime measured the DXGI
 // Desktop Duplication path at 56.99 presented FPS versus 54.95 for WGC, with a
@@ -135,6 +151,11 @@ function setupMediaDiagnostics() {
       hardwareVideoEncoding: enabledStates.has(videoEncode),
       videoEncode,
       gpu,
+      linuxVideoAcceleration: {
+        requested: requestedLinuxVideoAcceleration || 'off',
+        acceleratedVideoEncoderRequested: process.platform === 'linux'
+          && requestedLinuxVideoAcceleration === 'vaapi',
+      },
     };
   });
 }

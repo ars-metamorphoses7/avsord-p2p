@@ -9,10 +9,12 @@ import {
   evaluateCaptureAdaptation,
   initialCaptureAdaptation,
   initialPlaybackBufferAdaptation,
+  isSoftwareH264Encoder,
   normalizeScreenShareProfileId,
   safeVideoSenderScale,
   screenCaptureConstraints,
   screenShareEncodingBitrate,
+  screenShareCodecOrder,
   screenSharePlaybackBuffer,
 } from '../src/media/screenShareProfiles.js';
 
@@ -30,6 +32,50 @@ test('picker exposes only performance and quality automatic modes', () => {
   assert.equal(SCREEN_SHARE_PROFILES.quality.frameRate, 30);
   assert.deepEqual(SCREEN_SHARE_PROFILES.performance.adaptationFrameRates, [60, 30, 20, 15]);
   assert.deepEqual(SCREEN_SHARE_PROFILES.quality.adaptationFrameRates, [30, 20, 15]);
+});
+
+test('codec policy keeps H.264 first when hardware encoding is available', () => {
+  assert.deepEqual(screenShareCodecOrder('performance', {
+    hardwareVideoEncoding: true,
+    videoEncode: 'enabled',
+  }), ['video/H264', 'video/VP9', 'video/VP8']);
+});
+
+test('codec policy avoids OpenH264 when the runtime reports software-only encoding', () => {
+  assert.deepEqual(screenShareCodecOrder('performance', {
+    hardwareVideoEncoding: false,
+    videoEncode: 'disabled_software',
+  }), ['video/VP8', 'video/H264', 'video/VP9']);
+});
+
+test('software codec policy can be overridden by the benchmark matrix', () => {
+  assert.deepEqual(screenShareCodecOrder('quality', {
+    hardwareVideoEncoding: false,
+    videoEncode: 'disabled_software',
+  }), ['video/VP8', 'video/H264', 'video/VP9']);
+  assert.deepEqual(screenShareCodecOrder('quality', {
+    hardwareVideoEncoding: false,
+    videoEncode: 'disabled_software',
+    preferredSoftwareCodec: 'VP8',
+  }), ['video/VP8', 'video/H264', 'video/VP9']);
+});
+
+test('actual H.264 implementation overrides an optimistic GPU capability probe', () => {
+  assert.equal(isSoftwareH264Encoder({
+    codec: { mimeType: 'video/H264' },
+    encoderImplementation: 'OpenH264',
+    powerEfficientEncoder: false,
+  }), true);
+  assert.equal(isSoftwareH264Encoder({
+    codec: { mimeType: 'video/H264' },
+    encoderImplementation: 'VaapiVideoEncoder',
+    powerEfficientEncoder: true,
+  }), false);
+  assert.equal(isSoftwareH264Encoder({
+    codec: { mimeType: 'video/VP8' },
+    encoderImplementation: 'libvpx',
+    powerEfficientEncoder: false,
+  }), false);
 });
 
 test('performance mode lowers native capture cost before the encoder', async () => {
@@ -639,8 +685,33 @@ test('temporal recovery waits for capacity headroom for the richer level', () =>
 test('sender bitrate recovers gradually instead of following noisy estimates in bursts', async () => {
   const sender = fakeSender();
   sender.parameters.encodings[0].maxBitrate = 2_000_000;
+  sender.parameters.encodings[0].maxFramerate = 60;
   await adaptVideoSender(sender, 'performance', 1, { availableOutgoingBitrate: 20_000_000 });
-  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_200_000);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_800_000);
+});
+
+test('sender coalesces bitrate-only recovery updates to avoid keyframe churn', async () => {
+  const sender = fakeSender();
+  await configureVideoSender(sender, 'performance', 1);
+  sender.parameters.encodings[0].maxBitrate = 2_000_000;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 20_000_000,
+    allowBitrateIncrease: false,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_000_000);
+});
+
+test('structural recovery applies its matching bitrate despite the coalescing window', async () => {
+  const sender = fakeSender();
+  sender.parameters.encodings[0].maxBitrate = 2_000_000;
+  sender.parameters.encodings[0].scaleResolutionDownBy = 2;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 10_000_000,
+    adaptationScale: 4 / 3,
+    allowBitrateIncrease: false,
+  });
+  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 4 / 3);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 4_500_000);
 });
 
 test('spatial rollback restores its safe measured bitrate without a long quality ramp', async () => {

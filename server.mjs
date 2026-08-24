@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { createScreenSfu } from './sfu-server.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const distRoot = join(root, 'dist');
@@ -166,10 +167,17 @@ function broadcastRooms() {
   for (const socket of sockets) send(socket, payload);
 }
 
+const screenSfu = createScreenSfu({
+  send,
+  broadcast,
+  roomForSocket: (socket) => rooms.get(socket.roomId),
+});
+
 function leaveRoom(socket) {
   if (!socket.roomId || !socket.peerId) return;
   const room = rooms.get(socket.roomId);
   if (!room) return;
+  screenSfu.closeSocket(socket);
   room.members.delete(socket.peerId);
   broadcast(room, { type: 'peer-left', roomId: room.id, peerId: socket.peerId, count: room.members.size });
   // Salas criadas continuam disponíveis no diretório mesmo quando ficam vazias.
@@ -226,6 +234,11 @@ wss.on('connection', (socket) => {
     try {
       message = JSON.parse(raw.toString());
     } catch {
+      return;
+    }
+
+    if (message.type === 'sfu-request') {
+      void screenSfu.handleMessage(socket, message);
       return;
     }
 
@@ -389,5 +402,7 @@ wss.on('connection', (socket) => {
 server.listen(port, host, () => {
   console.log(`JUMP signaling server listening on ${host}:${port}`);
 });
+
+server.on('close', () => { void screenSfu.close(); });
 
 export { server, wss };

@@ -48,6 +48,7 @@ import { useScreenShare } from './hooks/useScreenShare.js';
 import { playTransmissionSound } from './media/callSounds.js';
 import { normalizeScreenShareProfileId } from './media/screenShareProfiles.js';
 import { usePeerMesh } from './webrtc/usePeerMesh.js';
+import { useScreenSfu } from './webrtc/useScreenSfu.js';
 
 const INITIAL_QUERY = new URLSearchParams(window.location.search);
 const DEFAULT_ROOM_ID = INITIAL_QUERY.get('room') || 'jump-house';
@@ -1367,7 +1368,9 @@ function App() {
 
   const sendSignal = useCallback((payload) => {
     const socket = wsRef.current;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify(payload));
+    return true;
   }, []);
 
   const rememberContact = useCallback((peer, overrides = {}) => {
@@ -1909,6 +1912,7 @@ function App() {
     requestPeerNegotiation,
     setPeerPlaybackProfile,
     setPeerScreenDelivery,
+    setPeerScreenTransport,
     setVideoEncodingProfile,
   } = usePeerMesh({
     peerConnectionsRef,
@@ -1930,7 +1934,30 @@ function App() {
   setPeerPlaybackProfileRef.current = setPeerPlaybackProfile;
   setPeerScreenDeliveryRef.current = setPeerScreenDelivery;
 
+  const screenSfuViewerCount = peers.reduce((count, peer) => (
+    remoteCallStates[peer.peerId]?.inCall === true ? count + 1 : count
+  ), 0);
+  const {
+    handleScreenSfuSignal,
+    resetScreenSfu,
+    setSfuConsumerWatching,
+    syncScreenSfuRoom,
+  } = useScreenSfu({
+    inCall,
+    isSharing,
+    onError: setPermissionError,
+    peerConnectionsRef,
+    remoteStreamsRef,
+    screenStreamRef,
+    sendSignal,
+    setPeerScreenTransport,
+    setRemoteStreams,
+    videoProfileRef,
+    viewerCount: screenSfuViewerCount,
+  });
+
   const handleSignalMessage = useCallback(async (message) => {
+    if (handleScreenSfuSignal(message)) return;
     if (message.type === 'hello') {
       peerIdRef.current = message.peerId;
       return;
@@ -1948,6 +1975,7 @@ function App() {
     }
     if (message.type === 'room-state') {
       const nextPeers = Array.isArray(message.peers) ? message.peers : [];
+      const screenSfuReset = resetScreenSfu();
       // A signaling reconnect gives this client a new peer id. Rebuild every
       // leg of the mesh because the other participants already discarded the
       // connections associated with the previous socket.
@@ -1968,7 +1996,9 @@ function App() {
       // fresh peer from answering a sync request with only the two system
       // events that are inserted while the room-state packet is processed.
       void loadRoomMessages(message.roomId).finally(() => {
-        if (roomIdRef.current === message.roomId) nextPeers.forEach((peer) => createPeerConnection(peer.peerId, true));
+        if (roomIdRef.current !== message.roomId) return;
+        nextPeers.forEach((peer) => createPeerConnection(peer.peerId, true));
+        void screenSfuReset.then(() => syncScreenSfuRoom());
       });
       return;
     }
@@ -1997,6 +2027,7 @@ function App() {
       const remainingRooms = Array.isArray(message.rooms) ? message.rooms : [];
       setRooms(remainingRooms);
       if (message.roomId === roomIdRef.current) {
+        void resetScreenSfu();
         forgetVisitedRoom(message.roomId);
         await removeRoomMessages(message.roomId);
         forgetRoomPassword(message.roomId);
@@ -2076,7 +2107,7 @@ function App() {
     }
     if (message.type !== 'signal') return;
     await handlePeerSignal(message.from, message.data);
-  }, [addRoomEvent, closeAllPeers, closePeer, createPeerConnection, handlePeerSignal, loadRoomMessages, rememberContact]);
+  }, [addRoomEvent, closeAllPeers, closePeer, createPeerConnection, handlePeerSignal, handleScreenSfuSignal, loadRoomMessages, rememberContact, resetScreenSfu, syncScreenSfuRoom]);
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -2115,6 +2146,7 @@ function App() {
         socket.onclose = () => {
           if (wsRef.current === socket) wsRef.current = null;
           setSignalStatus('offline');
+          void resetScreenSfu();
           peersRef.current.forEach((peer) => rememberContact(peer, { connected: false, status: 'offline', lastSeen: Date.now() }));
           setPeers((current) => current.map((peer) => ({ ...peer, connected: false, status: 'offline' })));
           scheduleReconnect();
@@ -2136,7 +2168,7 @@ function App() {
       screenStreamRef.current?.getTracks().forEach((track) => track.stop());
       screenAudioSessionRef.current = null;
     };
-  }, [closeAllPeers, handleSignalMessage, rememberContact, sendSignal]);
+  }, [closeAllPeers, handleSignalMessage, rememberContact, resetScreenSfu, sendSignal]);
 
   useEffect(() => {
     void loadRoomMessages(roomIdRef.current);
@@ -2506,7 +2538,8 @@ function App() {
     if (channel?.readyState === 'open') {
       try { sendDataChannelPacket(channel, { type: 'stream-watch', roomId: roomIdRef.current, watching: nextWatching }); } catch { /* Local pause still saves decode work. */ }
     }
-  }, [remoteStreams]);
+    void setSfuConsumerWatching(peerId, nextWatching);
+  }, [remoteStreams, setSfuConsumerWatching]);
 
   const openParticipantVolumes = useCallback((event, person) => {
     if (person.self) return;

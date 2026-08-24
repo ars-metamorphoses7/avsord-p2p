@@ -79,6 +79,7 @@ export const SCREEN_SHARE_PROFILES = {
 };
 
 export const SCREEN_SHARE_ADAPT_INTERVAL_MS = 1_500;
+export const SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS = 6_000;
 
 const ENCODER_DOWNSCALE_OBSERVATION_SAMPLES = 3;
 const ENCODER_DOWNSCALE_MIN_DELIVERY_GAIN = 0.08;
@@ -399,15 +400,28 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   // Capacity recovery remains deliberately gradual.
   const materialCapacityDrop = targetBitrate < previousBitrate * 0.90;
   const spatialQualityRecovery = adaptationScale < currentScale - 0.01;
-  const nextBitrate = targetBitrate < previousBitrate
-    ? (transportPressure || materialCapacityDrop ? targetBitrate : previousBitrate)
+  let nextBitrate = targetBitrate < previousBitrate
+    // Do not reset the encoder for every small estimator wobble. Severe or
+    // material drops remain immediate; sub-10% pressure is absorbed by the
+    // existing transport headroom until the estimate proves a real collapse.
+    ? (severeTransportPressure || materialCapacityDrop ? targetBitrate : previousBitrate)
     : spatialQualityRecovery && !transportPressure
       // A rolled-back spatial trial restores many more pixels at once. The
       // target is already capped to 78% of measured capacity, so restore its
       // matching bitrate atomically instead of creating a multi-sample quality
       // ramp whose changing cap looks like transport oscillation.
       ? targetBitrate
-      : Math.min(targetBitrate, Math.round(previousBitrate * 1.10));
+      // Recovery updates are coalesced by the caller. A larger step at that
+      // lower cadence preserves the old recovery time without asking
+      // OpenH264/driver encoders for a keyframe every adaptation sample.
+      : Math.min(targetBitrate, Math.round(previousBitrate * 1.40));
+  const structuralChange = Math.abs(currentScale - adaptationScale) >= 0.01
+    || Number(encoding.maxFramerate) !== targetFrameRate
+    || parameters.degradationPreference !== profile.degradationPreference;
+  if (!structuralChange && nextBitrate > previousBitrate
+      && diagnostics.allowBitrateIncrease === false) {
+    nextBitrate = previousBitrate;
+  }
   const sameParameters = Math.abs(previousBitrate - nextBitrate) < 50_000
     && Math.abs(currentScale - adaptationScale) < 0.01
     && Number(encoding.maxFramerate) === targetFrameRate
@@ -975,15 +989,43 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   };
 }
 
-export function preferVideoCodecs(transceiver, profileId) {
-  if (!transceiver?.setCodecPreferences || !globalThis.RTCRtpSender?.getCapabilities) return;
+export function screenShareCodecOrder(profileId, capabilities = {}) {
   const profile = screenShareProfile(profileId);
+  const videoEncode = String(capabilities.videoEncode || '').toLowerCase();
+  const softwareOnly = capabilities.hardwareVideoEncoding === false
+    || videoEncode === 'disabled_software';
+  if (!softwareOnly) return [...profile.codecOrder];
+  const requested = String(capabilities.preferredSoftwareCodec || '').toUpperCase();
+  const preferred = ['VP8', 'VP9', 'H264'].includes(requested)
+    ? `video/${requested}`
+    // libvpx VP8 avoided OpenH264's keyframe/pacer stalls while retaining more
+    // FPS than VP9 on the software-only Intel/Linux benchmark. Hardware paths
+    // continue to prefer H.264 above.
+    : 'video/VP8';
+  return [preferred, ...['video/H264', 'video/VP9', 'video/VP8'].filter((codec) => codec !== preferred)];
+}
+
+export function isSoftwareH264Encoder({
+  codec,
+  encoderImplementation,
+  powerEfficientEncoder,
+} = {}) {
+  const mimeType = typeof codec === 'string' ? codec : codec?.mimeType;
+  return /h264/i.test(String(mimeType || ''))
+    && (powerEfficientEncoder === false
+      || /openh264|ffmpeg|software/i.test(String(encoderImplementation || '')));
+}
+
+export function preferVideoCodecs(transceiver, profileId, capabilities = {}) {
+  if (!transceiver?.setCodecPreferences || !globalThis.RTCRtpSender?.getCapabilities) return;
   const codecs = globalThis.RTCRtpSender.getCapabilities('video')?.codecs || [];
-  const order = new Map(profile.codecOrder.map((mimeType, index) => [mimeType.toLowerCase(), index]));
+  const codecOrder = screenShareCodecOrder(profileId, capabilities);
+  const order = new Map(codecOrder.map((mimeType, index) => [mimeType.toLowerCase(), index]));
   const sorted = [...codecs].sort((left, right) => {
     const leftRank = order.get(left.mimeType?.toLowerCase()) ?? 99;
     const rightRank = order.get(right.mimeType?.toLowerCase()) ?? 99;
     return leftRank - rightRank;
   });
   if (sorted.length) transceiver.setCodecPreferences(sorted);
+  return codecOrder;
 }
