@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import {
   Circle,
@@ -832,6 +833,54 @@ function IconButton({ label, children, className = '', onClick, active = false, 
   );
 }
 
+function ExpandableChatImage({ alt, label = 'imagem', src }) {
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!expanded) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setExpanded(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [expanded]);
+
+  const toggleExpanded = (event) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    setExpanded((current) => !current);
+  };
+
+  return (
+    <>
+      <img
+        className="message-expandable-image"
+        src={src}
+        alt={alt}
+        loading="lazy"
+        draggable="false"
+        onDoubleClick={toggleExpanded}
+        title="clique duas vezes para ampliar"
+      />
+      {expanded && createPortal(
+        <div className="image-viewer-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setExpanded(false); }}>
+          <section className="image-viewer-dialog" role="dialog" aria-modal="true" aria-label={`Imagem ampliada: ${label}`} onMouseDown={(event) => event.stopPropagation()}>
+            <div className="image-viewer-titlebar">
+              <div className="image-viewer-titlebar-label"><img src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong>JUMP — {label}</strong></div>
+              <button type="button" className="win98-close-control" aria-label="Fechar imagem ampliada" onClick={() => setExpanded(false)}>×</button>
+            </div>
+            <div className="image-viewer-canvas" onDoubleClick={toggleExpanded} title="clique duas vezes para restaurar">
+              <img src={src} alt={alt} draggable="false" />
+            </div>
+            <div className="image-viewer-status">duplo clique para restaurar · Esc para fechar</div>
+          </section>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 function MessageAttachment({ message }) {
   const attachment = message?.attachment;
   const [objectUrl, setObjectUrl] = useState('');
@@ -870,7 +919,7 @@ function MessageAttachment({ message }) {
   if (message?.image) {
     return (
       <div className="message-attachment">
-        <img src={message.image} alt={message.imageName ? `Imagem enviada: ${message.imageName}` : 'Imagem enviada'} loading="lazy" />
+        <ExpandableChatImage src={message.image} alt={message.imageName ? `Imagem enviada: ${message.imageName}` : 'Imagem enviada'} label={message.imageName || 'imagem'} />
         {message.imageName && <small>{message.imageName}</small>}
       </div>
     );
@@ -890,7 +939,7 @@ function MessageAttachment({ message }) {
   }
   return (
     <div className={`message-attachment ${isImage ? 'message-image-attachment' : 'message-file-attachment'}`}>
-      {isImage ? <img src={objectUrl} alt={`Imagem enviada: ${label}`} loading="lazy" /> : <a className="message-file-link" href={objectUrl} download={label}><Download size={17} /><strong>{label}</strong><small>{formatFileSize(attachment.size)}</small></a>}
+      {isImage ? <ExpandableChatImage src={objectUrl} alt={`Imagem enviada: ${label}`} label={label} /> : <a className="message-file-link" href={objectUrl} download={label}><Download size={17} /><strong>{label}</strong><small>{formatFileSize(attachment.size)}</small></a>}
       {isImage && <a className="message-file-download" href={objectUrl} download={label}><Download size={13} /> baixar {label}</a>}
     </div>
   );

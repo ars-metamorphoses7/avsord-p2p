@@ -23,7 +23,11 @@ export const SCREEN_SHARE_PROFILES = {
     // links, however, 360p60 can still miss every deadline. A temporal ladder
     // is the final safety valve instead of letting the stream freeze forever.
     adaptationFrameRates: [60, 30, 20, 15],
-    softwareSafeStart: { level: 1, temporalLevel: 0 },
+    // OpenH264 on low-end devices often needs several spatial trials before it
+    // finally concedes that 60 FPS is unsustainable. Starting at 540p30 avoids
+    // 10–15 seconds of visible rate-control collapse while recovery can still
+    // probe 60 FPS after the measured encoder proves it has headroom.
+    softwareSafeStart: { level: 1, temporalLevel: 1 },
     minimumEncodedHeight: 360,
     minimumAdaptiveBitrate: 300_000,
     playbackBufferMs: 140,
@@ -36,6 +40,10 @@ export const SCREEN_SHARE_PROFILES = {
     recoverySamples: 10,
     startupSamples: 3,
     networkPressureSamples: 4,
+    packetPressureSamples: 2,
+    packetLossPressureRatio: 0.02,
+    retransmissionPressureRatio: 0.08,
+    packetSendDelayPressureMs: 12,
   },
   quality: {
     id: 'quality',
@@ -50,7 +58,7 @@ export const SCREEN_SHARE_PROFILES = {
     codecOrder: ['video/H264', 'video/VP9', 'video/VP8'],
     adaptationScales: [1, 1.2, 1.5],
     adaptationFrameRates: [30, 20, 15],
-    softwareSafeStart: { level: 2, temporalLevel: 0 },
+    softwareSafeStart: { level: 2, temporalLevel: 1 },
     minimumEncodedHeight: 360,
     minimumAdaptiveBitrate: 300_000,
     playbackBufferMs: 180,
@@ -63,6 +71,10 @@ export const SCREEN_SHARE_PROFILES = {
     recoverySamples: 14,
     startupSamples: 3,
     networkPressureSamples: 6,
+    packetPressureSamples: 3,
+    packetLossPressureRatio: 0.015,
+    retransmissionPressureRatio: 0.06,
+    packetSendDelayPressureMs: 16,
   },
 };
 
@@ -357,12 +369,25 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
     adaptationScale,
   );
   const available = Number(diagnostics.availableOutgoingBitrate) || 0;
+  const packetLossRatio = Math.max(0, Number(diagnostics.packetLossRatio) || 0);
+  const retransmissionRatio = Math.max(0, Number(diagnostics.retransmissionRatio) || 0);
+  const averagePacketSendDelayMs = Math.max(0, Number(diagnostics.averagePacketSendDelayMs) || 0);
+  const packetsDiscardedOnSend = Math.max(0, Number(diagnostics.packetsDiscardedOnSend) || 0);
+  const transportPressure = packetLossRatio >= profile.packetLossPressureRatio
+    || retransmissionRatio >= profile.retransmissionPressureRatio
+    || averagePacketSendDelayMs >= profile.packetSendDelayPressureMs
+    || packetsDiscardedOnSend > 0;
+  const severeTransportPressure = packetLossRatio >= profile.packetLossPressureRatio * 2.5
+    || retransmissionRatio >= profile.retransmissionPressureRatio * 1.75
+    || averagePacketSendDelayMs >= profile.packetSendDelayPressureMs * 2
+    || packetsDiscardedOnSend > 0;
   // Leave transport headroom for Opus, retransmissions and signaling. A
   // flashing/full-motion screen otherwise fills the queue and loses frames.
   // `availableOutgoingBitrate` already belongs to this peer connection. The
   // mesh factor above accounts for the other uploads; dividing it by the peer
   // count again needlessly starves each individual receiver.
-  const networkBudget = available > 0 ? Math.round(available * 0.78) : resolutionBudget;
+  const transportHeadroom = severeTransportPressure ? 0.64 : transportPressure ? 0.70 : 0.78;
+  const networkBudget = available > 0 ? Math.round(available * transportHeadroom) : resolutionBudget;
   const targetBitrate = available > 0
     ? Math.max(32_000, Math.min(resolutionBudget, networkBudget))
     : resolutionBudget;
@@ -372,9 +397,17 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   // playout. A falling estimate is a hard ceiling: stepping down over several
   // samples leaves seconds of excess data queued and is perceived as a freeze.
   // Capacity recovery remains deliberately gradual.
+  const materialCapacityDrop = targetBitrate < previousBitrate * 0.90;
+  const spatialQualityRecovery = adaptationScale < currentScale - 0.01;
   const nextBitrate = targetBitrate < previousBitrate
-    ? targetBitrate
-    : Math.min(targetBitrate, Math.round(previousBitrate * 1.15));
+    ? (transportPressure || materialCapacityDrop ? targetBitrate : previousBitrate)
+    : spatialQualityRecovery && !transportPressure
+      // A rolled-back spatial trial restores many more pixels at once. The
+      // target is already capped to 78% of measured capacity, so restore its
+      // matching bitrate atomically instead of creating a multi-sample quality
+      // ramp whose changing cap looks like transport oscillation.
+      ? targetBitrate
+      : Math.min(targetBitrate, Math.round(previousBitrate * 1.10));
   const sameParameters = Math.abs(previousBitrate - nextBitrate) < 50_000
     && Math.abs(currentScale - adaptationScale) < 0.01
     && Number(encoding.maxFramerate) === targetFrameRate
@@ -465,6 +498,10 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const encodeRatio = encodeEma / encodeBudgetMs;
   const limitation = diagnostics.qualityLimitationReason || 'none';
   const availableOutgoingBitrate = Number(diagnostics.availableOutgoingBitrate) || 0;
+  const packetLossRatio = Math.max(0, Number(diagnostics.packetLossRatio) || 0);
+  const retransmissionRatio = Math.max(0, Number(diagnostics.retransmissionRatio) || 0);
+  const averagePacketSendDelayMs = Math.max(0, Number(diagnostics.averagePacketSendDelayMs) || 0);
+  const packetsDiscardedOnSend = Math.max(0, Number(diagnostics.packetsDiscardedOnSend) || 0);
   const requiredBitrate = screenShareEncodingBitrate(
     profile.id,
     diagnostics.peerCount,
@@ -476,10 +513,19 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const networkHeadroomRatio = availableOutgoingBitrate > 0 && requiredBitrate > 0
     ? availableOutgoingBitrate / requiredBitrate
     : null;
-  const networkPressure = networkHeadroomRatio !== null && networkHeadroomRatio < 0.92;
+  const capacityPressure = networkHeadroomRatio !== null && networkHeadroomRatio < 0.92;
+  const packetLossPressure = packetLossRatio >= profile.packetLossPressureRatio;
+  const retransmissionPressure = retransmissionRatio >= profile.retransmissionPressureRatio;
+  const pacerPressure = averagePacketSendDelayMs >= profile.packetSendDelayPressureMs;
+  const discardedPacketPressure = packetsDiscardedOnSend > 0;
+  const transportPressure = packetLossPressure || retransmissionPressure || pacerPressure || discardedPacketPressure;
+  const networkPressure = capacityPressure || transportPressure;
   let networkSamples = networkPressure ? (Number(current.networkSamples) || 0) + 1 : 0;
+  const pressureSamplesRequired = discardedPacketPressure
+    ? 1
+    : transportPressure ? profile.packetPressureSamples : profile.networkPressureSamples;
   const actionableNetworkPressure = networkPressure
-    && networkSamples >= profile.networkPressureSamples;
+    && networkSamples >= pressureSamplesRequired;
   const recoveryScale = temporalLevel > 0
     ? profile.adaptationScales[current.level]
     : profile.adaptationScales[Math.max(0, current.level - 1)];
@@ -499,7 +545,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     : null;
   const networkRecoveryReady = current.level === 0 && temporalLevel === 0
     ? true
-    : networkRecoveryHeadroomRatio === null || networkRecoveryHeadroomRatio >= 1.12;
+    : !transportPressure && (networkRecoveryHeadroomRatio === null || networkRecoveryHeadroomRatio >= 1.12);
   const currentScaleForRecovery = profile.adaptationScales[current.level] || 1;
   const projectedRecoveryEncodeMs = encodeEma > 0
     ? encodeEma * ((currentScaleForRecovery / recoveryScale) ** 2)
@@ -544,7 +590,13 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     || (instantEncodeRatio > 1.08 && encodeRatio > 0.92);
   const moderatePressure = (fpsPipelinePressure
     && fpsRatio < Math.min(0.95, profile.pressureFpsRatio + 0.04))
-    || (instantEncodeRatio > 0.82 && encodeRatio > 0.76)
+    || (instantEncodeRatio > 0.82
+      && encodeRatio > 0.76
+      // High encoder utilization is not a failure while virtually every
+      // captured frame still meets its deadline. Treat it as pressure only
+      // after delivery starts slipping, a deadline is missed, or Chromium
+      // explicitly reports CPU limitation.
+      && (encoderDeliveryRatio < 0.94 || instantEncodeRatio > 1 || limitation === 'cpu'))
     || limitation === 'cpu';
   const stable = (encodedFps !== null || captureFps !== null)
     && !sourceLimited
@@ -584,6 +636,22 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   else if (networkPressure) bottleneck = 'network';
   else if (moderatePressure || severePressure) bottleneck = 'encoder';
   else if (stable) bottleneck = 'healthy';
+  const lastSpatialTrialWasIneffective = downscaleEffectiveness.status === 'ineffective'
+    && downscaleEffectiveness.fromLevel === level
+    && downscaleEffectiveness.toLevel === level + 1;
+  const trialBaselineDelivery = numericFps(downscaleEffectiveness.baselineDeliveryRatio);
+  const trialBaselineEncodeRatio = numericFps(downscaleEffectiveness.baselineEncodeRatio);
+  const deliveryDeterioratedSinceTrial = trialBaselineDelivery !== null
+    && encoderDeliveryRatio < Math.min(0.85, trialBaselineDelivery - 0.08);
+  const encodeDeterioratedSinceTrial = trialBaselineEncodeRatio !== null
+    && instantEncodeRatio >= Math.max(1.08, trialBaselineEncodeRatio + 0.15);
+  // An ineffective spatial trial must not be retried on the same steady-state
+  // measurements every few seconds. That loop was itself a visible 540p/360p
+  // quality oscillation. Retry only after the encoder materially worsens;
+  // network pressure remains free to downshift independently.
+  const spatialRetryBlocked = lastSpatialTrialWasIneffective
+    && !deliveryDeterioratedSinceTrial
+    && !encodeDeterioratedSinceTrial;
 
   // A spatial downscale is a hypothesis, not a permanent conclusion. Compare
   // three post-change samples against the pre-change delivery/cost baseline.
@@ -629,6 +697,14 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
         ? null
         : (encoderTrial.baselineEncodeTimeMs - observedEncodeTimeMs)
           / encoderTrial.baselineEncodeTimeMs;
+      const baselineEncodeRatio = encoderTrial.baselineEncodeBudgetMs > 0
+        && encoderTrial.baselineEncodeTimeMs !== null
+        ? encoderTrial.baselineEncodeTimeMs / encoderTrial.baselineEncodeBudgetMs
+        : null;
+      const observedEncodeRatio = encoderTrial.baselineEncodeBudgetMs > 0
+        && observedEncodeTimeMs !== null
+        ? observedEncodeTimeMs / encoderTrial.baselineEncodeBudgetMs
+        : null;
       downscaleEffectiveness = {
         status: 'observing',
         triggerReason: encoderTrial.triggerReason,
@@ -644,6 +720,8 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
         baselineEncodeTimeMs: encoderTrial.baselineEncodeTimeMs,
         observedEncodeTimeMs,
         encodeCostReductionRatio,
+        baselineEncodeRatio,
+        observedEncodeRatio,
       };
 
       if (encoderTrial.samplesObserved < ENCODER_DOWNSCALE_OBSERVATION_SAMPLES) {
@@ -661,16 +739,26 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
           && deliveryGain >= ENCODER_DOWNSCALE_MIN_DELIVERY_GAIN;
         const materialEncodeCostReduction = encodeCostReductionRatio !== null
           && encodeCostReductionRatio >= ENCODER_DOWNSCALE_MIN_COST_REDUCTION;
+        // Lower CPU cost alone does not justify throwing away readable screen
+        // detail when the old level already met its frame deadline. Keep the
+        // spatial reduction only when it restores delivery or rescues an
+        // encoder that was actually taking longer than one frame budget.
+        const encodeDeadlineRescued = materialEncodeCostReduction
+          && baselineEncodeRatio !== null
+          && baselineEncodeRatio >= 1
+          && observedEncodeRatio !== null
+          && observedEncodeRatio <= 0.90;
         const comparableSamples = encoderTrial.deliverySamples
           + encoderTrial.encodeTimeSamples;
         const effective = deliveryRecovered
           || materialDeliveryGain
-          || materialEncodeCostReduction;
+          || encodeDeadlineRescued;
         downscaleEffectiveness = {
           ...downscaleEffectiveness,
           status: effective ? 'effective' : comparableSamples > 0 ? 'ineffective' : 'unproven',
           materialDeliveryGain,
           materialEncodeCostReduction,
+          encodeDeadlineRescued,
         };
         poorSamples = 0;
         stableSamples = 0;
@@ -745,25 +833,33 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     cooldownSamples = 2;
     bottleneck = 'network';
   } else if (severePressure) {
-    if (level < profile.adaptationScales.length - 1) {
+    if (level < profile.adaptationScales.length - 1 && !spatialRetryBlocked) {
       level += profile.severeStep;
       reason = fpsPipelinePressure ? 'encoder-fps-severe' : 'encode-severe';
       downscaleTriggerReason = reason;
     } else if (nextTemporalLevel < profile.adaptationFrameRates.length - 1) {
-      nextTemporalLevel += 1;
-      reason = 'encoder-temporal-severe';
+      if (level === profile.adaptationScales.length - 1) {
+        nextTemporalLevel += 1;
+        reason = 'encoder-temporal-severe';
+      } else {
+        reason = 'encoder-downscale-ineffective-hold';
+      }
     }
     poorSamples = 0;
     stableSamples = 0;
     cooldownSamples = 2;
   } else if (moderatePressure && poorSamples >= profile.pressureSamples) {
-    if (level < profile.adaptationScales.length - 1) {
+    if (level < profile.adaptationScales.length - 1 && !spatialRetryBlocked) {
       level += 1;
       reason = limitation === 'cpu' ? 'cpu' : instantEncodeRatio > 0.82 ? 'encode' : 'encoder-fps';
       downscaleTriggerReason = reason;
     } else if (nextTemporalLevel < profile.adaptationFrameRates.length - 1) {
-      nextTemporalLevel += 1;
-      reason = 'encoder-temporal';
+      if (level === profile.adaptationScales.length - 1) {
+        nextTemporalLevel += 1;
+        reason = 'encoder-temporal';
+      } else {
+        reason = 'encoder-downscale-ineffective-hold';
+      }
     }
     poorSamples = 0;
     stableSamples = 0;
@@ -801,6 +897,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
       samplesObserved: 0,
       baselineDeliveryRatio: hasPipelineFps ? encoderDeliveryRatio : null,
       baselineEncodeTimeMs: measuredEncodeSample,
+      baselineEncodeBudgetMs: encodeBudgetMs,
       deliverySum: 0,
       deliverySamples: 0,
       encodeTimeSum: 0,
@@ -846,6 +943,17 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     bottleneck,
     sourceLimited,
     networkPressure,
+    capacityPressure,
+    transportPressure,
+    packetLossPressure,
+    retransmissionPressure,
+    pacerPressure,
+    discardedPacketPressure,
+    packetLossRatio,
+    retransmissionRatio,
+    averagePacketSendDelayMs,
+    packetsDiscardedOnSend,
+    pressureSamplesRequired,
     networkSustained: actionableNetworkPressure,
     networkHeadroomRatio,
     requiredBitrate,

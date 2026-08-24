@@ -22,6 +22,8 @@ function fixture({
   jitter = 0,
   remoteJitter = 0,
   rtt = 0,
+  packetsLost = 0,
+  retransmittedPacketsSent = 0,
 } = {}) {
   return new Map([
     ['codec-in', {
@@ -34,7 +36,7 @@ function fixture({
     }],
     ['remote-in', {
       id: 'remote-in', type: 'remote-inbound-rtp', kind: 'video', timestamp,
-      localId: 'out', ssrc: 42, packetsLost: 0, jitter: remoteJitter, roundTripTime: 0,
+      localId: 'out', ssrc: 42, packetsLost, jitter: remoteJitter, roundTripTime: 0,
     }],
     ['source', {
       id: 'source', type: 'media-source', kind: 'video', timestamp,
@@ -64,6 +66,7 @@ function fixture({
       totalPacketSendDelay: encodeTime, qpSum: encodeQp,
       framesPerSecond: reportedFps, frameWidth: 854, frameHeight: 480,
       qualityLimitationReason: 'none', retransmittedBytesSent: 0,
+      retransmittedPacketsSent,
       targetBitrate: 0, encoderImplementation: 'ExternalEncoder', powerEfficientEncoder: true,
     }],
   ]);
@@ -129,6 +132,8 @@ test('derives stage FPS, bitrates, time per frame, QP and jitter from deltas', (
     jitter: 0.012,
     remoteJitter: 0.007,
     rtt: 0.025,
+    packetsLost: 2,
+    retransmittedPacketsSent: 4,
   }), previous);
 
   assert.equal(current.sequence, 1);
@@ -146,6 +151,8 @@ test('derives stage FPS, bitrates, time per frame, QP and jitter from deltas', (
   assert.equal(current.derived.inboundJitterMs, 12);
   assert.equal(current.derived.remoteInboundJitterMs, 7);
   assert.equal(current.derived.currentRoundTripTimeMs, 25);
+  assert.equal(current.derived.packetLossRatio, 2 / 42);
+  assert.equal(current.derived.retransmissionRatio, 4 / 42);
 });
 
 test('returns zero rates for unchanged counters and null averages without new frames', () => {

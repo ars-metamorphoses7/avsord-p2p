@@ -263,6 +263,7 @@ O harness `tests/screen-share-benchmark.e2e.cjs`:
 - usa uma fixture determinística 1920×1080/60;
 - alterna a ordem dos perfis entre repetições;
 - coleta stats a cada 250 ms;
+- resume perda, retransmissão, atraso do pacer, descartes e distribuições/CV de bitrate e FPS;
 - mede apresentação com `requestVideoFrameCallback`;
 - suporta pressão WebGL sintética;
 - suporta fonte externa Chrome ou ffplay para exercitar WGC entre processos;
@@ -391,6 +392,21 @@ PresentMon.exe `
 ```
 
 Usar [GPUView](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/using-gpuview) quando houver stalls, cópia cross-adapter ou device contention.
+
+### 5.9 Perda, fila e limitação de banda reproduzíveis
+
+O harness pode aplicar condições somente ao renderer remetente via Chrome DevTools Protocol, sem alterar `lo`, Wi-Fi, VPN ou outras conexões do sistema:
+
+```powershell
+$env:JUMP_BENCH_PACKET_LOSS_PERCENT = '3'
+$env:JUMP_BENCH_PACKET_QUEUE_LENGTH = '128'
+$env:JUMP_BENCH_NETWORK_LATENCY_MS = '20'
+$env:JUMP_BENCH_UPLOAD_KBPS = '5000'
+$env:JUMP_BENCH_OUTPUT = 'artifacts/bench-network-3pct.json'
+npm run test:stream-benchmark
+```
+
+`JUMP_BENCH_DOWNLOAD_KBPS=0` e `JUMP_BENCH_UPLOAD_KBPS=0` significam ilimitado. `JUMP_BENCH_PACKET_REORDERING=1` ativa reordenação. O relatório registra se usou `Network.emulateNetworkConditionsByRule` ou o fallback legado. O contador `packetsLost` pode continuar zero quando o emulador descarta antes do ponto contado pelo `RTCStats`; nesse caso, a pressão continua observável pela capacidade estimada, atraso do pacer, cadência e adaptação, mas o relatório não deve afirmar uma taxa de perda efetivamente recebida.
 
 ## 6. Resultados empíricos
 
@@ -579,6 +595,22 @@ Ensaio pendente da seção 6.6/6.7 executado em 2026-08-23 na branch `feat/strea
 **Conclusão medida:** nas dez rodadas válidas, `encoderImplementation` permaneceu `MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)` com escala de adaptação 1 — nenhum fallback para software sob tela inteira isolada + contenção de GPU. Os dois trade-offs voltaram a aparecer simultaneamente: ~1,96× a cadência apresentada no desempenho e fidelidade objetivamente maior na qualidade (ΔSSIM ≈ +0,0063, ΔPSNR ≈ +3,7 dB). Isto fecha o item "repetir com tela inteira isolada e carga GPU"; o gate de jogos reais (Forza/Ultrakill com PresentMon) e a matriz de hardware continuam pendentes.
 
 Correção no harness durante esta rodada: `measureVisualQuality` passava a exigir o parâmetro `captureSource` (fonte do `desktopCapturer`), mas `measureRun` não o repassava — o benchmark padrão abortava com `TypeError` no fim da primeira rodada medida. O `fixtureSource` agora atravessa `measureRun` até `measureVisualQuality`.
+
+### 6.10 Estabilidade de pacotes e início seguro em OpenH264
+
+Rodada diagnóstica local em Linux/OpenH264, três repetições de 12 s por versão, fixture WebGL idêntica (`JUMP_BENCH_GPU_LOAD=32`):
+
+| Mediana | Antes | Depois | Variação |
+|---|---:|---:|---:|
+| CV do bitrate enviado | 0,368 | 0,236 | −35,7% |
+| Intervalo apresentado p95 | 79,3 ms | 66,7 ms | −15,9% |
+| FPS apresentados | 26,89 | 27,28 | +1,5% |
+| Resolução final | 660×360 | 960×524 | +2,12× pixels |
+| QP médio | 37,28 | 32,49 | −4,79 |
+
+A fixture ficou abaixo de 90% da cadência declarada sob essa carga, portanto estas seis rodadas são A/B diagnósticas, não gate de release. Uma rodada sem carga artificial foi válida e preservou 960×524/30, sem perda, retransmissão ou congelamento. A variabilidade residual do bitrate acompanha o conteúdo VBR e o OpenH264; o benchmark agora separa isso de mudanças no `maxBitrate`, atraso do pacer e troca de nível.
+
+Com 3% de perda solicitada pelo emulador e fila de 128 pacotes, a rodada final também terminou sem congelamentos. O `RTCStats` reportou zero perda/retransmissão porque os descartes ocorreram antes desses contadores, mas houve redução de capacidade estimada/pressão de pacer e o controlador chegou ao ponto seguro 360p/15 sem interromper a reprodução. O gate real de WAN continua exigindo duas máquinas e uma matriz Intel/AMD/NVIDIA.
 
 ## 7. Decisão: manter M150; não ativar a feature
 
