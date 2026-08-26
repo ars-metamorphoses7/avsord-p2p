@@ -18,6 +18,15 @@ function pcm16ToAudioBuffer(context, bytes) {
   return buffer;
 }
 
+function copyAudioBytes(previous, incoming) {
+  const current = incoming instanceof Uint8Array ? incoming : new Uint8Array(incoming || 0);
+  if (!previous?.byteLength) return current;
+  const combined = new Uint8Array(previous.byteLength + current.byteLength);
+  combined.set(previous);
+  combined.set(current, previous.byteLength);
+  return combined;
+}
+
 export async function createDesktopAudioBridge(desktop, target) {
   if (!desktop?.startDesktopAudio || !desktop?.onDesktopAudioData) {
     throw new Error('Captura de áudio por aplicativo indisponível nesta plataforma.');
@@ -29,10 +38,26 @@ export async function createDesktopAudioBridge(desktop, target) {
   const destination = context.createMediaStreamDestination();
   let nextStart = context.currentTime + START_BUFFER_SECONDS;
   let stopped = false;
+  let pendingBytes = new Uint8Array(0);
 
   const unsubscribe = desktop.onDesktopAudioData((chunk) => {
     if (stopped || context.state === 'closed') return;
-    const buffer = pcm16ToAudioBuffer(context, chunk);
+    // stdout/IPC chunks are not guaranteed to end on a stereo 16-bit frame.
+    // Keep the incomplete tail so Linux's parec stream cannot lose samples at
+    // every chunk boundary.
+    const incoming = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk || 0);
+    const total = pendingBytes.byteLength + incoming.byteLength;
+    const completeBytes = total - (total % (Int16Array.BYTES_PER_ELEMENT * CHANNELS));
+    if (completeBytes <= 0) {
+      pendingBytes = copyAudioBytes(pendingBytes, incoming);
+      return;
+    }
+    const merged = completeBytes === incoming.byteLength && !pendingBytes.byteLength
+      ? incoming
+      : copyAudioBytes(pendingBytes, incoming);
+    const audioBytes = merged.slice(0, completeBytes);
+    pendingBytes = merged.slice(completeBytes);
+    const buffer = pcm16ToAudioBuffer(context, audioBytes);
     if (!buffer) return;
     const source = context.createBufferSource();
     source.buffer = buffer;

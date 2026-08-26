@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('jumpDesktop', {
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.send('window:close'),
+  writeClipboardText: (value) => ipcRenderer.invoke('clipboard:write-text', value),
   getDesktopSources: () => ipcRenderer.invoke('desktop:sources'),
   getMediaCapabilities: () => ipcRenderer.invoke('media:capabilities'),
   startDesktopAudio: (target) => ipcRenderer.invoke('desktop:audio-start', target),

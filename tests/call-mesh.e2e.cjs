@@ -7,6 +7,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const port = 18_000 + Math.floor(Math.random() * 1_000);
 const room = `mesh-e2e-${Date.now()}`;
 let signalingProcess;
+let copiedInvite = '';
 const windows = [];
 
 app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
@@ -130,6 +131,15 @@ async function run() {
     signal: 'http://10.0.0.7:8787',
     lastVisitedAt: Date.now(),
   }]);
+  ipcMain.handle('invite:url', (_event, roomId, signal = '') => {
+    const query = new URLSearchParams({ room: String(roomId || '') });
+    if (signal) query.set('signal', String(signal));
+    return `jump://join?${query.toString()}`;
+  });
+  ipcMain.handle('clipboard:write-text', (_event, value) => {
+    copiedInvite = String(value || '');
+    return { ok: true };
+  });
   ipcMain.handle('media:capabilities', () => ({ hardwareAcceleration: true, hardwareVideoEncoding: true, videoEncode: 'enabled' }));
   ipcMain.handle('desktop:audio-start', () => ({ ok: true, mode: 'process', processId: process.pid }));
   ipcMain.handle('desktop:audio-stop', () => ({ ok: true }));
@@ -157,6 +167,10 @@ async function run() {
   await waitFor(() => Promise.all(windows.map((window) => count(window, '.signal-badge.is-connected'))).then((values) => values.every(Boolean)), 'três clientes sinalizados');
   await waitFor(() => Promise.all(windows.map((window) => window.webContents.executeJavaScript("document.querySelector('.signal-badge')?.textContent.includes('3 conectados')"))).then((values) => values.every(Boolean)), 'sala com três participantes');
   await waitFor(() => Promise.all(windows.map((window) => window.webContents.executeJavaScript("document.querySelector('.recent-room-list-row')?.textContent.includes('Sala Recente')"))).then((values) => values.every(Boolean)), 'catálogo de salas recentes persistidas');
+
+  await click(windows[0], '.invite-button');
+  await waitFor(() => copiedInvite.includes(room), 'link da sala copiado para a área de transferência');
+  await waitFor(() => windows[0].webContents.executeJavaScript("document.querySelector('.invite-button')?.textContent.includes('copiado')"), 'confirmação visual do link copiado');
 
   for (const window of windows) {
     await click(window, 'button[aria-label="Abrir chamada"]');

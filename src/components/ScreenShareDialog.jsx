@@ -14,7 +14,7 @@ function SourceCard({ source, selected, onSelect, audio = false }) {
       </span>
       <span className="screen-share-source-copy">
         <strong>{source.name || (source.type === 'screen' ? 'tela inteira' : 'janela')}</strong>
-        <small>{audio ? (source.type === 'screen' ? 'todo o áudio da tela' : source.processName || 'áudio deste aplicativo') : (source.type === 'screen' ? 'tela inteira' : 'janela')}</small>
+        <small>{audio ? (source.audioLabel || (source.type === 'screen' ? 'todo o áudio da tela' : source.processName || 'áudio deste aplicativo')) : (source.type === 'screen' ? 'tela inteira' : 'janela')}</small>
       </span>
       {selected && <Check className="screen-share-selected-check" size={15} aria-hidden="true" />}
     </button>
@@ -42,9 +42,10 @@ export function ScreenShareDialog({
   onCancel,
 }) {
   const selectableSources = tab === 'audio'
-    ? sources.filter((source) => source.type === 'screen' || source.processId)
+    ? sources.filter((source) => source.audioSupported)
     : sources;
   const resolvedAudio = includeAudio ? (syncAudio ? (videoSource?.audioSupported ? videoSource : null) : audioSource) : null;
+  const canSyncAudio = !videoSource || videoSource.audioSupported;
   const canConfirm = Boolean(videoSource && (!includeAudio || resolvedAudio));
 
   return (
@@ -61,7 +62,7 @@ export function ScreenShareDialog({
         </div>
 
         <div className="screen-share-body">
-          <p>{tab === 'video' ? 'Escolha uma janela ou tela inteira para transmitir.' : 'Escolha o aplicativo cujo áudio será transmitido.'}</p>
+          <p>{tab === 'video' ? 'Escolha uma janela ou tela inteira para transmitir.' : 'Escolha a fonte cujo áudio será transmitido.'}</p>
           {loading ? (
             <div className="screen-share-empty">procurando telas, janelas e aplicativos...</div>
           ) : selectableSources.length ? (
@@ -98,7 +99,7 @@ export function ScreenShareDialog({
 
           <div className="screen-share-audio-options">
             <label><input type="checkbox" checked={includeAudio} onChange={(event) => onIncludeAudio(event.target.checked)} /><span>incluir áudio</span></label>
-            <label className={!includeAudio ? 'is-disabled' : ''}><input type="checkbox" checked={syncAudio} disabled={!includeAudio} onChange={(event) => onSyncAudio(event.target.checked)} /><Link2 size={13} /><span>vincular áudio à janela</span></label>
+            <label className={!includeAudio || !canSyncAudio ? 'is-disabled' : ''}><input type="checkbox" checked={syncAudio} disabled={!includeAudio || !canSyncAudio} onChange={(event) => onSyncAudio(event.target.checked)} /><Link2 size={13} /><span>vincular áudio à janela</span></label>
             {includeAudio && <small>{syncAudio ? 'a fonte de áudio acompanha o vídeo automaticamente' : 'escolha a fonte no botão “janela de áudio”'}</small>}
           </div>
         </div>

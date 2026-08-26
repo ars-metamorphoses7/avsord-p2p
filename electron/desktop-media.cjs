@@ -1,5 +1,6 @@
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+const { startLinuxSystemAudio } = require('./linux-system-audio.cjs');
 
 const execFileAsync = promisify(execFile);
 
@@ -69,7 +70,12 @@ function setupDesktopMedia({ desktopCapturer, ipcMain, session }) {
           appIcon: source.appIcon?.toDataURL?.() || '',
           processId: Number(processInfo?.Id) || 0,
           processName: processInfo?.ProcessName || '',
-          audioSupported: process.platform === 'win32' && (type === 'screen' || Number(processInfo?.Id) > 0),
+          audioSupported: process.platform === 'win32'
+            ? (type === 'screen' || Number(processInfo?.Id) > 0)
+            : process.platform === 'linux' && type === 'screen',
+          audioLabel: process.platform === 'linux' && type === 'screen'
+            ? 'áudio do sistema (PulseAudio/PipeWire)'
+            : '',
         };
       });
       allowedProcessIds = new Set(mapped.map((source) => source.processId).filter(Boolean));
@@ -80,33 +86,40 @@ function setupDesktopMedia({ desktopCapturer, ipcMain, session }) {
     }
   });
 
-  ipcMain.handle('desktop:audio-start', (event, target = {}) => {
+  ipcMain.handle('desktop:audio-start', async (event, target = {}) => {
     stopProcessAudio();
-    if (process.platform !== 'win32') {
-      return { ok: false, message: 'Áudio por aplicativo está disponível no Windows 10 ou mais recente.' };
-    }
     const processId = Number(target.processId) || 0;
     const systemAudio = target.type === 'screen' || target.systemAudio === true;
-    if (!systemAudio && !allowedProcessIds.has(processId)) {
+    if (process.platform === 'linux' && !systemAudio) {
+      return { ok: false, message: 'No Linux, selecione uma tela para transmitir o áudio do sistema.' };
+    }
+    if (process.platform !== 'win32' && process.platform !== 'linux') {
+      return { ok: false, message: 'Captura de áudio da tela não está disponível nesta plataforma.' };
+    }
+    if (process.platform === 'win32' && !systemAudio && !allowedProcessIds.has(processId)) {
       return { ok: false, message: 'O aplicativo de áudio selecionado não está mais disponível.' };
     }
+    captureWebContents = event.sender;
+    const sendChunk = (chunk) => {
+      if (!captureWebContents || captureWebContents.isDestroyed()) return;
+      captureWebContents.send('desktop:audio-data', chunk);
+    };
     try {
-      // Loaded only on supported systems so Linux packages never initialize a
-      // Windows native binary.
+      if (process.platform === 'linux') {
+        processAudioCapture = await startLinuxSystemAudio(sendChunk);
+        return { ok: true, mode: 'system', backend: 'pulseaudio-pipewire', processId: 0 };
+      }
+      // Loaded only on Windows so Linux packages never initialize a Windows
+      // native binary. loopback-capture uses WASAPI process/system loopback.
       const { LoopbackCapture } = require('loopback-capture');
       processAudioCapture = new LoopbackCapture();
-      captureWebContents = event.sender;
-      const sendChunk = (chunk) => {
-        if (!captureWebContents || captureWebContents.isDestroyed()) return;
-        captureWebContents.send('desktop:audio-data', chunk);
-      };
       if (systemAudio) processAudioCapture.startSystemAudio(sendChunk);
       else processAudioCapture.start(processId, true, sendChunk);
       return { ok: true, mode: systemAudio ? 'system' : 'process', processId };
     } catch (error) {
       stopProcessAudio();
-      console.error('JUMP process audio capture failed:', error);
-      return { ok: false, message: error?.message || 'Não foi possível capturar o áudio do aplicativo.' };
+      console.error('JUMP desktop audio capture failed:', error);
+      return { ok: false, message: error?.message || 'Não foi possível capturar o áudio selecionado.' };
     }
   });
   ipcMain.handle('desktop:audio-stop', () => {

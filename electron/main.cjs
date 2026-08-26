@@ -1,4 +1,4 @@
-const { app, BrowserWindow, desktopCapturer, ipcMain, session } = require('electron');
+const { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, session } = require('electron');
 const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -68,6 +68,13 @@ function setupWindowControls() {
     return { maximized: mainWindow.isMaximized() };
   });
   ipcMain.on('window:close', () => mainWindow?.close());
+}
+
+function setupClipboard() {
+  ipcMain.handle('clipboard:write-text', (_event, value) => {
+    clipboard.writeText(String(value ?? ''));
+    return { ok: true };
+  });
 }
 
 function preferredNetworkAddress() {
@@ -240,6 +247,7 @@ if (!hasSingleInstanceLock) {
     setupRoomSessionPersistence();
     setupUpdater();
     setupWindowControls();
+    setupClipboard();
     setupMediaDiagnostics();
     desktopMedia = setupDesktopMedia({ desktopCapturer, ipcMain, session });
     await createWindow();
