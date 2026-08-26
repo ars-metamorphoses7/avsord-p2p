@@ -241,16 +241,31 @@ export function useScreenShare({
 
   const chooseVideoSource = useCallback((source) => {
     setVideoSource(source);
-    if (syncAudio) setAudioSource(source.audioSupported ? source : null);
+    if (!source.audioSupported) {
+      // Linux can capture the system output monitor, but not arbitrary window
+      // audio through the PulseAudio/PipeWire fallback. Switch to manual audio
+      // selection so the dialog can offer a supported screen source instead
+      // of leaving the user with an impossible automatic selection.
+      setSyncAudio(false);
+      setAudioSource(null);
+      return;
+    }
+    if (syncAudio) setAudioSource(source);
   }, [syncAudio]);
 
   const changeIncludeAudio = useCallback((enabled) => {
     setIncludeAudio(enabled);
     if (!enabled) setTab('video');
     else if (syncAudio && videoSource?.audioSupported) setAudioSource(videoSource);
+    else if (videoSource && !videoSource.audioSupported) setSyncAudio(false);
   }, [syncAudio, videoSource]);
 
   const changeSyncAudio = useCallback((enabled) => {
+    if (enabled && videoSource && !videoSource.audioSupported) {
+      setSyncAudio(false);
+      setAudioSource(null);
+      return;
+    }
     setSyncAudio(enabled);
     if (enabled) {
       setAudioSource(videoSource?.audioSupported ? videoSource : null);
