@@ -156,6 +156,9 @@ export function useScreenShare({
       if (withAudio) {
         if (!desktopCapture || !selectedAudio) throw new Error('Escolha uma fonte de áudio válida.');
         audioBridge = await createDesktopAudioBridge(desktop, {
+          audioMode: selectedAudio.audioMode || '',
+          audioStreamId: selectedAudio.audioStreamId || '',
+          audioTarget: selectedAudio.audioTarget || '',
           processId: selectedAudio.processId || 0,
           type: selectedAudio.type,
           systemAudio: selectedAudio.type === 'screen',
@@ -242,10 +245,9 @@ export function useScreenShare({
   const chooseVideoSource = useCallback((source) => {
     setVideoSource(source);
     if (!source.audioSupported) {
-      // Linux can capture the system output monitor, but not arbitrary window
-      // audio through the PulseAudio/PipeWire fallback. Switch to manual audio
-      // selection so the dialog can offer a supported screen source instead
-      // of leaving the user with an impossible automatic selection.
+      // Linux can capture a window's PipeWire/PulseAudio stream when it is
+      // active. If there is no stream, switch to manual audio selection so the
+      // dialog can offer a supported source instead of an impossible link.
       setSyncAudio(false);
       setAudioSource(null);
       return;
