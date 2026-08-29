@@ -6,3 +6,4 @@ release-test/
 .env
 *.log
 artifacts/
+electron/build-metadata.json

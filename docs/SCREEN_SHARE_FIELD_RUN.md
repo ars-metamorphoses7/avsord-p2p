@@ -27,24 +27,18 @@ Diagnostics desabilitado não cria o polling adicional de áudio. Não há polli
 
 ## Build única para sender e receivers
 
-Na máquina que produzirá o field run:
+Para um field run distribuído, atualize todos os participantes para a mesma versão instalada do JUMP. Em cada computador:
 
-```powershell
-npm ci
-npm run desktop:dir
+```text
+JUMP
+→ Configurações
+→ Field Run Diagnostics
+→ Ativar e reiniciar
 ```
 
-O `electron-builder --dir` produz a pasta unpacked em `release/win-unpacked` no Windows. Envie essa pasta, ou um ZIP dela, aos amigos. Eles não precisam instalar Node, npm ou clonar o repositório.
+O indicador `FIELD DIAGNOSTICS ON` confirma o modo durante a chamada. A tela de configurações mostra a versão, o commit embutido e a pasta dos JSONs; use **Abrir pasta de diagnóstico** depois do run. Não é necessário instalar Node, npm nem definir variáveis de ambiente nos PCs dos receivers.
 
-No sender e em cada receiver, a partir da pasta unpacked:
-
-```powershell
-$env:JUMP_STREAM_DIAGNOSTICS = '1'
-$env:JUMP_APP_COMMIT = '<COMMIT_DO_FIELD_RUN>'
-.\JUMP.exe
-```
-
-O valor de `JUMP_APP_COMMIT` deve identificar os mesmos bits enviados. O diretório final aparece uma vez no log:
+Para desenvolvimento e automação, o override `JUMP_STREAM_DIAGNOSTICS=1` continua suportado. O diretório final também aparece uma vez no log:
 
 ```text
 [screen-share-diagnostics] enabled; output: <path>
@@ -79,7 +73,7 @@ Para B1/B2, carregue completamente o mesmo jogo antes de iniciar o share, manten
 
 ## Checklist por run
 
-1. Inicie sender e receiver com a mesma pasta unpacked e as variáveis de diagnóstico.
+1. Confirme que sender e receiver usam a mesma versão instalada e exibem `FIELD DIAGNOSTICS ON` durante a chamada.
 2. Entre na mesma sala por mesh/P2P e confirme áudio normal antes do share.
 3. Selecione `performance`, whole screen e `include audio ON`.
 4. Comece a gravação manual do run no instante em que o share estiver ativo; aguarde toda a duração.

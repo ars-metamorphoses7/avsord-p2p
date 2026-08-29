@@ -1,6 +1,6 @@
 {
   "name": "jump-p2p",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "private": true,
   "type": "module",
   "description": "JUMP — salas privadas com mídia WebRTC e compartilhamento de tela híbrido",
@@ -14,6 +14,7 @@
   "build": {
     "appId": "com.jumpnetwork.app",
     "productName": "JUMP",
+    "executableName": "JUMP",
     "asar": true,
     "asarUnpack": [
       "node_modules/mediasoup/worker/out/Release/**/*"
@@ -28,6 +29,12 @@
       "sfu-server.mjs",
       "package.json",
       "src/assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "electron/build-metadata.json",
+        "to": "build-metadata.json"
+      }
     ],
     "artifactName": "JUMP-${version}-${os}-${arch}.${ext}",
     "protocols": [
@@ -64,13 +71,16 @@
   },
   "scripts": {
     "dev": "concurrently -k \"node server.mjs\" \"vite\"",
-    "build": "vite build",
+    "generate:build-metadata": "node scripts/generate-build-metadata.cjs",
+    "validate:release-version": "node scripts/validate-release-version.cjs",
+    "build": "npm run generate:build-metadata && vite build",
     "test:call": "npm run build && electron tests/call-mesh.e2e.cjs",
     "test:diagnostics": "npm run build && electron tests/screen-share-diagnostics.e2e.cjs",
     "test:update": "node --test tests/update-controller.test.cjs",
     "test:persistence": "node --test tests/rooms-persistence.test.cjs tests/room-session-store.test.cjs",
-    "test:media": "node --test tests/screen-share-profiles.test.js tests/screen-share-telemetry.test.js tests/screen-share-diagnostics.test.js tests/image-quality.test.cjs tests/call-sounds.test.js tests/sfu-server.test.js",
+    "test:media": "node --test tests/screen-share-profiles.test.js tests/screen-share-telemetry.test.js tests/screen-share-diagnostics.test.js tests/field-run-diagnostics.test.cjs tests/field-run-diagnostics-ui.test.js tests/image-quality.test.cjs tests/call-sounds.test.js tests/sfu-server.test.js",
     "test:gpu": "electron tests/gpu-capabilities.e2e.cjs",
+    "test:field-smoke": "node tests/field-run-packaged-smoke.cjs",
     "test:stream-benchmark": "npm run build && electron tests/screen-share-benchmark.e2e.cjs",
     "test:desktop-audio": "node --test tests/desktop-audio-native.test.cjs",
     "desktop": "electron .",

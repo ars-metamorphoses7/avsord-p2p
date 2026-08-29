@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('jumpDesktop', {
   getDesktopSources: () => ipcRenderer.invoke('desktop:sources'),
   getMediaCapabilities: () => ipcRenderer.invoke('media:capabilities'),
   getStreamDiagnosticsConfig: () => ipcRenderer.invoke('stream-diagnostics:config'),
+  relaunchStreamDiagnostics: (action) => ipcRenderer.invoke('stream-diagnostics:relaunch', action),
+  openStreamDiagnosticsDirectory: () => ipcRenderer.invoke('stream-diagnostics:open-directory'),
   writeScreenShareDiagnosticsArtifact: (artifact) => ipcRenderer.invoke('stream-diagnostics:write', artifact),
   startDesktopAudio: (target) => ipcRenderer.invoke('desktop:audio-start', target),
   stopDesktopAudio: () => ipcRenderer.invoke('desktop:audio-stop'),

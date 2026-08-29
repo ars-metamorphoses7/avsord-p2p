@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, screen, session } = require('electron');
+const { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, screen, session, shell } = require('electron');
 const os = require('node:os');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -8,6 +8,14 @@ const { createRoomSessionStore, normalizeRoomId, normalizeSignalOrigin } = requi
 const { createUpdateController } = require('./update-controller.cjs');
 const { setupDesktopMedia } = require('./desktop-media.cjs');
 const { applyWindowsScreenCapturePolicy } = require('./media-runtime-config.cjs');
+const {
+  normalizeDiagnosticsEnvironment,
+  openFieldDiagnosticsDirectory,
+  readBuildMetadata,
+  requestFieldDiagnosticsRelaunch,
+  resolveDiagnosticsBuildInfo,
+  resolveStreamDiagnosticsActivation,
+} = require('./field-run-diagnostics.cjs');
 
 let mainWindow;
 let signalingServer;
@@ -15,9 +23,17 @@ let desktopMedia;
 let roomSessionStore;
 let signalingPort = Number(process.env.PORT || 8787);
 let pendingDeepLink = process.argv.find((argument) => argument.startsWith('jump://')) || '';
-const streamDiagnosticsEnabled = String(process.env.JUMP_STREAM_DIAGNOSTICS || '').trim() === '1';
+const streamDiagnosticsActivation = resolveStreamDiagnosticsActivation();
+normalizeDiagnosticsEnvironment(streamDiagnosticsActivation);
+const streamDiagnosticsEnabled = streamDiagnosticsActivation.enabled;
 let diagnosticsWriteSequence = 0;
+let buildMetadataPromise;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+// Kept for deterministic packaged smoke tests. It changes only Electron's
+// private user-data root and never enables diagnostics by itself.
+const requestedUserDataDirectory = String(process.env.JUMP_USER_DATA_DIR || '').trim();
+if (requestedUserDataDirectory) app.setPath('userData', requestedUserDataDirectory);
 
 // A fullscreen game makes the call window invisible. Chromium normally lowers
 // an invisible renderer's priority, which can starve desktop capture even when
@@ -162,6 +178,11 @@ async function readMediaDiagnosticsManifest() {
       scaleFactor: primary?.scaleFactor ?? null,
     };
   } catch { /* Display details are diagnostic-only. */ }
+  const buildInfo = resolveDiagnosticsBuildInfo({
+    appVersion: app.getVersion?.(),
+    commitOverride: process.env.JUMP_APP_COMMIT,
+    buildMetadata: await readEmbeddedBuildMetadata(),
+  });
   return {
     role: null,
     os: process.platform || null,
@@ -172,8 +193,8 @@ async function readMediaDiagnosticsManifest() {
     memoryBytes: Number(os.totalmem()) || null,
     electronVersion: process.versions.electron || null,
     chromiumVersion: process.versions.chrome || null,
-    appVersion: app.getVersion?.() || null,
-    appCommit: process.env.JUMP_APP_COMMIT || null,
+    appVersion: buildInfo.appVersion,
+    appCommit: buildInfo.appCommit,
     gpu,
     gpuFeatureStatus: featureStatus || null,
     hardwareAcceleration: app.isHardwareAccelerationEnabled(),
@@ -189,6 +210,16 @@ async function readMediaDiagnosticsManifest() {
         && String(process.env.JUMP_SCREEN_CAPTURE_BACKEND || '').trim().toLowerCase() === 'wgc',
     },
   };
+}
+
+function readEmbeddedBuildMetadata() {
+  if (!buildMetadataPromise) {
+    const runtimePath = app.isPackaged
+      ? path.join(process.resourcesPath, 'build-metadata.json')
+      : path.join(app.getAppPath(), 'electron', 'build-metadata.json');
+    buildMetadataPromise = readBuildMetadata(runtimePath);
+  }
+  return buildMetadataPromise;
 }
 
 function safeDiagnosticsPart(value, fallback = 'unknown') {
@@ -230,7 +261,7 @@ async function writeStreamDiagnosticsArtifact(artifact) {
 }
 
 function setupMediaDiagnostics() {
-  const outputDirectory = streamDiagnosticsEnabled ? streamDiagnosticsOutputDirectory() : null;
+  const outputDirectory = streamDiagnosticsOutputDirectory();
   if (streamDiagnosticsEnabled) {
     console.info(`[screen-share-diagnostics] enabled; output: ${outputDirectory}`);
   }
@@ -256,12 +287,27 @@ function setupMediaDiagnostics() {
       },
     };
   });
-  ipcMain.handle('stream-diagnostics:config', async () => ({
-    enabled: streamDiagnosticsEnabled,
-    outputDirectory,
-    environment: streamDiagnosticsEnabled ? await readMediaDiagnosticsManifest() : null,
-  }));
+  ipcMain.handle('stream-diagnostics:config', async () => {
+    const manifest = await readMediaDiagnosticsManifest();
+    return {
+      enabled: streamDiagnosticsEnabled,
+      activationSource: streamDiagnosticsActivation.activationSource,
+      outputDirectory,
+      appVersion: manifest.appVersion,
+      appCommit: manifest.appCommit,
+      environment: streamDiagnosticsEnabled ? manifest : null,
+    };
+  });
   ipcMain.handle('stream-diagnostics:write', (_event, artifact) => writeStreamDiagnosticsArtifact(artifact));
+  ipcMain.handle('stream-diagnostics:relaunch', (_event, action) => requestFieldDiagnosticsRelaunch({
+    app,
+    action,
+    activation: streamDiagnosticsActivation,
+  }));
+  ipcMain.handle('stream-diagnostics:open-directory', () => openFieldDiagnosticsDirectory({
+    outputDirectory,
+    openPath: (directory) => shell.openPath(directory),
+  }));
 }
 
 async function startSignalingServer() {

@@ -1,6 +1,8 @@
 # Diagnóstico opt-in de compartilhamento de tela
 
-O diagnóstico de screen share fica desativado por padrão. Para habilitá-lo em um field run, inicie o Electron com `JUMP_STREAM_DIAGNOSTICS=1`:
+O diagnóstico de screen share fica desativado por padrão. Na versão instalada do JUMP, abra **Configurações → Field Run Diagnostics** e clique em **Ativar e reiniciar**. O reinício adiciona o argumento interno `--jump-stream-diagnostics` uma única vez; para desligar, use **Desativar e reiniciar**.
+
+`JUMP_STREAM_DIAGNOSTICS=1` continua sendo o override para desenvolvimento, testes e automação. Quando essa variável vem do ambiente, a interface informa que o modo está forçado e não oferece uma falsa desativação:
 
 ```powershell
 $env:JUMP_STREAM_DIAGNOSTICS = '1'
@@ -24,7 +26,7 @@ Cada arquivo contém `schemaVersion`, o `runId` compartilhado, `role` (`sender` 
 
 O diagnóstico preserva apenas um identificador de fonte limitado e o tipo (`screen`, `window` etc.), além de perfil, constraints e configurações da track. Nome ou título arbitrário de janela/aplicação não é persistido no artefato.
 
-Quando habilitado, `stream-diagnostics:config` retorna `outputDirectory` com o caminho final dos JSONs, e o processo registra uma única linha de startup no formato `[screen-share-diagnostics] enabled; output: <path>`. A extensão de áudio apenas lê RTCStats na mesma cadência do field diagnostics; não coleta PCM, não grava áudio e não altera codecs, constraints, AEC, NS, AGC, jitter buffer, gain ou routing. Veja o protocolo físico completo em [`SCREEN_SHARE_FIELD_RUN.md`](./SCREEN_SHARE_FIELD_RUN.md).
+`stream-diagnostics:config` retorna `enabled`, `activationSource`, `outputDirectory`, `appVersion` e `appCommit`. O processo registra uma única linha de startup no formato `[screen-share-diagnostics] enabled; output: <path>`. A extensão de áudio apenas lê RTCStats na mesma cadência do field diagnostics; não coleta PCM, não grava áudio e não altera codecs, constraints, AEC, NS, AGC, jitter buffer, gain ou routing. Veja o protocolo físico completo em [`SCREEN_SHARE_FIELD_RUN.md`](./SCREEN_SHARE_FIELD_RUN.md).
 
 Para conferir o contrato localmente:
 

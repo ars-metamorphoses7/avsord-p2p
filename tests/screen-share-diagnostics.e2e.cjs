@@ -101,9 +101,25 @@ async function run() {
   const config = await sender.webContents.executeJavaScript('globalThis.jumpDesktop.getStreamDiagnosticsConfig()');
   const expectedOutputDirectory = path.join(userData, 'diagnostics', 'screen-share');
   if (!config.enabled || config.outputDirectory !== expectedOutputDirectory
+      || config.activationSource !== 'environment' || config.appVersion !== '1.0.24'
+      || config.appCommit !== 'diagnostics-integration-test'
       || !config.environment?.electronVersion || !config.environment?.display) {
-    throw new Error('A bridge de diagnóstico não retornou o manifesto de ambiente esperado.');
+    throw new Error(`A bridge de diagnóstico não retornou o manifesto de ambiente esperado: ${JSON.stringify(config)}`);
   }
+  const settingsBridgeReady = await sender.webContents.executeJavaScript(`Boolean(
+    globalThis.jumpDesktop?.relaunchStreamDiagnostics
+    && globalThis.jumpDesktop?.openStreamDiagnosticsDirectory
+  )`);
+  if (!settingsBridgeReady) throw new Error('A bridge de controles de Field Run Diagnostics não está disponível.');
+  await click(sender, 'button[aria-label="Configurações"]');
+  await waitFor(() => sender.webContents.executeJavaScript(`(() => {
+    const dialog = document.querySelector('.app-settings-dialog');
+    return dialog?.textContent.includes('Field Run Diagnostics')
+      && dialog.textContent.includes('Ativado — forçado pelo ambiente')
+      && dialog.textContent.includes('1.0.24')
+      && Boolean(dialog.querySelector('button[disabled]'));
+  })()`), 'configurações de Field Run Diagnostics');
+  await click(sender, 'button[aria-label="Fechar configurações"]');
 
   await waitFor(() => Promise.all([sender, receiver].map((window) => window.webContents.executeJavaScript(
     "document.querySelector('.signal-badge.is-connected')?.textContent.includes('conectados')",
@@ -115,6 +131,9 @@ async function run() {
   await waitFor(() => Promise.all([sender, receiver].map((window) => window.webContents.executeJavaScript(
     "Boolean(document.querySelector('.leave-button'))",
   ))).then((values) => values.every(Boolean)), 'clientes dentro da chamada');
+  await waitFor(() => Promise.all([sender, receiver].map((window) => window.webContents.executeJavaScript(
+    "document.querySelector('.field-diagnostics-indicator')?.textContent === 'FIELD DIAGNOSTICS ON'",
+  ))).then((values) => values.every(Boolean)), 'indicador visível de Field Run Diagnostics');
 
   await click(sender, 'button[aria-label="Compartilhar tela"]');
   await waitFor(() => sender.webContents.executeJavaScript("document.querySelectorAll('.screen-share-source').length > 0"), 'fontes de captura');
