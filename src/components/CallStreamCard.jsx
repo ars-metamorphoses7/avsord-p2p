@@ -17,7 +17,7 @@ function finiteMetric(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-export function MediaElement({ stream, muted = false, volume = 1, sinkId = '', className = '', showVideo }) {
+export function MediaElement({ stream, muted = false, volume = 1, sinkId = '', className = '', showVideo, diagnosticsSession = null }) {
   const mediaRef = useRef(null);
   const hasVideo = showVideo ?? Boolean(stream?.getVideoTracks?.().length);
 
@@ -33,7 +33,7 @@ export function MediaElement({ stream, muted = false, volume = 1, sinkId = '', c
     let videoFrameHandle = 0;
     let cancelled = false;
     const store = hasVideo ? telemetryStore() : null;
-    if (store && typeof media.requestVideoFrameCallback === 'function') {
+    if ((store || diagnosticsSession) && typeof media.requestVideoFrameCallback === 'function') {
       const streamId = stream.id || 'unknown-video-stream';
       // A MediaElement can unmount while a share is paused and later mount
       // again with the same MediaStream id. Start a new sampling session so
@@ -73,6 +73,19 @@ export function MediaElement({ stream, muted = false, volume = 1, sinkId = '', c
         record.last = sample;
         record.samples.push(sample);
         if (record.samples.length > 7_200) record.samples.shift();
+        diagnosticsSession?.recordRenderFrame({
+          streamId,
+          monotonicMs: now,
+          presentedFrames: sample.presentedFrames,
+          width: sample.width,
+          height: sample.height,
+          intervalMs: sample.intervalMs,
+          captureToCompositorMs: sample.captureToCompositorMs,
+          networkMs: sample.networkMs,
+          postReceiveMs: sample.postReceiveMs,
+          compositorLatenessMs: sample.compositorLatenessMs,
+          processingDurationMs: sample.processingDurationMs,
+        });
         videoFrameHandle = media.requestVideoFrameCallback(onVideoFrame);
       };
       videoFrameHandle = media.requestVideoFrameCallback(onVideoFrame);
@@ -85,7 +98,7 @@ export function MediaElement({ stream, muted = false, volume = 1, sinkId = '', c
       }
       media.removeEventListener('loadedmetadata', play);
     };
-  }, [stream, hasVideo, muted, sinkId, volume]);
+  }, [stream, hasVideo, muted, sinkId, volume, diagnosticsSession]);
 
   if (!stream) return null;
   const props = {
@@ -100,6 +113,7 @@ export function MediaElement({ stream, muted = false, volume = 1, sinkId = '', c
 
 export function CallStreamCard({
   avatar,
+  diagnosticsSession,
   hasVideo,
   isDeafened,
   isFocused,
@@ -164,7 +178,7 @@ export function CallStreamCard({
               '--stream-origin-y': `${streamZoom.originY}%`,
             }}
           >
-            <MediaElement stream={videoStream} muted sinkId={sinkId} className="call-stream-media" showVideo />
+            <MediaElement stream={videoStream} muted sinkId={sinkId} className="call-stream-media" showVideo diagnosticsSession={diagnosticsSession} />
           </div>
         ) : showPausedShare ? (
           <div className="call-stream-paused">

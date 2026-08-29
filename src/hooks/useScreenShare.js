@@ -5,6 +5,7 @@ import {
   screenCaptureConstraints,
   screenShareProfile,
 } from '../media/screenShareProfiles.js';
+import { createScreenShareRunContext, isScreenShareDiagnosticsEnabled } from '../media/screenShareDiagnostics.js';
 
 function streamTelemetryStore() {
   if (!new URLSearchParams(window.location.search).has('streamTelemetry')) return null;
@@ -28,6 +29,7 @@ export function useScreenShare({
   onShareStopped,
   replacePeerTrack,
   screenAudioSessionRef,
+  screenShareRunRef,
   screenStreamRef,
   setIsSharing,
   setPermissionError,
@@ -61,6 +63,7 @@ export function useScreenShare({
 
   const stopScreenShare = useCallback(() => {
     const wasSharing = Boolean(screenStreamRef.current);
+    const stoppedRun = screenShareRunRef.current;
     const telemetry = streamTelemetryStore();
     if (wasSharing && telemetry) telemetry.events.push({ type: 'capture-stopped', timestampMs: Date.now() });
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -71,8 +74,9 @@ export function useScreenShare({
     void replacePeerTrack('videoSender', fallbackTrack);
     setIsSharing(false);
     announceCallState({ sharing: false, sharingAudio: false, sharingProfile: '' });
-    if (wasSharing) onShareStopped?.();
-  }, [announceCallState, cameraStreamRef, cancelPicker, onShareStopped, replacePeerTrack, screenStreamRef, setIsSharing, stopAudioSession]);
+    screenShareRunRef.current = null;
+    if (wasSharing) onShareStopped?.(stoppedRun);
+  }, [announceCallState, cameraStreamRef, cancelPicker, onShareStopped, replacePeerTrack, screenAudioSessionRef, screenShareRunRef, screenStreamRef, setIsSharing, stopAudioSession]);
 
   const startScreenShare = useCallback(async ({ videoSource: selectedVideo = null, audioSource: selectedAudio = null, includeAudio: withAudio = false, profileId: selectedProfile = profileId } = {}) => {
     const desktop = globalThis.jumpDesktop;
@@ -91,6 +95,7 @@ export function useScreenShare({
     let videoStream = null;
     let audioBridge = null;
     let videoAttachAttempted = false;
+    let runContext = null;
     try {
       const profile = screenShareProfile(selectedProfile);
       videoStream = desktopCapture
@@ -122,6 +127,21 @@ export function useScreenShare({
           constraintError = [constraintError, `even-dimensions: ${dimensionNormalization.error}`].filter(Boolean).join('; ');
         }
       }
+      if (isScreenShareDiagnosticsEnabled()) {
+        runContext = createScreenShareRunContext({
+          profileId: profile.id,
+          source: selectedVideo ? {
+            id: String(selectedVideo.id || '').slice(0, 120),
+            type: selectedVideo.type || 'desktop-picker',
+          } : { id: '', type: 'browser-picker' },
+          requestedConstraints: screenCaptureConstraints(profile.id, selectedVideo?.id || ''),
+          trackSettings: safeTrackSnapshot(videoTrack, 'getSettings'),
+          trackConstraints: safeTrackSnapshot(videoTrack, 'getConstraints'),
+          constraintError,
+          dimensionNormalization,
+        });
+      }
+      screenShareRunRef.current = runContext;
       const telemetry = streamTelemetryStore();
       if (telemetry) {
         const requestedConstraints = screenCaptureConstraints(profile.id, selectedVideo?.id || '');
@@ -183,12 +203,18 @@ export function useScreenShare({
         if (screenStreamRef.current === videoStream) stopScreenShare();
       };
       setIsSharing(true);
-      announceCallState({ sharing: true, sharingAudio: withAudio, sharingProfile: profile.id });
+      announceCallState({
+        sharing: true,
+        sharingAudio: withAudio,
+        sharingProfile: profile.id,
+        ...(runContext ? { screenShareRunId: runContext.runId, screenShareRunStartedAtMs: runContext.startedAtMs } : {}),
+      });
       onShareStarted?.();
       return true;
     } catch (error) {
       videoStream?.getTracks().forEach((track) => track.stop());
       if (screenStreamRef.current === videoStream) screenStreamRef.current = null;
+      if (screenShareRunRef.current?.runId === runContext?.runId) screenShareRunRef.current = null;
       if (videoAttachAttempted) {
         // replacePeerTrack fans out to every mesh peer. If one peer fails after
         // others already switched, put all successful peers back on the camera
@@ -204,7 +230,7 @@ export function useScreenShare({
       if (error?.name !== 'AbortError') setPermissionError(error?.message || 'Não foi possível iniciar o compartilhamento de tela.');
       return false;
     }
-  }, [announceCallState, cameraStreamRef, cancelPicker, mediaCapabilities, onShareStarted, profileId, replacePeerTrack, screenAudioSessionRef, screenStreamRef, setIsSharing, setPermissionError, setProfileId, setVideoEncodingProfile, stopScreenShare]);
+  }, [announceCallState, cameraStreamRef, cancelPicker, mediaCapabilities, onShareStarted, profileId, replacePeerTrack, screenAudioSessionRef, screenShareRunRef, screenStreamRef, setIsSharing, setPermissionError, setProfileId, setVideoEncodingProfile, stopScreenShare]);
 
   const toggleScreenShare = useCallback(async () => {
     if (screenStreamRef.current) {

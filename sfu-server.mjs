@@ -236,7 +236,10 @@ export function createScreenSfu({ send, broadcast, roomForSocket }) {
         producerId: owner.producer.id,
         rtpCapabilities: data.rtpCapabilities,
         paused: true,
-        appData: { producerPeerId: owner.socket.peerId },
+        appData: {
+          producerPeerId: owner.socket.peerId,
+          screenShareRunId: owner.producer.appData?.screenShareRunId || null,
+        },
       });
       state.consumers.set(consumer.id, consumer);
       consumer.on('transportclose', () => {
