@@ -6,6 +6,7 @@ const { autoUpdater } = require('electron-updater');
 const { createRoomSessionStore, normalizeRoomId, normalizeSignalOrigin } = require('./room-session-store.cjs');
 const { createUpdateController } = require('./update-controller.cjs');
 const { setupDesktopMedia } = require('./desktop-media.cjs');
+const { applyWindowsScreenCapturePolicy } = require('./media-runtime-config.cjs');
 
 let mainWindow;
 let signalingServer;
@@ -43,15 +44,7 @@ if (process.platform === 'linux' && requestedLinuxVideoAcceleration === 'vaapi')
 // windows (where it is the safe occlusion-independent capturer), but use DDA
 // for an entire display. The environment escape hatch makes driver-specific
 // regressions recoverable without a new build.
-const requestedScreenCaptureBackend = String(process.env.JUMP_SCREEN_CAPTURE_BACKEND || '').trim().toLowerCase();
-if (process.platform === 'win32' && requestedScreenCaptureBackend !== 'wgc') {
-  const disabledFeatures = new Set(app.commandLine.getSwitchValue('disable-features')
-    .split(',')
-    .map((feature) => feature.trim())
-    .filter(Boolean));
-  disabledFeatures.add('AllowWgcScreenCapturer');
-  app.commandLine.appendSwitch('disable-features', [...disabledFeatures].join(','));
-}
+applyWindowsScreenCapturePolicy(app.commandLine);
 
 function publishWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
