@@ -24,10 +24,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate tag version
+        run: npm run validate:release-version
+        env:
+          JUMP_RELEASE_TAG: ${{ github.ref_name }}
+
       - name: Build and publish installer
         run: npm run desktop:build:win -- --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JUMP_BUILD_COMMIT: ${{ github.sha }}
 
   linux:
     runs-on: ubuntu-latest
@@ -44,7 +50,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate tag version
+        run: npm run validate:release-version
+        env:
+          JUMP_RELEASE_TAG: ${{ github.ref_name }}
+
       - name: Build and publish Linux packages
         run: npm run desktop:build:linux -- --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JUMP_BUILD_COMMIT: ${{ github.sha }}

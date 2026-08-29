@@ -1,11 +1,21 @@
-const { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, session } = require('electron');
+const { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, screen, session, shell } = require('electron');
 const os = require('node:os');
+const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { autoUpdater } = require('electron-updater');
 const { createRoomSessionStore, normalizeRoomId, normalizeSignalOrigin } = require('./room-session-store.cjs');
 const { createUpdateController } = require('./update-controller.cjs');
 const { setupDesktopMedia } = require('./desktop-media.cjs');
+const { applyWindowsScreenCapturePolicy } = require('./media-runtime-config.cjs');
+const {
+  normalizeDiagnosticsEnvironment,
+  openFieldDiagnosticsDirectory,
+  readBuildMetadata,
+  requestFieldDiagnosticsRelaunch,
+  resolveDiagnosticsBuildInfo,
+  resolveStreamDiagnosticsActivation,
+} = require('./field-run-diagnostics.cjs');
 
 let mainWindow;
 let signalingServer;
@@ -13,7 +23,17 @@ let desktopMedia;
 let roomSessionStore;
 let signalingPort = Number(process.env.PORT || 8787);
 let pendingDeepLink = process.argv.find((argument) => argument.startsWith('jump://')) || '';
+const streamDiagnosticsActivation = resolveStreamDiagnosticsActivation();
+normalizeDiagnosticsEnvironment(streamDiagnosticsActivation);
+const streamDiagnosticsEnabled = streamDiagnosticsActivation.enabled;
+let diagnosticsWriteSequence = 0;
+let buildMetadataPromise;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+// Kept for deterministic packaged smoke tests. It changes only Electron's
+// private user-data root and never enables diagnostics by itself.
+const requestedUserDataDirectory = String(process.env.JUMP_USER_DATA_DIR || '').trim();
+if (requestedUserDataDirectory) app.setPath('userData', requestedUserDataDirectory);
 
 // A fullscreen game makes the call window invisible. Chromium normally lowers
 // an invisible renderer's priority, which can starve desktop capture even when
@@ -43,15 +63,7 @@ if (process.platform === 'linux' && requestedLinuxVideoAcceleration === 'vaapi')
 // windows (where it is the safe occlusion-independent capturer), but use DDA
 // for an entire display. The environment escape hatch makes driver-specific
 // regressions recoverable without a new build.
-const requestedScreenCaptureBackend = String(process.env.JUMP_SCREEN_CAPTURE_BACKEND || '').trim().toLowerCase();
-if (process.platform === 'win32' && requestedScreenCaptureBackend !== 'wgc') {
-  const disabledFeatures = new Set(app.commandLine.getSwitchValue('disable-features')
-    .split(',')
-    .map((feature) => feature.trim())
-    .filter(Boolean));
-  disabledFeatures.add('AllowWgcScreenCapturer');
-  app.commandLine.appendSwitch('disable-features', [...disabledFeatures].join(','));
-}
+applyWindowsScreenCapturePolicy(app.commandLine);
 
 function publishWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -142,7 +154,117 @@ function setupUpdater() {
   ipcMain.handle('update:install', () => controller.install());
 }
 
+async function readMediaDiagnosticsManifest() {
+  const featureStatus = app.getGPUFeatureStatus();
+  const videoEncode = featureStatus?.video_encode || 'unknown';
+  const enabledStates = new Set(['enabled', 'enabled_on', 'enabled_force', 'enabled_force_on']);
+  let gpu = null;
+  try {
+    const info = await app.getGPUInfo('basic');
+    const active = info?.gpuDevice?.find((device) => device.active) || info?.gpuDevice?.[0];
+    gpu = active ? {
+      vendorId: active.vendorId ?? null,
+      deviceId: active.deviceId ?? null,
+      driverVersion: active.driverVersion ?? null,
+    } : null;
+  } catch { /* GPU details are diagnostic-only. */ }
+  let display = null;
+  try {
+    const primary = screen.getPrimaryDisplay();
+    display = {
+      width: primary?.bounds?.width ?? null,
+      height: primary?.bounds?.height ?? null,
+      refreshRate: primary?.displayFrequency ?? null,
+      scaleFactor: primary?.scaleFactor ?? null,
+    };
+  } catch { /* Display details are diagnostic-only. */ }
+  const buildInfo = resolveDiagnosticsBuildInfo({
+    appVersion: app.getVersion?.(),
+    commitOverride: process.env.JUMP_APP_COMMIT,
+    buildMetadata: await readEmbeddedBuildMetadata(),
+  });
+  return {
+    role: null,
+    os: process.platform || null,
+    osVersion: os.release() || null,
+    arch: process.arch || null,
+    cpuModel: os.cpus()?.[0]?.model || null,
+    cpuLogicalCount: os.cpus()?.length || null,
+    memoryBytes: Number(os.totalmem()) || null,
+    electronVersion: process.versions.electron || null,
+    chromiumVersion: process.versions.chrome || null,
+    appVersion: buildInfo.appVersion,
+    appCommit: buildInfo.appCommit,
+    gpu,
+    gpuFeatureStatus: featureStatus || null,
+    hardwareAcceleration: app.isHardwareAccelerationEnabled(),
+    videoEncode,
+    hardwareVideoEncoding: enabledStates.has(videoEncode),
+    display,
+    capturePolicy: {
+      backend: String(process.env.JUMP_SCREEN_CAPTURE_BACKEND || '').trim().toLowerCase() || 'default',
+      windowsWholeScreenPreference: process.platform === 'win32' && String(process.env.JUMP_SCREEN_CAPTURE_BACKEND || '').trim().toLowerCase() !== 'wgc'
+        ? 'DXGI/DDA-preferred'
+        : 'default',
+      explicitWgc: process.platform === 'win32'
+        && String(process.env.JUMP_SCREEN_CAPTURE_BACKEND || '').trim().toLowerCase() === 'wgc',
+    },
+  };
+}
+
+function readEmbeddedBuildMetadata() {
+  if (!buildMetadataPromise) {
+    const runtimePath = app.isPackaged
+      ? path.join(process.resourcesPath, 'build-metadata.json')
+      : path.join(app.getAppPath(), 'electron', 'build-metadata.json');
+    buildMetadataPromise = readBuildMetadata(runtimePath);
+  }
+  return buildMetadataPromise;
+}
+
+function safeDiagnosticsPart(value, fallback = 'unknown') {
+  const normalized = String(value || '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 96);
+  return normalized || fallback;
+}
+
+function streamDiagnosticsOutputDirectory() {
+  return path.join(app.getPath('userData'), 'diagnostics', 'screen-share');
+}
+
+async function writeStreamDiagnosticsArtifact(artifact) {
+  if (!streamDiagnosticsEnabled) return { enabled: false, written: false };
+  if (!artifact || artifact.schemaVersion !== 1 || !artifact.runId
+      || !['sender', 'receiver'].includes(artifact.role)) {
+    throw new Error('Artefato de diagnóstico inválido.');
+  }
+  if (!Array.isArray(artifact.samples) || artifact.samples.length > 600) {
+    throw new Error('Série temporal de diagnóstico excede o limite permitido.');
+  }
+  const serialized = JSON.stringify(artifact, null, 2);
+  if (Buffer.byteLength(serialized, 'utf8') > 25 * 1024 * 1024) {
+    throw new Error('Artefato de diagnóstico excede 25 MiB.');
+  }
+  const directory = streamDiagnosticsOutputDirectory();
+  await fs.mkdir(directory, { recursive: true });
+  diagnosticsWriteSequence += 1;
+  const filename = [
+    safeDiagnosticsPart(artifact.runId, 'run'),
+    safeDiagnosticsPart(artifact.role),
+    safeDiagnosticsPart(artifact.participantId, 'participant'),
+    Date.now(),
+    diagnosticsWriteSequence,
+  ].join('-') + '.json';
+  const target = path.join(directory, filename);
+  await fs.writeFile(target, serialized, 'utf8');
+  console.info(`[screen-share-diagnostics] artifact saved: ${target}`);
+  return { enabled: true, written: true, path: target, bytes: Buffer.byteLength(serialized, 'utf8') };
+}
+
 function setupMediaDiagnostics() {
+  const outputDirectory = streamDiagnosticsOutputDirectory();
+  if (streamDiagnosticsEnabled) {
+    console.info(`[screen-share-diagnostics] enabled; output: ${outputDirectory}`);
+  }
   ipcMain.handle('media:capabilities', async () => {
     const featureStatus = app.getGPUFeatureStatus();
     const videoEncode = featureStatus?.video_encode || 'unknown';
@@ -165,6 +287,27 @@ function setupMediaDiagnostics() {
       },
     };
   });
+  ipcMain.handle('stream-diagnostics:config', async () => {
+    const manifest = await readMediaDiagnosticsManifest();
+    return {
+      enabled: streamDiagnosticsEnabled,
+      activationSource: streamDiagnosticsActivation.activationSource,
+      outputDirectory,
+      appVersion: manifest.appVersion,
+      appCommit: manifest.appCommit,
+      environment: streamDiagnosticsEnabled ? manifest : null,
+    };
+  });
+  ipcMain.handle('stream-diagnostics:write', (_event, artifact) => writeStreamDiagnosticsArtifact(artifact));
+  ipcMain.handle('stream-diagnostics:relaunch', (_event, action) => requestFieldDiagnosticsRelaunch({
+    app,
+    action,
+    activation: streamDiagnosticsActivation,
+  }));
+  ipcMain.handle('stream-diagnostics:open-directory', () => openFieldDiagnosticsDirectory({
+    outputDirectory,
+    openPath: (directory) => shell.openPath(directory),
+  }));
 }
 
 async function startSignalingServer() {

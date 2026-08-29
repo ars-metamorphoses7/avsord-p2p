@@ -44,8 +44,10 @@ import { CallStreamCard } from './components/CallStreamCard.jsx';
 import { PaneResizeHandle } from './components/PaneResizeHandle.jsx';
 import { ParticipantVolumePopover } from './components/ParticipantVolumePopover.jsx';
 import { ScreenShareDialog } from './components/ScreenShareDialog.jsx';
+import { fieldDiagnosticsStatus, shouldShowFieldDiagnosticsIndicator } from './fieldRunDiagnostics.js';
 import { useScreenShare } from './hooks/useScreenShare.js';
 import { playTransmissionSound } from './media/callSounds.js';
+import { flushScreenShareDiagnosticsSession } from './media/screenShareDiagnostics.js';
 import { normalizeScreenShareProfileId } from './media/screenShareProfiles.js';
 import { usePeerMesh } from './webrtc/usePeerMesh.js';
 import { useScreenSfu } from './webrtc/useScreenSfu.js';
@@ -73,6 +75,14 @@ const UNREAD_COUNTS_KEY = 'jump-unread-counts';
 const PROFILE_STATUS_KEY = 'jump-profile-status';
 const MESSAGE_CLOCK_KEY = 'jump-message-clock';
 const CALL_CHAT_SPLIT_KEY = 'jump-call-chat-split';
+
+function screenShareRunCallState(streamRef, runRef) {
+  if (globalThis.jumpDesktop?.streamDiagnosticsEnabled !== true || !streamRef.current) return {};
+  return {
+    screenShareRunId: runRef.current?.runId || '',
+    screenShareRunStartedAtMs: runRef.current?.startedAtMs || null,
+  };
+}
 const SCREEN_SHARE_PROFILE_KEY = 'jump-screen-share-profile';
 const MAX_CONTACTS = 100;
 const PRESENCE_STATUSES = ['online', 'dnd', 'offline'];
@@ -1031,6 +1041,7 @@ function App() {
   const [profileAvatar, setProfileAvatar] = useState(() => localStorage.getItem('jump-avatar') || '');
   const [profileStatus, setProfileStatus] = useState(() => normalizePresenceStatus(localStorage.getItem(PROFILE_STATUS_KEY) || 'online'));
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
+  const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const [roomDraft, setRoomDraft] = useState('');
   const [roomPasswordDraft, setRoomPasswordDraft] = useState('');
   const [showRoomCreator, setShowRoomCreator] = useState(false);
@@ -1072,6 +1083,15 @@ function App() {
   const [updateState, setUpdateState] = useState({ status: 'idle' });
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [fieldDiagnosticsConfig, setFieldDiagnosticsConfig] = useState(() => ({
+    enabled: globalThis.jumpDesktop?.streamDiagnosticsEnabled === true,
+    activationSource: globalThis.jumpDesktop?.streamDiagnosticsEnabled === true ? 'cli' : 'off',
+    outputDirectory: null,
+    appVersion: null,
+    appCommit: null,
+  }));
+  const [fieldDiagnosticsBusy, setFieldDiagnosticsBusy] = useState(false);
+  const [fieldDiagnosticsMessage, setFieldDiagnosticsMessage] = useState('');
 
   const wsRef = useRef(null);
   const profilePhotoInputRef = useRef(null);
@@ -1114,6 +1134,8 @@ function App() {
   const cameraStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const screenAudioSessionRef = useRef(null);
+  const screenShareRunRef = useRef(null);
+  const screenDiagnosticsConfigRef = useRef(null);
   const videoProfileRef = useRef(screenShareProfileId);
   const inCallRef = useRef(false);
   const callStartedAtRef = useRef(0);
@@ -1123,6 +1145,19 @@ function App() {
   const repairPeerMediaRef = useRef(null);
   const setPeerScreenDeliveryRef = useRef(null);
   const setPeerPlaybackProfileRef = useRef(null);
+
+  useEffect(() => {
+    if (globalThis.jumpDesktop?.streamDiagnosticsEnabled !== true) return undefined;
+    let active = true;
+    const readConfig = globalThis.jumpDesktop.getStreamDiagnosticsConfig;
+    if (typeof readConfig !== 'function') return () => { active = false; };
+    void readConfig().then((config) => {
+      if (!active || !config) return;
+      screenDiagnosticsConfigRef.current = config;
+      setFieldDiagnosticsConfig(config);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   const updateComposerCursor = useCallback(() => {
     const input = composerInputRef.current;
@@ -1284,6 +1319,14 @@ function App() {
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [profileSettingsOpen]);
+  useEffect(() => {
+    if (!appSettingsOpen) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setAppSettingsOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [appSettingsOpen]);
   useEffect(() => {
     const applyUpdateState = (nextState) => setUpdateState((current) => {
       if (!nextState?.status) return current;
@@ -1447,7 +1490,34 @@ function App() {
     return () => { active = false; };
   }, []);
 
+  const flushSlotDiagnostics = useCallback((slot, reason) => {
+    if (!slot) return;
+    [
+      'senderDiagnosticsSession',
+      'receiverDiagnosticsSession',
+      'sfuProducerDiagnosticsSession',
+      'sfuReceiverDiagnosticsSession',
+    ].forEach((key) => {
+      const session = slot[key];
+      if (!session) return;
+      void flushScreenShareDiagnosticsSession(session, reason);
+      slot[key] = null;
+    });
+  }, []);
+
+  const flushRemoteDiagnostics = useCallback((slot, reason) => {
+    if (!slot) return;
+    ['receiverDiagnosticsSession', 'sfuReceiverDiagnosticsSession'].forEach((key) => {
+      const session = slot[key];
+      if (!session) return;
+      void flushScreenShareDiagnosticsSession(session, reason);
+      slot[key] = null;
+    });
+    if (slot.remoteBundle) slot.remoteBundle.screenShareDiagnosticsSession = null;
+  }, []);
+
   const clearRemoteCallMedia = useCallback((peerId) => {
+    flushSlotDiagnostics(peerConnectionsRef.current.get(peerId), 'peer-disconnected');
     remoteStreamsRef.current.delete(peerId);
     remoteSharingRef.current.delete(peerId);
     [...dataChunksRef.current.keys()].filter((key) => key.startsWith(`${peerId}:`)).forEach((key) => dataChunksRef.current.delete(key));
@@ -1471,7 +1541,7 @@ function App() {
     });
     setFocusedCallPeerId((current) => current === peerId ? '' : current);
     setVolumePopover((current) => current?.peerId === peerId ? null : current);
-  }, []);
+  }, [flushSlotDiagnostics, peerConnectionsRef]);
 
   const playShareNotification = useCallback((type) => {
     const now = Date.now();
@@ -1482,6 +1552,17 @@ function App() {
   }, []);
   const playLocalShareStarted = useCallback(() => playShareNotification('local-start'), [playShareNotification]);
   const playLocalShareStopped = useCallback(() => playShareNotification('local-stop'), [playShareNotification]);
+  const handleLocalShareStopped = useCallback((stoppedRun = null) => {
+    playLocalShareStopped();
+    peerConnectionsRef.current.forEach((slot) => {
+      ['senderDiagnosticsSession', 'sfuProducerDiagnosticsSession'].forEach((key) => {
+        const session = slot[key];
+        if (!session || (stoppedRun?.runId && session.runId !== stoppedRun.runId)) return;
+        void flushScreenShareDiagnosticsSession(session, 'share-stopped');
+        slot[key] = null;
+      });
+    });
+  }, [flushScreenShareDiagnosticsSession, peerConnectionsRef, playLocalShareStopped]);
 
   const broadcastRoomData = useCallback((payload, exceptPeerId = '') => {
     peerConnectionsRef.current.forEach((slot, peerId) => {
@@ -1502,6 +1583,7 @@ function App() {
       sharing: Boolean(screenStreamRef.current),
       sharingAudio: Boolean(screenAudioSessionRef.current),
       sharingProfile: screenStreamRef.current ? videoProfileRef.current : '',
+      ...screenShareRunCallState(screenStreamRef, screenShareRunRef),
       ...overrides,
     });
   }, [broadcastRoomData]);
@@ -1685,6 +1767,7 @@ function App() {
         sharing: Boolean(screenStreamRef.current),
         sharingAudio: Boolean(screenAudioSessionRef.current),
         sharingProfile: screenStreamRef.current ? videoProfileRef.current : '',
+        ...screenShareRunCallState(screenStreamRef, screenShareRunRef),
       });
       requestDirectSync();
       messagesRef.current.forEach((message) => {
@@ -1810,9 +1893,17 @@ function App() {
           sharing: Boolean(payload.sharing),
           sharingAudio: Boolean(payload.sharingAudio),
           sharingProfile: payload.sharing ? normalizeScreenShareProfileId(String(payload.sharingProfile || 'performance')) : '',
+          screenShareRunId: payload.sharing ? String(payload.screenShareRunId || '').trim().slice(0, 128) : '',
+          screenShareRunStartedAtMs: payload.sharing ? Number(payload.screenShareRunStartedAtMs) || null : null,
         };
         if (nextMediaState.sharing) setPeerPlaybackProfileRef.current?.(peerId, nextMediaState.sharingProfile);
         const wasSharing = remoteSharingRef.current.get(peerId) === true;
+        const previousRunId = slot?.remoteMediaState?.screenShareRunId || '';
+        const runChanged = wasSharing && nextMediaState.sharing && previousRunId
+          && previousRunId !== nextMediaState.screenShareRunId;
+        if (slot && wasSharing && (!nextMediaState.sharing || runChanged)) {
+          flushRemoteDiagnostics(slot, runChanged ? 'remote-share-restarted' : 'remote-share-stopped');
+        }
         if (nextMediaState.sharing) remoteSharingRef.current.set(peerId, true);
         else remoteSharingRef.current.delete(peerId);
         if (!wasSharing && nextMediaState.sharing) {
@@ -1851,6 +1942,8 @@ function App() {
             camera: Boolean(payload.camera),
             sharing: Boolean(payload.sharing),
             sharingAudio: Boolean(payload.sharingAudio),
+            screenShareRunId: nextMediaState.screenShareRunId,
+            screenShareRunStartedAtMs: nextMediaState.screenShareRunStartedAtMs,
           },
         }));
         return;
@@ -1915,7 +2008,7 @@ function App() {
       });
     };
     if (channel.readyState === 'open') requestSync();
-  }, [clearRemoteCallMedia, mergeDirectMessages, mergeMessages, playShareNotification, requestAttachmentFromPeer, requestDirectSync, sendAttachmentToPeer]);
+  }, [clearRemoteCallMedia, flushRemoteDiagnostics, mergeDirectMessages, mergeMessages, playShareNotification, requestAttachmentFromPeer, requestDirectSync, sendAttachmentToPeer]);
 
   const {
     closePeer,
@@ -1936,6 +2029,8 @@ function App() {
     cameraStreamRef,
     screenStreamRef,
     screenAudioSessionRef,
+    screenShareRunRef,
+    screenDiagnosticsConfigRef,
     videoProfileRef,
     remoteStreamsRef,
     sendSignal,
@@ -1959,10 +2054,13 @@ function App() {
   } = useScreenSfu({
     inCall,
     isSharing,
+    localPeerIdRef: peerIdRef,
     onError: setPermissionError,
     peerConnectionsRef,
     remoteStreamsRef,
     screenStreamRef,
+    screenShareRunRef,
+    screenDiagnosticsConfigRef,
     sendSignal,
     setPeerScreenTransport,
     setRemoteStreams,
@@ -2365,6 +2463,7 @@ function App() {
 
   const leaveCall = useCallback(() => {
     const wasSharing = Boolean(screenStreamRef.current);
+    const stoppedRun = screenShareRunRef.current;
     const previousScreenStream = screenStreamRef.current;
     screenStreamRef.current = null;
     void screenAudioSessionRef.current?.stop();
@@ -2374,6 +2473,7 @@ function App() {
     audioStreamRef.current = null;
     outboundAudioStreamRef.current = null;
     screenAudioSessionRef.current = null;
+    screenShareRunRef.current = null;
     cameraStreamRef.current = null;
     screenStreamRef.current = null;
     void replacePeerTrack('audioSender', null);
@@ -2389,8 +2489,8 @@ function App() {
     setIsMuted(false);
     setIsDeafened(false);
     setCallPanelOpen(false);
-    if (wasSharing) playLocalShareStopped();
-  }, [announceCallState, playLocalShareStopped, replacePeerTrack]);
+    if (wasSharing) handleLocalShareStopped(stoppedRun);
+  }, [announceCallState, handleLocalShareStopped, replacePeerTrack]);
 
   const joinRoom = useCallback((nextRoomId, nextRoomName = '', nextRoomPassword = '') => {
     const normalizedId = slugify(nextRoomId);
@@ -2530,9 +2630,10 @@ function App() {
     cameraStreamRef,
     inCallRef,
     onShareStarted: playLocalShareStarted,
-    onShareStopped: playLocalShareStopped,
+    onShareStopped: handleLocalShareStopped,
     replacePeerTrack,
     screenAudioSessionRef,
+    screenShareRunRef,
     screenStreamRef,
     setIsSharing,
     setPermissionError,
@@ -2853,6 +2954,62 @@ function App() {
     }
   }, [updateState.status]);
 
+  const refreshFieldDiagnosticsConfig = useCallback(async () => {
+    const readConfig = globalThis.jumpDesktop?.getStreamDiagnosticsConfig;
+    if (typeof readConfig !== 'function') return null;
+    const config = await readConfig();
+    if (config) {
+      screenDiagnosticsConfigRef.current = config;
+      setFieldDiagnosticsConfig(config);
+    }
+    return config || null;
+  }, []);
+
+  const openAppSettings = useCallback(() => {
+    setFieldDiagnosticsMessage('');
+    setAppSettingsOpen(true);
+    void refreshFieldDiagnosticsConfig().catch(() => {});
+  }, [refreshFieldDiagnosticsConfig]);
+
+  const restartFieldDiagnostics = useCallback(async (action) => {
+    const desktop = globalThis.jumpDesktop;
+    if (typeof desktop?.relaunchStreamDiagnostics !== 'function') {
+      setFieldDiagnosticsMessage('O controle de reinício está disponível somente no aplicativo JUMP instalado.');
+      return;
+    }
+    setFieldDiagnosticsBusy(true);
+    setFieldDiagnosticsMessage('Preparando o reinício do JUMP…');
+    try {
+      const result = await desktop.relaunchStreamDiagnostics(action);
+      if (!result?.relaunchRequested) {
+        setFieldDiagnosticsBusy(false);
+        setFieldDiagnosticsMessage(result?.reason === 'environment-forced'
+          ? 'Ativo — forçado pelo ambiente. Remova JUMP_STREAM_DIAGNOSTICS=1 para desativar.'
+          : 'Não foi possível solicitar o reinício.');
+      }
+    } catch (error) {
+      setFieldDiagnosticsBusy(false);
+      setFieldDiagnosticsMessage(error?.message || 'Não foi possível reiniciar o JUMP.');
+    }
+  }, []);
+
+  const openFieldDiagnosticsDirectory = useCallback(async () => {
+    const openDirectory = globalThis.jumpDesktop?.openStreamDiagnosticsDirectory;
+    if (typeof openDirectory !== 'function') {
+      setFieldDiagnosticsMessage('A abertura de pasta está disponível somente no aplicativo JUMP instalado.');
+      return;
+    }
+    setFieldDiagnosticsBusy(true);
+    try {
+      const result = await openDirectory();
+      setFieldDiagnosticsMessage(result?.opened ? 'Pasta de diagnóstico aberta.' : (result?.error || 'Não foi possível abrir a pasta de diagnóstico.'));
+    } catch (error) {
+      setFieldDiagnosticsMessage(error?.message || 'Não foi possível abrir a pasta de diagnóstico.');
+    } finally {
+      setFieldDiagnosticsBusy(false);
+    }
+  }, []);
+
   const isDesktop = Boolean(globalThis.jumpDesktop?.isDesktop);
   const isOfficialDesktopBuild = isDesktop && globalThis.jumpDesktop?.isPackaged === true;
   const isDevelopmentDesktopBuild = isDesktop && !isOfficialDesktopBuild;
@@ -2919,6 +3076,10 @@ function App() {
   ], [displayName, peers, profileAvatar]);
   const activeCallParticipants = useMemo(() => participants.filter((person) => person.self ? inCall : remoteCallStates[person.peerId]?.inCall === true), [inCall, participants, remoteCallStates]);
   const hasActiveCall = Boolean(inCall || Object.values(remoteCallStates).some((state) => state.inCall === true));
+  const fieldDiagnosticsEnabled = fieldDiagnosticsConfig.enabled === true || globalThis.jumpDesktop?.streamDiagnosticsEnabled === true;
+  const fieldDiagnosticsState = fieldDiagnosticsStatus({ ...fieldDiagnosticsConfig, enabled: fieldDiagnosticsEnabled });
+  const fieldDiagnosticsForcedByEnvironment = fieldDiagnosticsConfig.activationSource === 'environment';
+  const showFieldDiagnosticsIndicator = shouldShowFieldDiagnosticsIndicator({ enabled: fieldDiagnosticsEnabled, inCall: hasActiveCall });
   const chatVisible = !callPanelOpen || chatPanelOpen;
   useEffect(() => {
     if (focusedCallPeerId && !activeCallParticipants.some((person) => person.peerId === focusedCallPeerId)) setFocusedCallPeerId('');
@@ -3116,6 +3277,7 @@ function App() {
             <IconButton label={callPanelOpen ? 'Fechar chamada' : 'Abrir chamada'} className={`call-header-button ${hasActiveCall ? 'has-call' : ''}`} active={callPanelOpen} onClick={() => setCallPanelOpen((value) => !value)}><WinIcon name="phone" size={22} />{hasActiveCall && <span className="call-header-dot" />}</IconButton>
             <IconButton label={callPanelOpen ? (chatPanelOpen ? 'Ocultar chat' : 'Mostrar chat') : 'Chat da sala'} className="chat-toggle-button" active={callPanelOpen && chatPanelOpen} disabled={!callPanelOpen} onClick={() => setChatPanelOpen((value) => !value)}><MessageCircle size={20} /></IconButton>
             <IconButton label="Notificações"><WinIcon name="bell" size={21} /></IconButton>
+            <IconButton label="Configurações" active={appSettingsOpen} onClick={openAppSettings}><Settings2 size={17} /></IconButton>
             <IconButton label="Ajuda"><CircleHelp size={16} /></IconButton>
           </div>
         </header>
@@ -3150,6 +3312,7 @@ function App() {
                         <CallStreamCard
                           key={person.peerId}
                           avatar={<Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xl" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} speaking={personIsSpeaking} />}
+                          diagnosticsSession={person.self ? null : remoteBundle?.screenShareDiagnosticsSession}
                           hasVideo={hasVideo}
                           isDeafened={isDeafened}
                           isFocused={focusedCallPeerId === person.peerId}
@@ -3184,7 +3347,7 @@ function App() {
                   </div>
                 </div>
                 <div className="stage-controls">
-                  <div className="stage-control-hint">{inCall ? 'mídia P2P ativa' : 'entre na sala para habilitar áudio e tela'}</div>
+                  <div className="stage-control-hint"><span>{inCall ? 'mídia P2P ativa' : 'entre na sala para habilitar áudio e tela'}</span>{showFieldDiagnosticsIndicator && <span className="field-diagnostics-indicator" role="status">FIELD DIAGNOSTICS ON</span>}</div>
                   <div className="call-controls">
                     <IconButton label={isMuted ? 'Ativar microfone' : 'Silenciar microfone'} className={isMuted ? 'control-off' : ''} active={inCall && !isMuted} onClick={toggleMute}>{isMuted ? <MicOff size={18} /> : <Mic size={18} />}</IconButton>
                     <IconButton label={isDeafened ? 'Ativar áudio' : 'Desativar áudio'} className={isDeafened ? 'control-off' : ''} active={inCall && !isDeafened} onClick={toggleDeafen}>{isDeafened ? <VolumeX size={18} /> : <Headphones size={18} />}</IconButton>
@@ -3397,6 +3560,43 @@ function App() {
             </div>
             <div className="profile-settings-actions"><button type="button" className="dialog-secondary" onClick={() => setProfileSettingsOpen(false)}>cancelar</button><button type="submit" className="dialog-primary"><Check size={14} /> salvar</button></div>
           </form>
+        </div>
+      )}
+
+      {appSettingsOpen && (
+        <div className="app-settings-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAppSettingsOpen(false); }}>
+          <section className="app-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="app-settings-titlebar">
+              <div className="app-settings-titlebar-label"><img className="room-info-titlebar-icon" src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong id="app-settings-title">JUMP — configurações</strong></div>
+              <button type="button" className="win98-close-control" aria-label="Fechar configurações" onClick={() => setAppSettingsOpen(false)}>×</button>
+            </div>
+            <div className="app-settings-body">
+              <section className="app-update-settings" aria-labelledby="app-update-settings-title">
+                <div><h3 id="app-update-settings-title">Atualizações</h3><p>Verifique e instale a versão oficial mais recente do JUMP.</p></div>
+                <button type="button" className="dialog-secondary" disabled={isDevelopmentDesktopBuild || updateBusy} onClick={() => { setAppSettingsOpen(false); void handleUpdate(); }}>Verificar atualização</button>
+              </section>
+              <section className="field-diagnostics-settings" aria-labelledby="field-diagnostics-title">
+                <div className="field-diagnostics-heading">
+                  <div><h3 id="field-diagnostics-title">Field Run Diagnostics</h3><p>Coleta métricas técnicas locais de áudio, vídeo e WebRTC para diagnóstico de chamadas. Não grava tela ou áudio e não envia dados automaticamente.</p></div>
+                  <span className={`field-diagnostics-state ${fieldDiagnosticsEnabled ? 'is-on' : 'is-off'}`}>{fieldDiagnosticsState}</span>
+                </div>
+                <dl className="field-diagnostics-details">
+                  <div><dt>Versão do app</dt><dd>{fieldDiagnosticsConfig.appVersion || 'indisponível'}</dd></div>
+                  <div><dt>Commit da build</dt><dd>{fieldDiagnosticsConfig.appCommit || 'indisponível'}</dd></div>
+                  <div><dt>Pasta de saída</dt><dd title={fieldDiagnosticsConfig.outputDirectory || ''}>{fieldDiagnosticsConfig.outputDirectory || 'indisponível'}</dd></div>
+                </dl>
+                <div className="field-diagnostics-actions">
+                  {fieldDiagnosticsEnabled && <button type="button" className="dialog-secondary" disabled={fieldDiagnosticsBusy} onClick={openFieldDiagnosticsDirectory}>Abrir pasta de diagnóstico</button>}
+                  <button type="button" className="dialog-primary" disabled={fieldDiagnosticsBusy || (fieldDiagnosticsEnabled && fieldDiagnosticsForcedByEnvironment)} title={fieldDiagnosticsForcedByEnvironment ? 'JUMP_STREAM_DIAGNOSTICS=1 mantém este modo ativado.' : ''} onClick={() => restartFieldDiagnostics(fieldDiagnosticsEnabled ? 'disable' : 'enable')}>
+                    {fieldDiagnosticsEnabled ? 'Desativar e reiniciar' : 'Ativar e reiniciar'}
+                  </button>
+                </div>
+                {fieldDiagnosticsForcedByEnvironment && <small className="field-diagnostics-environment-note">Ativo — forçado pelo ambiente. A desativação precisa remover JUMP_STREAM_DIAGNOSTICS=1.</small>}
+                {fieldDiagnosticsMessage && <small className="field-diagnostics-message" aria-live="polite">{fieldDiagnosticsMessage}</small>}
+              </section>
+            </div>
+            <div className="app-settings-actions"><button type="button" className="dialog-secondary" onClick={() => setAppSettingsOpen(false)}>Fechar</button></div>
+          </section>
         </div>
       )}
 

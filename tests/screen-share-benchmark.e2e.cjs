@@ -7,6 +7,10 @@ const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 const { pathToFileURL } = require('node:url');
 const { compareRgba } = require('./helpers/image-quality.cjs');
+const {
+  applyWindowsScreenCapturePolicy,
+  WGC_SCREEN_CAPTURE_FEATURE,
+} = require('../electron/media-runtime-config.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const fixturePath = path.join(__dirname, 'fixtures', 'motion-source.html');
@@ -177,6 +181,18 @@ app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 if (config.disableFeatures) app.commandLine.appendSwitch('disable-features', config.disableFeatures);
 if (config.enableFeatures) app.commandLine.appendSwitch('enable-features', config.enableFeatures);
+applyWindowsScreenCapturePolicy(app.commandLine);
+if (process.env.JUMP_BENCH_CAPTURE_POLICY_ONLY === '1') {
+  const disableFeaturesValue = app.commandLine.getSwitchValue('disable-features') || '';
+  const disabledFeatures = disableFeaturesValue.split(',').map((value) => value.trim()).filter(Boolean);
+  process.stdout.write(`${JSON.stringify({
+    chromiumSwitches: { disableFeatures: disableFeaturesValue },
+    captureBackend: {
+      wgcScreenCapturerDisabled: disabledFeatures.includes(WGC_SCREEN_CAPTURE_FEATURE),
+    },
+  })}\n`);
+  process.exit(0);
+}
 fs.mkdirSync(benchmarkUserData, { recursive: true });
 app.setPath('userData', benchmarkUserData);
 

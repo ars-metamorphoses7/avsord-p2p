@@ -4752,3 +4752,71 @@ body.is-resizing-call-chat, body.is-resizing-call-chat * { cursor: col-resize !i
   .update-dialog { width: min(410px, calc(100vw - 18px)); }
   .update-body { padding-inline: 14px; }
 }
+
+/* Field Run Diagnostics lives in the regular Settings surface, while keeping
+   the call-stage confirmation visible and out of the video area. */
+.app-settings-overlay {
+  position: fixed;
+  z-index: 111;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: transparent;
+}
+.app-settings-dialog {
+  width: min(560px, calc(100vw - 28px));
+  overflow: hidden;
+  padding: 3px;
+  border: 2px outset var(--win-light);
+  color: #000;
+  background: var(--win-face);
+  box-shadow: 4px 4px 0 #000, 0 0 0 1px #404040;
+  font-family: "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif;
+}
+.app-settings-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--classic-caption-h);
+  min-height: var(--classic-caption-h);
+  padding: 3px 3px 3px 7px;
+  color: #fff;
+  background: #000080;
+}
+.app-settings-titlebar-label { display: flex; align-items: center; min-width: 0; gap: 5px; }
+.app-settings-titlebar-label strong { overflow: hidden; font: 700 11px/1 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.app-settings-titlebar button,
+.app-settings-actions button,
+.field-diagnostics-actions button { min-height: 24px; padding: 4px 9px; color: #000; background: var(--win-face); font: 700 10px/1 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; }
+.app-settings-titlebar button { display: inline-grid; place-items: center; width: 20px; min-width: 20px; padding: 0 0 2px; font: 700 14px/1 Arial, sans-serif; }
+.app-settings-body { padding: 12px; }
+.app-update-settings { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding-bottom: 11px; border-bottom: 1px groove var(--win-light); }
+.app-update-settings h3 { margin: 0; color: #000080; font: 700 10px/1.1 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; text-transform: uppercase; }
+.app-update-settings p { margin: 4px 0 0; color: #444; font: 400 9px/1.25 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; }
+.field-diagnostics-settings { display: grid; gap: 11px; }
+.field-diagnostics-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 11px; border-bottom: 1px groove var(--win-light); }
+.field-diagnostics-heading h3 { margin: 0; color: #000080; font: 700 12px/1.1 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; text-transform: uppercase; }
+.field-diagnostics-heading p { max-width: 365px; margin: 7px 0 0; color: #333; font: 400 10px/1.35 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; }
+.field-diagnostics-state { flex: 0 0 auto; max-width: 150px; padding: 5px 7px; border: 1px inset var(--win-light); font: 700 9px/1.2 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; text-align: center; text-transform: uppercase; }
+.field-diagnostics-state.is-on { color: #006b18; background: #e9ffe6; }
+.field-diagnostics-state.is-off { color: #555; background: #f7f7f7; }
+.field-diagnostics-details { display: grid; gap: 7px; margin: 0; }
+.field-diagnostics-details > div { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 9px; align-items: baseline; }
+.field-diagnostics-details dt { color: #000080; font: 700 9px/1.25 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; text-transform: uppercase; }
+.field-diagnostics-details dd { min-width: 0; margin: 0; overflow: hidden; color: #222; font: 400 10px/1.25 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.field-diagnostics-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; padding-top: 3px; }
+.field-diagnostics-actions .dialog-primary { color: #000; }
+.field-diagnostics-environment-note,
+.field-diagnostics-message { display: block; color: #555; font: 400 9px/1.35 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; }
+.field-diagnostics-environment-note { color: #7a3f00; }
+.app-settings-actions { display: flex; justify-content: flex-end; padding: 8px 10px 7px; border-top: 1px groove var(--win-light); }
+.field-diagnostics-indicator { display: inline-flex; align-items: center; min-height: 18px; margin-left: 4px; padding: 2px 6px; border: 1px solid #006b18; color: #006b18; background: #e9ffe6; font: 700 9px/1 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; letter-spacing: .03em; }
+
+@media (max-width: 520px) {
+  .app-settings-dialog { width: min(560px, calc(100vw - 18px)); }
+  .field-diagnostics-heading { flex-direction: column; }
+  .app-update-settings { align-items: flex-start; flex-direction: column; }
+  .field-diagnostics-state { max-width: none; }
+  .field-diagnostics-details > div { grid-template-columns: 1fr; gap: 2px; }
+}
