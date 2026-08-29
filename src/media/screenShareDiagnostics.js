@@ -1,3 +1,5 @@
+import { sanitizeScreenShareAudioTrackSettings } from './screenShareTelemetry.js';
+
 export const SCREEN_SHARE_DIAGNOSTICS_SCHEMA_VERSION = 1;
 export const MAX_SCREEN_SHARE_DIAGNOSTIC_SAMPLES = 600;
 export const MAX_SCREEN_SHARE_DIAGNOSTIC_RENDER_WINDOWS = 600;
@@ -59,6 +61,7 @@ function sanitizeDiagnosticsCapture(capture) {
   delete safeSource.name;
   delete safeSource.title;
   delete safeSource.windowTitle;
+  delete safeSource.label;
   return { ...safeCapture, source: safeSource };
 }
 
@@ -270,6 +273,100 @@ function summarizeReceiver(artifact) {
   };
 }
 
+const AUDIO_PATHS = [
+  'microphoneOutbound',
+  'microphoneInbound',
+  'screenAudioOutbound',
+  'screenAudioInbound',
+];
+
+function samplePathValue(sample, path, keys) {
+  return keys.reduce((value, key) => value?.[key], sample?.audio?.[path]);
+}
+
+function sumFinite(values) {
+  const valid = metricValues(values);
+  return valid.length ? valid.reduce((total, value) => total + value, 0) : null;
+}
+
+function summarizeAudioPath(samples, path) {
+  const pathSamples = samples.filter((sample) => sample?.audio?.[path]);
+  if (!pathSamples.length) return null;
+  return {
+    sampleCount: pathSamples.length,
+    bitrateBps: summarizeMetric(pathSamples.map((sample) => samplePathValue(sample, path, ['transport', 'bitrateBps']))),
+    packetLossRatio: summarizeMetric(pathSamples.map((sample) => samplePathValue(sample, path, ['transport', 'packetLossRatio']))),
+    jitterMs: summarizeMetric(pathSamples.map((sample) => samplePathValue(sample, path, ['transport', 'jitterMs']))),
+    jitterBufferActualMs: summarizeMetric(pathSamples.map((sample) => samplePathValue(sample, path, ['receiverHealth', 'jitterBufferActualMs']))),
+    concealment: {
+      concealedSamplesDelta: sumFinite(pathSamples.map((sample) => samplePathValue(sample, path, ['receiverHealth', 'concealedSamplesDelta']))),
+      silentConcealedSamplesDelta: sumFinite(pathSamples.map((sample) => samplePathValue(sample, path, ['receiverHealth', 'silentConcealedSamplesDelta']))),
+      concealmentEventsTotal: sumFinite(pathSamples.map((sample) => samplePathValue(sample, path, ['receiverHealth', 'concealmentEventsDelta']))),
+    },
+    audioLevel: summarizeMetric(pathSamples.map((sample) => samplePathValue(sample, path, ['signal', 'audioLevel']))),
+  };
+}
+
+function summarizeAudio(artifact) {
+  const samples = artifact.samples || [];
+  return Object.fromEntries(AUDIO_PATHS.map((path) => [path, summarizeAudioPath(samples, path)]));
+}
+
+function audioPathSet(audio = null) {
+  return Object.fromEntries(AUDIO_PATHS.map((path) => [path, audio?.[path] || null]));
+}
+
+export function createScreenShareAudioSample({ telemetry } = {}) {
+  if (!telemetry) return null;
+  const inbound = telemetry.inbound || {};
+  const outbound = telemetry.outbound || {};
+  const remoteInbound = telemetry.remoteInbound || {};
+  const inboundDirection = telemetry.direction === 'inbound';
+  return {
+    track: {
+      kind: 'audio',
+      codec: telemetry.codec || null,
+      clockRate: telemetry.codec?.clockRate ?? null,
+      channels: telemetry.codec?.channels ?? null,
+      settings: sanitizeScreenShareAudioTrackSettings(telemetry.trackSettings),
+    },
+    transport: {
+      packetsSent: outbound.packetsSent ?? null,
+      packetsReceived: inbound.packetsReceived ?? null,
+      bytesSent: outbound.bytesSent ?? null,
+      bytesReceived: inbound.bytesReceived ?? null,
+      bitrateBps: telemetry.derived?.bitrateBps ?? null,
+      packetsLost: inboundDirection ? inbound.packetsLost ?? null : remoteInbound.packetsLost ?? null,
+      packetLossRatio: telemetry.derived?.packetLossRatio ?? null,
+      jitterMs: telemetry.derived?.jitterMs ?? null,
+      roundTripTimeMs: telemetry.derived?.roundTripTimeMs ?? null,
+      retransmittedPackets: inboundDirection
+        ? inbound.retransmittedPacketsReceived ?? null
+        : outbound.retransmittedPacketsSent ?? null,
+      retransmissionRatio: telemetry.derived?.retransmissionRatio ?? null,
+      packetsDiscardedOnSend: telemetry.derived?.packetsDiscardedOnSend ?? null,
+    },
+    receiverHealth: {
+      jitterBufferActualMs: telemetry.derived?.jitterBufferActualMs ?? null,
+      jitterBufferTargetMs: telemetry.derived?.jitterBufferTargetMs ?? null,
+      jitterBufferMinimumMs: telemetry.derived?.jitterBufferMinimumMs ?? null,
+      jitterBufferEmittedCount: inbound.jitterBufferEmittedCount ?? null,
+      concealedSamplesDelta: telemetry.derived?.concealedSamplesDelta ?? null,
+      silentConcealedSamplesDelta: telemetry.derived?.silentConcealedSamplesDelta ?? null,
+      concealmentEventsDelta: telemetry.derived?.concealmentEventsDelta ?? null,
+      insertedSamplesForDecelerationDelta: telemetry.derived?.insertedSamplesForDecelerationDelta ?? null,
+      removedSamplesForAccelerationDelta: telemetry.derived?.removedSamplesForAccelerationDelta ?? null,
+      totalSamplesReceivedDelta: telemetry.derived?.totalSamplesReceivedDelta ?? null,
+      totalSamplesDurationDelta: telemetry.derived?.totalSamplesDurationDelta ?? null,
+    },
+    signal: {
+      audioLevel: telemetry.signal?.audioLevel ?? null,
+      totalAudioEnergy: telemetry.signal?.totalAudioEnergy ?? null,
+      totalSamplesDuration: telemetry.signal?.totalSamplesDuration ?? null,
+    },
+  };
+}
+
 export function createScreenShareSenderSample({
   telemetry,
   adaptation = null,
@@ -277,11 +374,13 @@ export function createScreenShareSenderSample({
   peerId = null,
   trackSettings = null,
   peerCount = null,
+  audio = null,
 } = {}) {
   if (!telemetry) return null;
   const encoding = senderParameters?.encodings?.[0] || {};
   return {
     timestampMs: telemetry.timestampMs ?? null,
+    audio: audioPathSet(audio),
     pipeline: {
       captureFps: telemetry.derived?.captureFps ?? null,
       encodeFps: telemetry.derived?.encodeFps ?? null,
@@ -357,10 +456,12 @@ export function createScreenShareReceiverSample({
   sourcePeerId = null,
   adaptation = null,
   receiver = null,
+  audio = null,
 } = {}) {
   if (!telemetry) return null;
   return {
     timestampMs: telemetry.timestampMs ?? null,
+    audio: audioPathSet(audio),
     pipeline: {
       receiveFps: telemetry.derived?.receiveFps ?? null,
       decodeFps: telemetry.derived?.decodeFps ?? null,
@@ -410,6 +511,7 @@ export function summarizeScreenShareDiagnostics(artifact) {
     sampleCount: artifact.samples.length,
     elapsedMs: Math.max(0, Number(last) - Number(first)),
     transitions: transitionList(artifact.samples),
+    audio: summarizeAudio(artifact),
   };
   return artifact.role === 'receiver'
     ? { ...common, receiver: summarizeReceiver(artifact) }

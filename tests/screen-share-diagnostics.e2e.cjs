@@ -99,7 +99,9 @@ async function run() {
     window.webContents.executeJavaScript('globalThis.jumpDesktop?.streamDiagnosticsEnabled === true')
   ))).then((values) => values.every(Boolean)), 'flag de diagnóstico no preload');
   const config = await sender.webContents.executeJavaScript('globalThis.jumpDesktop.getStreamDiagnosticsConfig()');
-  if (!config.enabled || !config.environment?.electronVersion || !config.environment?.display) {
+  const expectedOutputDirectory = path.join(userData, 'diagnostics', 'screen-share');
+  if (!config.enabled || config.outputDirectory !== expectedOutputDirectory
+      || !config.environment?.electronVersion || !config.environment?.display) {
     throw new Error('A bridge de diagnóstico não retornou o manifesto de ambiente esperado.');
   }
 
@@ -140,6 +142,12 @@ async function run() {
   }
   if (artifacts.some((artifact) => artifact.schemaVersion !== 1 || !artifact.samples.length)) {
     throw new Error('O smoke test encontrou artefato sem schema ou série temporal.');
+  }
+  const audioPaths = ['microphoneOutbound', 'microphoneInbound', 'screenAudioOutbound', 'screenAudioInbound'];
+  if (artifacts.some((artifact) => artifact.samples.some((sample) => (
+    !sample.audio || audioPaths.some((pathName) => !(pathName in sample.audio))
+  )))) {
+    throw new Error('O smoke test encontrou série temporal sem os quatro caminhos de áudio.');
   }
   if (artifacts.some((artifact) => !artifact.environment?.electronVersion || !artifact.environment?.display)) {
     throw new Error('O smoke test encontrou artefato sem manifesto de ambiente.');

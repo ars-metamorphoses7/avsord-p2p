@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  createScreenShareAudioTelemetrySnapshot,
   createScreenShareTelemetrySnapshot,
+  resolveScreenShareAudioReports,
   resolveScreenShareReports,
 } from '../src/media/screenShareTelemetry.js';
 
@@ -97,6 +99,124 @@ function fixture({
       retransmittedPacketsSent,
       nackCount: outboundNackCount, pliCount: outboundPliCount, firCount: outboundFirCount,
       targetBitrate: 0, encoderImplementation: 'ExternalEncoder', powerEfficientEncoder: true,
+    }],
+  ]);
+}
+
+function audioFixture({
+  timestamp = 1_000,
+  microphonePacketsSent = 100,
+  microphoneBytesSent = 10_000,
+  microphonePacketsLost = 0,
+  screenPacketsSent = 200,
+  screenBytesSent = 20_000,
+  screenPacketsLost = 0,
+  microphonePacketsReceived = 90,
+  microphoneBytesReceived = 9_000,
+  microphoneInboundPacketsLost = 0,
+  screenPacketsReceived = 180,
+  screenBytesReceived = 18_000,
+  screenInboundPacketsLost = 0,
+  microphoneJitter = 0.004,
+  screenJitter = 0.006,
+  microphoneJitterBufferDelay = 2,
+  screenJitterBufferDelay = 3,
+  microphoneJitterBufferTargetDelay = 1.5,
+  screenJitterBufferTargetDelay = 2,
+  microphoneJitterBufferMinimumDelay = 1,
+  screenJitterBufferMinimumDelay = 1.5,
+  microphoneJitterBufferEmittedCount = 100,
+  screenJitterBufferEmittedCount = 200,
+  microphoneConcealedSamples = 5,
+  screenConcealedSamples = 7,
+  microphoneConcealmentEvents = 1,
+  screenConcealmentEvents = 2,
+} = {}) {
+  return new Map([
+    ['audio-pair', {
+      id: 'audio-pair', type: 'candidate-pair', timestamp, state: 'succeeded', nominated: true,
+      availableOutgoingBitrate: 4_000_000, currentRoundTripTime: 0.025,
+    }],
+    ['audio-transport', {
+      id: 'audio-transport', type: 'transport', timestamp, selectedCandidatePairId: 'audio-pair',
+    }],
+    ['codec-microphone', {
+      id: 'codec-microphone', type: 'codec', timestamp, mimeType: 'audio/opus',
+      payloadType: 111, clockRate: 48_000, channels: 2,
+    }],
+    ['codec-screen-audio', {
+      id: 'codec-screen-audio', type: 'codec', timestamp, mimeType: 'audio/opus',
+      payloadType: 112, clockRate: 48_000, channels: 2,
+    }],
+    ['source-microphone', {
+      id: 'source-microphone', type: 'media-source', kind: 'audio', timestamp,
+      trackIdentifier: 'microphone-track', audioLevel: 0.2, totalAudioEnergy: 0.8,
+      totalSamplesDuration: 2.1,
+    }],
+    ['source-screen-audio', {
+      id: 'source-screen-audio', type: 'media-source', kind: 'audio', timestamp,
+      trackIdentifier: 'screen-audio-track', audioLevel: 0.4, totalAudioEnergy: 1.2,
+      totalSamplesDuration: 2.1,
+    }],
+    ['remote-microphone', {
+      id: 'remote-microphone', type: 'remote-inbound-rtp', kind: 'audio', timestamp,
+      localId: 'out-microphone', packetsLost: microphonePacketsLost,
+      roundTripTime: 0.025,
+    }],
+    ['remote-screen-audio', {
+      id: 'remote-screen-audio', type: 'remote-inbound-rtp', kind: 'audio', timestamp,
+      localId: 'out-screen-audio', packetsLost: screenPacketsLost,
+      roundTripTime: 0.03,
+    }],
+    ['out-microphone', {
+      id: 'out-microphone', type: 'outbound-rtp', kind: 'audio', timestamp, ssrc: 11,
+      mediaSourceId: 'source-microphone', remoteId: 'remote-microphone', transportId: 'audio-transport',
+      codecId: 'codec-microphone', packetsSent: microphonePacketsSent, bytesSent: microphoneBytesSent,
+      retransmittedPacketsSent: 2,
+    }],
+    ['out-screen-audio', {
+      id: 'out-screen-audio', type: 'outbound-rtp', kind: 'audio', timestamp, ssrc: 12,
+      mediaSourceId: 'source-screen-audio', remoteId: 'remote-screen-audio', transportId: 'audio-transport',
+      codecId: 'codec-screen-audio', packetsSent: screenPacketsSent, bytesSent: screenBytesSent,
+      retransmittedPacketsSent: 3,
+    }],
+    ['in-microphone', {
+      id: 'in-microphone', type: 'inbound-rtp', kind: 'audio', timestamp, ssrc: 21,
+      trackIdentifier: 'microphone-received-track', transportId: 'audio-transport', codecId: 'codec-microphone',
+      packetsReceived: microphonePacketsReceived, bytesReceived: microphoneBytesReceived,
+      packetsLost: microphoneInboundPacketsLost, jitter: microphoneJitter,
+      jitterBufferDelay: microphoneJitterBufferDelay,
+      jitterBufferTargetDelay: microphoneJitterBufferTargetDelay,
+      jitterBufferMinimumDelay: microphoneJitterBufferMinimumDelay,
+      jitterBufferEmittedCount: microphoneJitterBufferEmittedCount,
+      concealedSamples: microphoneConcealedSamples,
+      silentConcealedSamples: 2,
+      concealmentEvents: microphoneConcealmentEvents,
+      insertedSamplesForDeceleration: 1,
+      removedSamplesForAcceleration: 2,
+      totalSamplesReceived: 4_800,
+      totalSamplesDuration: 2.1,
+      audioLevel: 0.1,
+      totalAudioEnergy: 0.4,
+    }],
+    ['in-screen-audio', {
+      id: 'in-screen-audio', type: 'inbound-rtp', kind: 'audio', timestamp, ssrc: 22,
+      trackIdentifier: 'screen-audio-received-track', transportId: 'audio-transport', codecId: 'codec-screen-audio',
+      packetsReceived: screenPacketsReceived, bytesReceived: screenBytesReceived,
+      packetsLost: screenInboundPacketsLost, jitter: screenJitter,
+      jitterBufferDelay: screenJitterBufferDelay,
+      jitterBufferTargetDelay: screenJitterBufferTargetDelay,
+      jitterBufferMinimumDelay: screenJitterBufferMinimumDelay,
+      jitterBufferEmittedCount: screenJitterBufferEmittedCount,
+      concealedSamples: screenConcealedSamples,
+      silentConcealedSamples: 3,
+      concealmentEvents: screenConcealmentEvents,
+      insertedSamplesForDeceleration: 2,
+      removedSamplesForAcceleration: 1,
+      totalSamplesReceived: 9_600,
+      totalSamplesDuration: 2.1,
+      audioLevel: 0.3,
+      totalAudioEnergy: 0.7,
     }],
   ]);
 }
@@ -263,4 +383,126 @@ test('counter resets do not produce negative telemetry and snapshots remain seri
   assert.equal(current.derived.averageJitterBufferTargetDelayMs, null);
   assert.doesNotThrow(() => JSON.stringify(current));
   assert.equal(current.reports.outbound.codecId, 'codec-out');
+});
+
+test('audio resolver keeps microphone and screen audio outbound/inbound paths separate', () => {
+  const stats = audioFixture();
+  assert.equal(resolveScreenShareAudioReports(stats, {
+    direction: 'outbound', trackIdentifier: 'microphone-track',
+  }).outbound.id, 'out-microphone');
+  assert.equal(resolveScreenShareAudioReports(stats, {
+    direction: 'outbound', trackIdentifier: 'screen-audio-track',
+  }).outbound.id, 'out-screen-audio');
+  assert.equal(resolveScreenShareAudioReports(stats, {
+    direction: 'inbound', trackIdentifier: 'microphone-received-track',
+  }).inbound.id, 'in-microphone');
+  assert.equal(resolveScreenShareAudioReports(stats, {
+    direction: 'inbound', trackIdentifier: 'screen-audio-received-track',
+  }).inbound.id, 'in-screen-audio');
+});
+
+test('audio telemetry derives bitrate, loss, jitter and jitter-buffer deltas per path', () => {
+  const previousStats = audioFixture();
+  const currentStats = audioFixture({
+    timestamp: 2_500,
+    microphonePacketsSent: 160,
+    microphoneBytesSent: 16_000,
+    microphonePacketsLost: 2,
+    screenPacketsSent: 320,
+    screenBytesSent: 32_000,
+    screenPacketsLost: 4,
+    microphonePacketsReceived: 150,
+    microphoneBytesReceived: 15_000,
+    microphoneInboundPacketsLost: 1,
+    screenPacketsReceived: 300,
+    screenBytesReceived: 30_000,
+    screenInboundPacketsLost: 3,
+    microphoneJitter: 0.012,
+    microphoneJitterBufferDelay: 3.5,
+    microphoneJitterBufferTargetDelay: 2.7,
+    microphoneJitterBufferMinimumDelay: 1.6,
+    microphoneJitterBufferEmittedCount: 160,
+    microphoneConcealedSamples: 10,
+    microphoneConcealmentEvents: 3,
+  });
+  const microphoneOutbound = createScreenShareAudioTelemetrySnapshot(previousStats, null, {
+    direction: 'outbound', trackIdentifier: 'microphone-track',
+  });
+  const currentMicrophoneOutbound = createScreenShareAudioTelemetrySnapshot(currentStats, microphoneOutbound, {
+    direction: 'outbound', trackIdentifier: 'microphone-track',
+  });
+  const microphoneInbound = createScreenShareAudioTelemetrySnapshot(previousStats, null, {
+    direction: 'inbound', trackIdentifier: 'microphone-received-track',
+  });
+  const currentMicrophoneInbound = createScreenShareAudioTelemetrySnapshot(currentStats, microphoneInbound, {
+    direction: 'inbound', trackIdentifier: 'microphone-received-track',
+  });
+  const screenOutbound = createScreenShareAudioTelemetrySnapshot(currentStats, null, {
+    direction: 'outbound', trackIdentifier: 'screen-audio-track',
+  });
+
+  assert.equal(currentMicrophoneOutbound.derived.bitrateBps, 32_000);
+  assert.equal(currentMicrophoneOutbound.derived.packetLossRatio, 2 / 60);
+  assert.equal(currentMicrophoneOutbound.signal.audioLevel, 0.2);
+  assert.equal(screenOutbound.derived.bitrateBps, null);
+  assert.equal(currentMicrophoneInbound.derived.packetLossRatio, 1 / 61);
+  assert.equal(currentMicrophoneInbound.derived.jitterMs, 12);
+  assert.equal(currentMicrophoneInbound.derived.jitterBufferActualMs, 25);
+  assert.equal(currentMicrophoneInbound.derived.concealedSamplesDelta, 5);
+  assert.equal(currentMicrophoneInbound.derived.concealmentEventsDelta, 2);
+});
+
+test('audio counter resets yield null instead of negative deltas', () => {
+  const previous = createScreenShareAudioTelemetrySnapshot(audioFixture(), null, {
+    direction: 'inbound', trackIdentifier: 'screen-audio-received-track',
+  });
+  const current = createScreenShareAudioTelemetrySnapshot(audioFixture({
+    timestamp: 2_500,
+    screenPacketsReceived: 10,
+    screenBytesReceived: 100,
+    screenInboundPacketsLost: 0,
+    screenJitterBufferDelay: 1,
+    screenJitterBufferEmittedCount: 10,
+    screenConcealedSamples: 1,
+  }), previous, {
+    direction: 'inbound', trackIdentifier: 'screen-audio-received-track',
+  });
+  assert.equal(current.derived.bitrateBps, null);
+  assert.equal(current.derived.packetLossRatio, null);
+  assert.equal(current.derived.jitterBufferActualMs, null);
+  assert.equal(current.derived.concealedSamplesDelta, null);
+});
+
+test('audio missing fields and settings remain null and private device fields are excluded', () => {
+  const snapshot = createScreenShareAudioTelemetrySnapshot(new Map(), null, {
+    direction: 'inbound',
+    trackSettings: {
+      sampleRate: 48_000,
+      sampleSize: 16,
+      channelCount: 2,
+      echoCancellation: true,
+      noiseSuppression: false,
+      autoGainControl: true,
+      deviceId: 'private-device-id',
+      groupId: 'private-group-id',
+      label: 'Private Microphone',
+    },
+  });
+  assert.equal(snapshot.kind, 'audio');
+  assert.equal(snapshot.codec, null);
+  assert.equal(snapshot.derived.bitrateBps, null);
+  assert.equal(snapshot.inbound.jitterBufferDelay, null);
+  assert.deepEqual(snapshot.trackSettings, {
+    sampleRate: 48_000,
+    sampleSize: 16,
+    channelCount: 2,
+    echoCancellation: true,
+    noiseSuppression: false,
+    autoGainControl: true,
+  });
+  const serialized = JSON.stringify(snapshot);
+  assert.equal(serialized.includes('private-device-id'), false);
+  assert.equal(serialized.includes('private-group-id'), false);
+  assert.equal(serialized.includes('Private Microphone'), false);
+  assert.doesNotThrow(() => JSON.stringify(snapshot));
 });

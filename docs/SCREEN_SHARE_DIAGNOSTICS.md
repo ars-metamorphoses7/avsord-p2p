@@ -16,13 +16,15 @@ Os arquivos ficam em:
 <app.getPath('userData')>/diagnostics/screen-share/
 ```
 
-Cada arquivo contém `schemaVersion`, o `runId` compartilhado, `role` (`sender` ou `receiver`), participante/origem, modo de transporte (`mesh` ou `sfu`), manifesto do ambiente, captura, série temporal, janelas agregadas de renderização e `summary`. O mesmo `runId` permite agrupar o sender e todos os receivers de uma transmissão; o nome inclui ainda papel, participante, timestamp e sequência para evitar colisões entre arquivos.
+Cada arquivo contém `schemaVersion`, o `runId` compartilhado, `role` (`sender` ou `receiver`), participante/origem, modo de transporte (`mesh` ou `sfu`), manifesto do ambiente, captura, série temporal, janelas agregadas de renderização e `summary`. Cada sample mantém `audio.microphoneOutbound`, `audio.microphoneInbound`, `audio.screenAudioOutbound` e `audio.screenAudioInbound`; caminhos ausentes são `null`. O mesmo `runId` permite agrupar o sender e todos os receivers de uma transmissão; o nome inclui ainda papel, participante, timestamp e sequência para evitar colisões entre arquivos.
 
 ### Semântica de relógio e privacidade da fonte
 
 `startedAtMs`, `performanceTimeOriginMs` e `monotonicStartMs` pertencem à máquina que gerou o artefato. O receiver registra seu próprio `startedAtMs` local quando cria a sessão; ele nunca reutiliza o timestamp de início anunciado pelo sender. Se esse timestamp remoto estiver disponível, ele aparece somente como `correlation.senderAnnouncedStartedAtMs`. `samples[*].elapsedMs` é calculado exclusivamente a partir do relógio monotônico local. Wall clocks entre máquinas não devem ser subtraídos.
 
 O diagnóstico preserva apenas um identificador de fonte limitado e o tipo (`screen`, `window` etc.), além de perfil, constraints e configurações da track. Nome ou título arbitrário de janela/aplicação não é persistido no artefato.
+
+Quando habilitado, `stream-diagnostics:config` retorna `outputDirectory` com o caminho final dos JSONs, e o processo registra uma única linha de startup no formato `[screen-share-diagnostics] enabled; output: <path>`. A extensão de áudio apenas lê RTCStats na mesma cadência do field diagnostics; não coleta PCM, não grava áudio e não altera codecs, constraints, AEC, NS, AGC, jitter buffer, gain ou routing. Veja o protocolo físico completo em [`SCREEN_SHARE_FIELD_RUN.md`](./SCREEN_SHARE_FIELD_RUN.md).
 
 Para conferir o contrato localmente:
 

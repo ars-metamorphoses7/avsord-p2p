@@ -13,9 +13,13 @@ import {
   screenShareProfile,
   screenSharePlaybackBuffer,
 } from '../media/screenShareProfiles.js';
-import { createScreenShareTelemetrySnapshot } from '../media/screenShareTelemetry.js';
+import {
+  createScreenShareAudioTelemetrySnapshot,
+  createScreenShareTelemetrySnapshot,
+} from '../media/screenShareTelemetry.js';
 import {
   createScreenShareDiagnosticsSession,
+  createScreenShareAudioSample,
   createScreenShareReceiverSample,
   createScreenShareSenderSample,
   flushScreenShareDiagnosticsSession,
@@ -71,6 +75,50 @@ function senderParameterSnapshot(sender) {
 
 function primaryEncoding(snapshot) {
   return snapshot?.encodings?.[0] || {};
+}
+
+function safeAudioTrackSettings(track) {
+  try {
+    return track?.getSettings?.() || null;
+  } catch {
+    return null;
+  }
+}
+
+function createAudioTelemetryPath(reports, previous, track, direction, timestampMs) {
+  if (!track) return null;
+  return createScreenShareAudioTelemetrySnapshot(reports, previous, {
+    direction,
+    trackIdentifier: track.id || null,
+    trackSettings: safeAudioTrackSettings(track),
+    timestampMs,
+  });
+}
+
+function createAudioTelemetrySet(reports, slot, previous, direction, timestampMs) {
+  const outbound = direction === 'outbound';
+  return {
+    microphoneOutbound: outbound
+      ? createAudioTelemetryPath(reports, previous?.microphoneOutbound, slot.audioSender?.track, 'outbound', timestampMs)
+      : null,
+    microphoneInbound: outbound
+      ? null
+      : createAudioTelemetryPath(reports, previous?.microphoneInbound, slot.audioTransceiver?.receiver?.track, 'inbound', timestampMs),
+    screenAudioOutbound: outbound
+      ? createAudioTelemetryPath(reports, previous?.screenAudioOutbound, slot.screenAudioSender?.track, 'outbound', timestampMs)
+      : null,
+    screenAudioInbound: outbound
+      ? null
+      : createAudioTelemetryPath(reports, previous?.screenAudioInbound, slot.screenAudioTransceiver?.receiver?.track, 'inbound', timestampMs),
+  };
+}
+
+function createAudioSamples(telemetrySet) {
+  if (!telemetrySet) return null;
+  return Object.fromEntries(Object.entries(telemetrySet).map(([path, telemetry]) => [
+    path,
+    createScreenShareAudioSample({ telemetry }),
+  ]));
 }
 
 function ensureDiagnosticsSession(slot, key, options) {
@@ -332,13 +380,24 @@ export function usePeerMesh({
         if (!slots.length) return;
         const activePeerCount = slots.length;
         const trackSettings = screenTrack.getSettings?.() || {};
+        const diagnosticsEnabled = isScreenShareDiagnosticsEnabled();
         const samples = (await Promise.all(slots.map(async (slot) => {
           try {
-            const reports = await slot.pc.getStats(screenTrack);
+            const reports = await slot.pc.getStats(diagnosticsEnabled ? undefined : screenTrack);
+            const timestampMs = performance.timeOrigin + performance.now();
             const telemetry = createScreenShareTelemetrySnapshot(reports, slot.videoTelemetry || null, {
               trackIdentifier: screenTrack.id,
-              timestampMs: performance.timeOrigin + performance.now(),
+              timestampMs,
             });
+            const audioTelemetry = diagnosticsEnabled
+              ? createAudioTelemetrySet(
+                reports,
+                slot,
+                slot.audioSenderTelemetry || null,
+                'outbound',
+                timestampMs,
+              )
+              : null;
             const diagnostics = {
               availableOutgoingBitrate: telemetry.network.availableOutgoingBitrate ?? 0,
               configuredMaxBitrate: Number(slot.videoSender.getParameters?.().encodings?.[0]?.maxBitrate) || 0,
@@ -373,7 +432,7 @@ export function usePeerMesh({
               encoderImplementation: telemetry.outbound.encoderImplementation,
               powerEfficientEncoder: telemetry.outbound.powerEfficientEncoder,
             });
-            return { slot, diagnostics, hasFpsSample, telemetry, softwareH264 };
+            return { slot, diagnostics, hasFpsSample, telemetry, softwareH264, audioTelemetry };
           } catch {
             // Never replay a stale measurement: one failed getStats call must
             // not advance startup guards or count three times inside a trial.
@@ -383,11 +442,13 @@ export function usePeerMesh({
         // Each RTCPeerConnection has its own encoder, congestion controller and
         // uplink estimate. A single weak viewer must not reduce quality for every
         // other viewer, so adaptation state and sender scale stay per peer.
-        await Promise.all(samples.map(({ slot, diagnostics, hasFpsSample, telemetry, softwareH264 }) => (
+        await Promise.all(samples.map(({ slot, diagnostics, hasFpsSample, telemetry, softwareH264, audioTelemetry }) => (
           enqueueSenderMutation(slot, 'videoSender', async (sender) => {
             const liveTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
             if (!sender || liveTrack !== screenTrack || sender.track !== screenTrack
                 || slot.screenWatching === false || slot.pc.connectionState === 'closed') return false;
+
+            if (audioTelemetry) slot.audioSenderTelemetry = audioTelemetry;
 
             if (softwareH264 && !String(slot.videoCodecPolicyKey).startsWith('runtime-software:')) {
               preferVideoCodecs(slot.videoTransceiver, videoProfileRef.current, {
@@ -490,6 +551,7 @@ export function usePeerMesh({
                 peerId: slot.peerId,
                 trackSettings,
                 peerCount: activePeerCount,
+                audio: createAudioSamples(audioTelemetry),
               }));
             }
             return adaptationResult;
@@ -518,6 +580,16 @@ export function usePeerMesh({
           });
           if (!telemetry.ids.inbound) return;
           slot.inboundVideoTelemetry = telemetry;
+          const audioTelemetry = isScreenShareDiagnosticsEnabled()
+            ? createAudioTelemetrySet(
+              reports,
+              slot,
+              slot.audioReceiverTelemetry || null,
+              'inbound',
+              telemetry.timestampMs,
+            )
+            : null;
+          if (audioTelemetry) slot.audioReceiverTelemetry = audioTelemetry;
           const playbackProfile = slot.remotePlaybackProfile || 'performance';
           slot.playbackAdaptation = evaluatePlaybackBufferAdaptation(
             slot.playbackAdaptation,
@@ -575,6 +647,7 @@ export function usePeerMesh({
                   configuredTargetMs: Number(receiver?.jitterBufferTarget) || null,
                   playbackTargetMs: slot.playbackAdaptation?.targetMs ?? null,
                 },
+                audio: createAudioSamples(audioTelemetry),
               }));
             }
           }

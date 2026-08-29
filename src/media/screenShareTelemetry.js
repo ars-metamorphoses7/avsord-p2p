@@ -18,6 +18,10 @@ function isVideoReport(report) {
   return report?.kind === 'video' || report?.mediaType === 'video';
 }
 
+function isAudioReport(report) {
+  return report?.kind === 'audio' || report?.mediaType === 'audio';
+}
+
 function statsValues(stats) {
   if (!stats) return [];
   if (typeof stats.values === 'function') return [...stats.values()];
@@ -117,6 +121,78 @@ export function resolveScreenShareReports(stats, selectors = {}) {
     inbound,
     codec,
     inboundCodec,
+    transport,
+  };
+}
+
+/**
+ * Resolve one audio path from a peer connection's RTCStatsReport. Audio is
+ * selected by direction and track identifier so microphone and screen audio
+ * never share a counter accumulator.
+ */
+export function resolveScreenShareAudioReports(stats, selectors = {}) {
+  const reports = statsValues(stats);
+  const byId = new Map(reports.filter((report) => report?.id).map((report) => [report.id, report]));
+  const direction = selectors.direction === 'inbound' ? 'inbound' : 'outbound';
+  const outboundCandidates = reports.filter((report) => (
+    report?.type === 'outbound-rtp'
+    && !report.isRemote
+    && isAudioReport(report)
+  ));
+  const inboundCandidates = reports.filter((report) => (
+    report?.type === 'inbound-rtp'
+    && !report.isRemote
+    && isAudioReport(report)
+  ));
+  const outbound = outboundCandidates.find((report) => (
+    matchesIdentifier(report, selectors.outboundId, selectors.outboundSsrc)
+    && (!selectors.trackIdentifier
+      || linkedTrackIdentifier(report, byId) === selectors.trackIdentifier)
+  )) || null;
+  const inbound = inboundCandidates.find((report) => (
+    matchesIdentifier(report, selectors.inboundId, selectors.inboundSsrc)
+    && (!selectors.trackIdentifier
+      || linkedTrackIdentifier(report, byId) === selectors.trackIdentifier)
+    && (!selectors.remoteTrackIdentifier
+      || linkedTrackIdentifier(report, byId) === selectors.remoteTrackIdentifier)
+  )) || null;
+  const selected = direction === 'inbound' ? inbound : outbound;
+  const mediaSource = linkedReport(byId, outbound?.mediaSourceId, 'media-source')
+    || linkedReport(byId, inbound?.mediaSourceId, 'media-source')
+    || selectReport(reports, 'media-source', (report) => (
+      isAudioReport(report)
+      && (!selectors.trackIdentifier || report.trackIdentifier === selectors.trackIdentifier)
+    ));
+  const remoteInbound = outbound
+    ? linkedReport(byId, outbound.remoteId, 'remote-inbound-rtp')
+      || selectReport(reports, 'remote-inbound-rtp', (report) => (
+        isAudioReport(report)
+        && (report.localId === outbound.id
+          || (report.ssrc !== undefined && String(report.ssrc) === String(outbound.ssrc)))
+      ))
+    : null;
+  const transport = linkedReport(byId, selected?.transportId, 'transport')
+    || selectReport(reports, 'transport', (report) => Boolean(report.selectedCandidatePairId));
+  const candidatePair = linkedReport(byId, transport?.selectedCandidatePairId, 'candidate-pair')
+    || selectReport(reports, 'candidate-pair', (report) => (
+      report.selected === true
+      || (report.nominated === true && report.state === 'succeeded')
+    ));
+  const localCandidate = linkedReport(byId, candidatePair?.localCandidateId, 'local-candidate');
+  const remoteCandidate = linkedReport(byId, candidatePair?.remoteCandidateId, 'remote-candidate');
+  const codec = linkedReport(byId, selected?.codecId, 'codec');
+
+  return {
+    direction,
+    selected,
+    mediaSource,
+    outbound,
+    remoteInbound,
+    candidatePair,
+    localCandidate,
+    remoteCandidate,
+    inbound,
+    codec,
     transport,
   };
 }
@@ -551,6 +627,283 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
         candidateType: resolved.remoteCandidate.candidateType ?? null,
         protocol: resolved.remoteCandidate.protocol ?? null,
       } : null,
+    },
+  };
+}
+
+const AUDIO_REPORT_FIELDS = [
+  'id', 'type', 'kind', 'mediaType', 'timestamp', 'codecId', 'transportId', 'ssrc',
+  'packetsSent', 'packetsReceived', 'bytesSent', 'bytesReceived', 'packetsLost',
+  'retransmittedPacketsSent', 'retransmittedBytesSent', 'retransmittedPacketsReceived',
+  'totalAudioEnergy', 'totalSamplesDuration', 'totalSamplesReceived', 'audioLevel',
+  'jitter', 'jitterBufferDelay', 'jitterBufferTargetDelay', 'jitterBufferMinimumDelay',
+  'jitterBufferEmittedCount', 'concealedSamples', 'silentConcealedSamples',
+  'concealmentEvents', 'insertedSamplesForDeceleration', 'removedSamplesForAcceleration',
+];
+
+function audioReportSnapshot(report) {
+  if (!report) return null;
+  const snapshot = {};
+  AUDIO_REPORT_FIELDS.forEach((field) => {
+    if (!(field in report)) return;
+    const value = report[field];
+    snapshot[field] = typeof value === 'number' ? finiteNumber(value) : value ?? null;
+  });
+  return snapshot;
+}
+
+function booleanOrNull(value) {
+  return typeof value === 'boolean' ? value : null;
+}
+
+export function sanitizeScreenShareAudioTrackSettings(settings = null) {
+  return {
+    sampleRate: finiteNumber(settings?.sampleRate),
+    sampleSize: finiteNumber(settings?.sampleSize),
+    channelCount: finiteNumber(settings?.channelCount),
+    echoCancellation: booleanOrNull(settings?.echoCancellation),
+    noiseSuppression: booleanOrNull(settings?.noiseSuppression),
+    autoGainControl: booleanOrNull(settings?.autoGainControl),
+  };
+}
+
+function audioCounter(report, mediaSource, field, timestamp) {
+  return counter(report?.[field] ?? mediaSource?.[field], timestamp);
+}
+
+function buildAudioCounters(resolved, snapshotTimestamp) {
+  const target = resolved.direction === 'inbound' ? resolved.inbound : resolved.outbound;
+  const targetTimestamp = reportTimestamp(target, snapshotTimestamp);
+  const remoteInboundTimestamp = reportTimestamp(resolved.remoteInbound, snapshotTimestamp);
+  const candidatePairTimestamp = reportTimestamp(resolved.candidatePair, snapshotTimestamp);
+  return {
+    packetsSent: counter(resolved.outbound?.packetsSent, reportTimestamp(resolved.outbound, snapshotTimestamp)),
+    bytesSent: counter(resolved.outbound?.bytesSent, reportTimestamp(resolved.outbound, snapshotTimestamp)),
+    retransmittedPacketsSent: counter(
+      resolved.outbound?.retransmittedPacketsSent,
+      reportTimestamp(resolved.outbound, snapshotTimestamp),
+    ),
+    retransmittedBytesSent: counter(
+      resolved.outbound?.retransmittedBytesSent,
+      reportTimestamp(resolved.outbound, snapshotTimestamp),
+    ),
+    packetsReceived: counter(resolved.inbound?.packetsReceived, reportTimestamp(resolved.inbound, snapshotTimestamp)),
+    bytesReceived: counter(resolved.inbound?.bytesReceived, reportTimestamp(resolved.inbound, snapshotTimestamp)),
+    packetsLost: counter(resolved.inbound?.packetsLost, targetTimestamp),
+    retransmittedPacketsReceived: counter(
+      resolved.inbound?.retransmittedPacketsReceived,
+      targetTimestamp,
+    ),
+    remotePacketsLost: counter(resolved.remoteInbound?.packetsLost, remoteInboundTimestamp),
+    jitterBufferDelay: audioCounter(
+      resolved.inbound,
+      null,
+      'jitterBufferDelay',
+      targetTimestamp,
+    ),
+    jitterBufferTargetDelay: audioCounter(
+      resolved.inbound,
+      null,
+      'jitterBufferTargetDelay',
+      targetTimestamp,
+    ),
+    jitterBufferMinimumDelay: audioCounter(
+      resolved.inbound,
+      null,
+      'jitterBufferMinimumDelay',
+      targetTimestamp,
+    ),
+    jitterBufferEmittedCount: audioCounter(
+      resolved.inbound,
+      null,
+      'jitterBufferEmittedCount',
+      targetTimestamp,
+    ),
+    concealedSamples: audioCounter(resolved.inbound, null, 'concealedSamples', targetTimestamp),
+    silentConcealedSamples: audioCounter(resolved.inbound, null, 'silentConcealedSamples', targetTimestamp),
+    concealmentEvents: audioCounter(resolved.inbound, null, 'concealmentEvents', targetTimestamp),
+    insertedSamplesForDeceleration: audioCounter(
+      resolved.inbound,
+      null,
+      'insertedSamplesForDeceleration',
+      targetTimestamp,
+    ),
+    removedSamplesForAcceleration: audioCounter(
+      resolved.inbound,
+      null,
+      'removedSamplesForAcceleration',
+      targetTimestamp,
+    ),
+    totalSamplesReceived: audioCounter(resolved.inbound, resolved.mediaSource, 'totalSamplesReceived', targetTimestamp),
+    totalSamplesDuration: audioCounter(resolved.inbound, resolved.mediaSource, 'totalSamplesDuration', targetTimestamp),
+    totalAudioEnergy: audioCounter(resolved.inbound, resolved.mediaSource, 'totalAudioEnergy', targetTimestamp),
+    packetsDiscardedOnSend: counter(resolved.candidatePair?.packetsDiscardedOnSend, candidatePairTimestamp),
+  };
+}
+
+function audioNetworkSnapshot(resolved) {
+  return {
+    state: resolved.candidatePair?.state ?? null,
+    nominated: resolved.candidatePair?.nominated ?? null,
+    availableOutgoingBitrate: reportNumber(resolved.candidatePair, 'availableOutgoingBitrate'),
+    availableIncomingBitrate: reportNumber(resolved.candidatePair, 'availableIncomingBitrate'),
+    currentRoundTripTime: reportNumber(resolved.candidatePair, 'currentRoundTripTime'),
+    packetsDiscardedOnSend: reportNumber(resolved.candidatePair, 'packetsDiscardedOnSend'),
+    localCandidateType: resolved.localCandidate?.candidateType ?? null,
+    remoteCandidateType: resolved.remoteCandidate?.candidateType ?? null,
+    protocol: resolved.localCandidate?.protocol || resolved.remoteCandidate?.protocol || null,
+    networkType: resolved.localCandidate?.networkType ?? null,
+    relay: resolved.localCandidate?.candidateType === 'relay'
+      || resolved.remoteCandidate?.candidateType === 'relay'
+      ? true
+      : resolved.localCandidate || resolved.remoteCandidate ? false : null,
+  };
+}
+
+/**
+ * Build one direction-specific audio snapshot. Each caller keeps its own
+ * previous snapshot, so microphone and screen audio counters cannot mix.
+ */
+export function createScreenShareAudioTelemetrySnapshot(stats, previous = null, options = {}) {
+  const resolved = resolveScreenShareAudioReports(stats, options);
+  const timestampMs = latestTimestamp(resolved, options.timestampMs);
+  const counters = buildAudioCounters(resolved, timestampMs);
+  const previousCounters = previous?.counters || {};
+  const target = resolved.direction === 'inbound' ? resolved.inbound : resolved.outbound;
+  const jitterSeconds = reportNumber(target, 'jitter') ?? reportNumber(resolved.remoteInbound, 'jitter');
+  const lostCounter = resolved.direction === 'inbound'
+    ? counters.packetsLost : counters.remotePacketsLost;
+  const packetCounter = resolved.direction === 'inbound'
+    ? counters.packetsReceived : counters.packetsSent;
+  const lostDelta = counterDelta(lostCounter, previousCounters[resolved.direction === 'inbound' ? 'packetsLost' : 'remotePacketsLost']);
+  const packetDelta = counterDelta(packetCounter, previousCounters[resolved.direction === 'inbound' ? 'packetsReceived' : 'packetsSent']);
+  const retransmittedCounter = resolved.direction === 'inbound'
+    ? counters.retransmittedPacketsReceived : counters.retransmittedPacketsSent;
+  const retransmittedPrevious = resolved.direction === 'inbound'
+    ? previousCounters.retransmittedPacketsReceived : previousCounters.retransmittedPacketsSent;
+  const derived = {
+    bitrateBps: resolved.direction === 'inbound'
+      ? perSecond(counters.bytesReceived, previousCounters.bytesReceived, 8)
+      : perSecond(counters.bytesSent, previousCounters.bytesSent, 8),
+    packetLossRatio: lostDelta === null || packetDelta === null || packetDelta <= 0
+      ? null
+      : resolved.direction === 'inbound'
+        ? lostDelta / (lostDelta + packetDelta)
+        : lostDelta / packetDelta,
+    retransmissionRatio: ratioOfDeltas(
+      retransmittedCounter,
+      retransmittedPrevious,
+      packetCounter,
+      previousCounters[resolved.direction === 'inbound' ? 'packetsReceived' : 'packetsSent'],
+    ),
+    jitterBufferActualMs: perFrame(
+      counters.jitterBufferDelay,
+      previousCounters.jitterBufferDelay,
+      counters.jitterBufferEmittedCount,
+      previousCounters.jitterBufferEmittedCount,
+      1000,
+    ),
+    jitterBufferTargetMs: perFrame(
+      counters.jitterBufferTargetDelay,
+      previousCounters.jitterBufferTargetDelay,
+      counters.jitterBufferEmittedCount,
+      previousCounters.jitterBufferEmittedCount,
+      1000,
+    ),
+    jitterBufferMinimumMs: perFrame(
+      counters.jitterBufferMinimumDelay,
+      previousCounters.jitterBufferMinimumDelay,
+      counters.jitterBufferEmittedCount,
+      previousCounters.jitterBufferEmittedCount,
+      1000,
+    ),
+    concealedSamplesDelta: counterDelta(counters.concealedSamples, previousCounters.concealedSamples),
+    silentConcealedSamplesDelta: counterDelta(
+      counters.silentConcealedSamples,
+      previousCounters.silentConcealedSamples,
+    ),
+    concealmentEventsDelta: counterDelta(counters.concealmentEvents, previousCounters.concealmentEvents),
+    insertedSamplesForDecelerationDelta: counterDelta(
+      counters.insertedSamplesForDeceleration,
+      previousCounters.insertedSamplesForDeceleration,
+    ),
+    removedSamplesForAccelerationDelta: counterDelta(
+      counters.removedSamplesForAcceleration,
+      previousCounters.removedSamplesForAcceleration,
+    ),
+    totalSamplesReceivedDelta: counterDelta(
+      counters.totalSamplesReceived,
+      previousCounters.totalSamplesReceived,
+    ),
+    totalSamplesDurationDelta: counterDelta(
+      counters.totalSamplesDuration,
+      previousCounters.totalSamplesDuration,
+    ),
+    totalAudioEnergyDelta: counterDelta(counters.totalAudioEnergy, previousCounters.totalAudioEnergy),
+    packetsDiscardedOnSend: counterDelta(
+      counters.packetsDiscardedOnSend,
+      previousCounters.packetsDiscardedOnSend,
+    ),
+  };
+  const roundTripTimeSeconds = reportNumber(resolved.remoteInbound, 'roundTripTime')
+    ?? reportNumber(resolved.candidatePair, 'currentRoundTripTime');
+  return {
+    version: TELEMETRY_VERSION,
+    sequence: previous && Number.isInteger(previous.sequence) ? previous.sequence + 1 : 0,
+    timestampMs,
+    direction: resolved.direction,
+    kind: 'audio',
+    trackSettings: sanitizeScreenShareAudioTrackSettings(options.trackSettings),
+    codec: codecSnapshot(resolved.codec),
+    signal: {
+      audioLevel: reportNumber(target, 'audioLevel') ?? reportNumber(resolved.mediaSource, 'audioLevel'),
+      totalAudioEnergy: reportNumber(target, 'totalAudioEnergy')
+        ?? reportNumber(resolved.mediaSource, 'totalAudioEnergy'),
+      totalSamplesDuration: reportNumber(target, 'totalSamplesDuration')
+        ?? reportNumber(resolved.mediaSource, 'totalSamplesDuration'),
+    },
+    outbound: {
+      packetsSent: reportNumber(resolved.outbound, 'packetsSent'),
+      bytesSent: reportNumber(resolved.outbound, 'bytesSent'),
+      retransmittedPacketsSent: reportNumber(resolved.outbound, 'retransmittedPacketsSent'),
+    },
+    inbound: {
+      packetsReceived: reportNumber(resolved.inbound, 'packetsReceived'),
+      bytesReceived: reportNumber(resolved.inbound, 'bytesReceived'),
+      packetsLost: reportNumber(resolved.inbound, 'packetsLost'),
+      retransmittedPacketsReceived: reportNumber(resolved.inbound, 'retransmittedPacketsReceived'),
+      jitterMs: jitterSeconds === null ? null : jitterSeconds * 1000,
+      jitterBufferDelay: reportNumber(resolved.inbound, 'jitterBufferDelay'),
+      jitterBufferTargetDelay: reportNumber(resolved.inbound, 'jitterBufferTargetDelay'),
+      jitterBufferMinimumDelay: reportNumber(resolved.inbound, 'jitterBufferMinimumDelay'),
+      jitterBufferEmittedCount: reportNumber(resolved.inbound, 'jitterBufferEmittedCount'),
+      concealedSamples: reportNumber(resolved.inbound, 'concealedSamples'),
+      silentConcealedSamples: reportNumber(resolved.inbound, 'silentConcealedSamples'),
+      concealmentEvents: reportNumber(resolved.inbound, 'concealmentEvents'),
+      insertedSamplesForDeceleration: reportNumber(resolved.inbound, 'insertedSamplesForDeceleration'),
+      removedSamplesForAcceleration: reportNumber(resolved.inbound, 'removedSamplesForAcceleration'),
+      totalSamplesReceived: reportNumber(resolved.inbound, 'totalSamplesReceived'),
+      totalSamplesDuration: reportNumber(resolved.inbound, 'totalSamplesDuration'),
+    },
+    remoteInbound: {
+      packetsLost: reportNumber(resolved.remoteInbound, 'packetsLost'),
+      roundTripTimeMs: reportNumber(resolved.remoteInbound, 'roundTripTime') === null
+        ? null : reportNumber(resolved.remoteInbound, 'roundTripTime') * 1000,
+    },
+    network: audioNetworkSnapshot(resolved),
+    derived: {
+      ...derived,
+      jitterMs: jitterSeconds === null ? null : jitterSeconds * 1000,
+      roundTripTimeMs: roundTripTimeSeconds === null ? null : roundTripTimeSeconds * 1000,
+    },
+    counters,
+    reports: {
+      mediaSource: audioReportSnapshot(resolved.mediaSource),
+      outbound: audioReportSnapshot(resolved.outbound),
+      remoteInbound: audioReportSnapshot(resolved.remoteInbound),
+      inbound: audioReportSnapshot(resolved.inbound),
+      codec: codecSnapshot(resolved.codec),
+      candidatePair: audioReportSnapshot(resolved.candidatePair),
     },
   };
 }

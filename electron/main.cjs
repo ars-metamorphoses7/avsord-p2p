@@ -196,6 +196,10 @@ function safeDiagnosticsPart(value, fallback = 'unknown') {
   return normalized || fallback;
 }
 
+function streamDiagnosticsOutputDirectory() {
+  return path.join(app.getPath('userData'), 'diagnostics', 'screen-share');
+}
+
 async function writeStreamDiagnosticsArtifact(artifact) {
   if (!streamDiagnosticsEnabled) return { enabled: false, written: false };
   if (!artifact || artifact.schemaVersion !== 1 || !artifact.runId
@@ -209,7 +213,7 @@ async function writeStreamDiagnosticsArtifact(artifact) {
   if (Buffer.byteLength(serialized, 'utf8') > 25 * 1024 * 1024) {
     throw new Error('Artefato de diagnóstico excede 25 MiB.');
   }
-  const directory = path.join(app.getPath('userData'), 'diagnostics', 'screen-share');
+  const directory = streamDiagnosticsOutputDirectory();
   await fs.mkdir(directory, { recursive: true });
   diagnosticsWriteSequence += 1;
   const filename = [
@@ -226,6 +230,10 @@ async function writeStreamDiagnosticsArtifact(artifact) {
 }
 
 function setupMediaDiagnostics() {
+  const outputDirectory = streamDiagnosticsEnabled ? streamDiagnosticsOutputDirectory() : null;
+  if (streamDiagnosticsEnabled) {
+    console.info(`[screen-share-diagnostics] enabled; output: ${outputDirectory}`);
+  }
   ipcMain.handle('media:capabilities', async () => {
     const featureStatus = app.getGPUFeatureStatus();
     const videoEncode = featureStatus?.video_encode || 'unknown';
@@ -250,6 +258,7 @@ function setupMediaDiagnostics() {
   });
   ipcMain.handle('stream-diagnostics:config', async () => ({
     enabled: streamDiagnosticsEnabled,
+    outputDirectory,
     environment: streamDiagnosticsEnabled ? await readMediaDiagnosticsManifest() : null,
   }));
   ipcMain.handle('stream-diagnostics:write', (_event, artifact) => writeStreamDiagnosticsArtifact(artifact));

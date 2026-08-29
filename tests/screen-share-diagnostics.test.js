@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   MAX_SCREEN_SHARE_DIAGNOSTIC_SAMPLES,
+  createScreenShareAudioSample,
   createScreenShareDiagnosticsSession,
   createScreenShareReceiverSample,
   createScreenShareRunContext,
@@ -188,13 +189,20 @@ test('diagnostics capture omits arbitrary source window titles', () => {
     role: 'sender',
     capture: {
       profileId: 'performance',
-      source: { id: 'window:limited-id', type: 'window', name: 'Private Window Title', title: 'Private Title' },
+      source: {
+        id: 'window:limited-id',
+        type: 'window',
+        name: 'Private Window Title',
+        title: 'Private Title',
+        label: 'Private Application',
+      },
     },
   });
   const artifact = session.finish('test');
   const serialized = JSON.stringify(artifact);
   assert.equal(serialized.includes('Private Window Title'), false);
   assert.equal(serialized.includes('Private Title'), false);
+  assert.equal(serialized.includes('Private Application'), false);
   assert.deepEqual(artifact.capture.source, { id: 'window:limited-id', type: 'window' });
 });
 
@@ -287,6 +295,45 @@ test('sender and receiver sample builders expose the field-run metrics', () => {
   assert.equal(receiver.jitter.actualAverageMs, 12);
   assert.equal(receiver.jitter.targetAverageMs, 20);
   assert.equal(receiver.jitter.minimumAverageMs, 8);
+  assert.equal(sender.audio.microphoneOutbound, null);
+  assert.equal(receiver.audio.screenAudioInbound, null);
+});
+
+test('audio samples remain path-specific and summaries expose field-run distributions', () => {
+  const microphoneOutbound = createScreenShareAudioSample({
+    telemetry: {
+      direction: 'outbound',
+      codec: { mimeType: 'audio/opus', clockRate: 48_000, channels: 2 },
+      trackSettings: {
+        sampleRate: 48_000,
+        sampleSize: 16,
+        channelCount: 2,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      outbound: { packetsSent: 100, bytesSent: 10_000 },
+      inbound: { packetsReceived: null, bytesReceived: null, packetsLost: null },
+      remoteInbound: { packetsLost: 0 },
+      derived: {
+        bitrateBps: 80_000,
+        packetLossRatio: 0,
+        jitterMs: null,
+        roundTripTimeMs: 20,
+        retransmissionRatio: 0,
+        packetsDiscardedOnSend: 0,
+      },
+      signal: { audioLevel: 0.2, totalAudioEnergy: 0.5, totalSamplesDuration: 1 },
+    },
+  });
+  const session = createScreenShareDiagnosticsSession({ enabled: true, runId: 'audio-summary', role: 'sender' });
+  session.recordSample({ elapsedMs: 0, audio: { microphoneOutbound, microphoneInbound: null, screenAudioOutbound: null, screenAudioInbound: null } });
+  const artifact = session.finish('test');
+  assert.equal(artifact.samples[0].audio.microphoneOutbound.track.kind, 'audio');
+  assert.equal(artifact.samples[0].audio.screenAudioOutbound, null);
+  assert.equal(artifact.summary.audio.microphoneOutbound.bitrateBps.p50, 80_000);
+  assert.equal(artifact.summary.audio.microphoneOutbound.jitterMs.p50, null);
+  assert.equal(artifact.summary.audio.microphoneInbound, null);
 });
 
 test('sender summary remains JSON serializable after non-finite input', () => {
