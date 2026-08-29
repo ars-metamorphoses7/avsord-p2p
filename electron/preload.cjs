@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('jumpDesktop', {
   isDesktop: true,
+  streamDiagnosticsEnabled: String(process.env.JUMP_STREAM_DIAGNOSTICS || '').trim() === '1',
   // electron . (desenvolvimento) define defaultApp; no pacote distribuído ele é falso.
   isPackaged: !process.defaultApp,
   getWindowState: () => ipcRenderer.invoke('window:state'),
@@ -11,6 +12,8 @@ contextBridge.exposeInMainWorld('jumpDesktop', {
   writeClipboardText: (value) => ipcRenderer.invoke('clipboard:write-text', value),
   getDesktopSources: () => ipcRenderer.invoke('desktop:sources'),
   getMediaCapabilities: () => ipcRenderer.invoke('media:capabilities'),
+  getStreamDiagnosticsConfig: () => ipcRenderer.invoke('stream-diagnostics:config'),
+  writeScreenShareDiagnosticsArtifact: (artifact) => ipcRenderer.invoke('stream-diagnostics:write', artifact),
   startDesktopAudio: (target) => ipcRenderer.invoke('desktop:audio-start', target),
   stopDesktopAudio: () => ipcRenderer.invoke('desktop:audio-stop'),
   onDesktopAudioData: (callback) => {

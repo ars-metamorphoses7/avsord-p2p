@@ -101,6 +101,8 @@ export function resolveScreenShareReports(stats, selectors = {}) {
       report.selected === true
       || (report.nominated === true && report.state === 'succeeded')
     ));
+  const localCandidate = linkedReport(byId, candidatePair?.localCandidateId, 'local-candidate');
+  const remoteCandidate = linkedReport(byId, candidatePair?.remoteCandidateId, 'remote-candidate');
   const codec = linkedReport(byId, outbound?.codecId, 'codec')
     || linkedReport(byId, inbound?.codecId, 'codec');
   const inboundCodec = linkedReport(byId, inbound?.codecId, 'codec');
@@ -110,6 +112,8 @@ export function resolveScreenShareReports(stats, selectors = {}) {
     outbound,
     remoteInbound,
     candidatePair,
+    localCandidate,
+    remoteCandidate,
     inbound,
     codec,
     inboundCodec,
@@ -222,6 +226,8 @@ function buildCounters(resolved, snapshotTimestamp) {
     totalDecodeTime: counter(resolved.inbound?.totalDecodeTime, inboundTimestamp),
     totalProcessingDelay: counter(resolved.inbound?.totalProcessingDelay, inboundTimestamp),
     jitterBufferDelay: counter(resolved.inbound?.jitterBufferDelay, inboundTimestamp),
+    jitterBufferTargetDelay: counter(resolved.inbound?.jitterBufferTargetDelay, inboundTimestamp),
+    jitterBufferMinimumDelay: counter(resolved.inbound?.jitterBufferMinimumDelay, inboundTimestamp),
     jitterBufferEmittedCount: counter(resolved.inbound?.jitterBufferEmittedCount, inboundTimestamp),
     decodeQpSum: counter(resolved.inbound?.qpSum, inboundTimestamp),
     inboundNackCount: counter(resolved.inbound?.nackCount, inboundTimestamp),
@@ -391,6 +397,20 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
       previousCounters.jitterBufferEmittedCount,
       1000,
     ),
+    averageJitterBufferTargetDelayMs: perFrame(
+      counters.jitterBufferTargetDelay,
+      previousCounters.jitterBufferTargetDelay,
+      counters.jitterBufferEmittedCount,
+      previousCounters.jitterBufferEmittedCount,
+      1000,
+    ),
+    averageJitterBufferMinimumDelayMs: perFrame(
+      counters.jitterBufferMinimumDelay,
+      previousCounters.jitterBufferMinimumDelay,
+      counters.jitterBufferEmittedCount,
+      previousCounters.jitterBufferEmittedCount,
+      1000,
+    ),
     inboundJitterMs: reportNumber(resolved.inbound, 'jitter') === null
       ? null : reportNumber(resolved.inbound, 'jitter') * 1000,
     remoteInboundJitterMs: reportNumber(resolved.remoteInbound, 'jitter') === null
@@ -496,6 +516,14 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
       bytesReceived: reportNumber(resolved.candidatePair, 'bytesReceived'),
       packetsDiscardedOnSend: reportNumber(resolved.candidatePair, 'packetsDiscardedOnSend'),
       bytesDiscardedOnSend: reportNumber(resolved.candidatePair, 'bytesDiscardedOnSend'),
+      localCandidateType: resolved.localCandidate?.candidateType ?? null,
+      remoteCandidateType: resolved.remoteCandidate?.candidateType ?? null,
+      protocol: resolved.localCandidate?.protocol || resolved.remoteCandidate?.protocol || null,
+      networkType: resolved.localCandidate?.networkType ?? null,
+      relay: resolved.localCandidate?.candidateType === 'relay'
+        || resolved.remoteCandidate?.candidateType === 'relay'
+        ? true
+        : resolved.localCandidate || resolved.remoteCandidate ? false : null,
     },
     codec: codecSnapshot(resolved.codec),
     inboundCodec: codecSnapshot(resolved.inboundCodec),
@@ -510,6 +538,19 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
       codec: cloneReport(resolved.codec),
       inboundCodec: cloneReport(resolved.inboundCodec),
       transport: cloneReport(resolved.transport),
+      localCandidate: resolved.localCandidate ? {
+        id: resolved.localCandidate.id ?? null,
+        type: resolved.localCandidate.type ?? null,
+        candidateType: resolved.localCandidate.candidateType ?? null,
+        protocol: resolved.localCandidate.protocol ?? null,
+        networkType: resolved.localCandidate.networkType ?? null,
+      } : null,
+      remoteCandidate: resolved.remoteCandidate ? {
+        id: resolved.remoteCandidate.id ?? null,
+        type: resolved.remoteCandidate.type ?? null,
+        candidateType: resolved.remoteCandidate.candidateType ?? null,
+        protocol: resolved.remoteCandidate.protocol ?? null,
+      } : null,
     },
   };
 }

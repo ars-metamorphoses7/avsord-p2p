@@ -46,6 +46,7 @@ import { ParticipantVolumePopover } from './components/ParticipantVolumePopover.
 import { ScreenShareDialog } from './components/ScreenShareDialog.jsx';
 import { useScreenShare } from './hooks/useScreenShare.js';
 import { playTransmissionSound } from './media/callSounds.js';
+import { flushScreenShareDiagnosticsSession } from './media/screenShareDiagnostics.js';
 import { normalizeScreenShareProfileId } from './media/screenShareProfiles.js';
 import { usePeerMesh } from './webrtc/usePeerMesh.js';
 import { useScreenSfu } from './webrtc/useScreenSfu.js';
@@ -73,6 +74,14 @@ const UNREAD_COUNTS_KEY = 'jump-unread-counts';
 const PROFILE_STATUS_KEY = 'jump-profile-status';
 const MESSAGE_CLOCK_KEY = 'jump-message-clock';
 const CALL_CHAT_SPLIT_KEY = 'jump-call-chat-split';
+
+function screenShareRunCallState(streamRef, runRef) {
+  if (globalThis.jumpDesktop?.streamDiagnosticsEnabled !== true || !streamRef.current) return {};
+  return {
+    screenShareRunId: runRef.current?.runId || '',
+    screenShareRunStartedAtMs: runRef.current?.startedAtMs || null,
+  };
+}
 const SCREEN_SHARE_PROFILE_KEY = 'jump-screen-share-profile';
 const MAX_CONTACTS = 100;
 const PRESENCE_STATUSES = ['online', 'dnd', 'offline'];
@@ -1114,6 +1123,8 @@ function App() {
   const cameraStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const screenAudioSessionRef = useRef(null);
+  const screenShareRunRef = useRef(null);
+  const screenDiagnosticsConfigRef = useRef(null);
   const videoProfileRef = useRef(screenShareProfileId);
   const inCallRef = useRef(false);
   const callStartedAtRef = useRef(0);
@@ -1123,6 +1134,17 @@ function App() {
   const repairPeerMediaRef = useRef(null);
   const setPeerScreenDeliveryRef = useRef(null);
   const setPeerPlaybackProfileRef = useRef(null);
+
+  useEffect(() => {
+    if (globalThis.jumpDesktop?.streamDiagnosticsEnabled !== true) return undefined;
+    let active = true;
+    const readConfig = globalThis.jumpDesktop.getStreamDiagnosticsConfig;
+    if (typeof readConfig !== 'function') return () => { active = false; };
+    void readConfig().then((config) => {
+      if (active) screenDiagnosticsConfigRef.current = config || null;
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   const updateComposerCursor = useCallback(() => {
     const input = composerInputRef.current;
@@ -1447,7 +1469,34 @@ function App() {
     return () => { active = false; };
   }, []);
 
+  const flushSlotDiagnostics = useCallback((slot, reason) => {
+    if (!slot) return;
+    [
+      'senderDiagnosticsSession',
+      'receiverDiagnosticsSession',
+      'sfuProducerDiagnosticsSession',
+      'sfuReceiverDiagnosticsSession',
+    ].forEach((key) => {
+      const session = slot[key];
+      if (!session) return;
+      void flushScreenShareDiagnosticsSession(session, reason);
+      slot[key] = null;
+    });
+  }, []);
+
+  const flushRemoteDiagnostics = useCallback((slot, reason) => {
+    if (!slot) return;
+    ['receiverDiagnosticsSession', 'sfuReceiverDiagnosticsSession'].forEach((key) => {
+      const session = slot[key];
+      if (!session) return;
+      void flushScreenShareDiagnosticsSession(session, reason);
+      slot[key] = null;
+    });
+    if (slot.remoteBundle) slot.remoteBundle.screenShareDiagnosticsSession = null;
+  }, []);
+
   const clearRemoteCallMedia = useCallback((peerId) => {
+    flushSlotDiagnostics(peerConnectionsRef.current.get(peerId), 'peer-disconnected');
     remoteStreamsRef.current.delete(peerId);
     remoteSharingRef.current.delete(peerId);
     [...dataChunksRef.current.keys()].filter((key) => key.startsWith(`${peerId}:`)).forEach((key) => dataChunksRef.current.delete(key));
@@ -1471,7 +1520,7 @@ function App() {
     });
     setFocusedCallPeerId((current) => current === peerId ? '' : current);
     setVolumePopover((current) => current?.peerId === peerId ? null : current);
-  }, []);
+  }, [flushSlotDiagnostics, peerConnectionsRef]);
 
   const playShareNotification = useCallback((type) => {
     const now = Date.now();
@@ -1482,6 +1531,17 @@ function App() {
   }, []);
   const playLocalShareStarted = useCallback(() => playShareNotification('local-start'), [playShareNotification]);
   const playLocalShareStopped = useCallback(() => playShareNotification('local-stop'), [playShareNotification]);
+  const handleLocalShareStopped = useCallback((stoppedRun = null) => {
+    playLocalShareStopped();
+    peerConnectionsRef.current.forEach((slot) => {
+      ['senderDiagnosticsSession', 'sfuProducerDiagnosticsSession'].forEach((key) => {
+        const session = slot[key];
+        if (!session || (stoppedRun?.runId && session.runId !== stoppedRun.runId)) return;
+        void flushScreenShareDiagnosticsSession(session, 'share-stopped');
+        slot[key] = null;
+      });
+    });
+  }, [flushScreenShareDiagnosticsSession, peerConnectionsRef, playLocalShareStopped]);
 
   const broadcastRoomData = useCallback((payload, exceptPeerId = '') => {
     peerConnectionsRef.current.forEach((slot, peerId) => {
@@ -1502,6 +1562,7 @@ function App() {
       sharing: Boolean(screenStreamRef.current),
       sharingAudio: Boolean(screenAudioSessionRef.current),
       sharingProfile: screenStreamRef.current ? videoProfileRef.current : '',
+      ...screenShareRunCallState(screenStreamRef, screenShareRunRef),
       ...overrides,
     });
   }, [broadcastRoomData]);
@@ -1685,6 +1746,7 @@ function App() {
         sharing: Boolean(screenStreamRef.current),
         sharingAudio: Boolean(screenAudioSessionRef.current),
         sharingProfile: screenStreamRef.current ? videoProfileRef.current : '',
+        ...screenShareRunCallState(screenStreamRef, screenShareRunRef),
       });
       requestDirectSync();
       messagesRef.current.forEach((message) => {
@@ -1810,9 +1872,17 @@ function App() {
           sharing: Boolean(payload.sharing),
           sharingAudio: Boolean(payload.sharingAudio),
           sharingProfile: payload.sharing ? normalizeScreenShareProfileId(String(payload.sharingProfile || 'performance')) : '',
+          screenShareRunId: payload.sharing ? String(payload.screenShareRunId || '').trim().slice(0, 128) : '',
+          screenShareRunStartedAtMs: payload.sharing ? Number(payload.screenShareRunStartedAtMs) || null : null,
         };
         if (nextMediaState.sharing) setPeerPlaybackProfileRef.current?.(peerId, nextMediaState.sharingProfile);
         const wasSharing = remoteSharingRef.current.get(peerId) === true;
+        const previousRunId = slot?.remoteMediaState?.screenShareRunId || '';
+        const runChanged = wasSharing && nextMediaState.sharing && previousRunId
+          && previousRunId !== nextMediaState.screenShareRunId;
+        if (slot && wasSharing && (!nextMediaState.sharing || runChanged)) {
+          flushRemoteDiagnostics(slot, runChanged ? 'remote-share-restarted' : 'remote-share-stopped');
+        }
         if (nextMediaState.sharing) remoteSharingRef.current.set(peerId, true);
         else remoteSharingRef.current.delete(peerId);
         if (!wasSharing && nextMediaState.sharing) {
@@ -1851,6 +1921,8 @@ function App() {
             camera: Boolean(payload.camera),
             sharing: Boolean(payload.sharing),
             sharingAudio: Boolean(payload.sharingAudio),
+            screenShareRunId: nextMediaState.screenShareRunId,
+            screenShareRunStartedAtMs: nextMediaState.screenShareRunStartedAtMs,
           },
         }));
         return;
@@ -1915,7 +1987,7 @@ function App() {
       });
     };
     if (channel.readyState === 'open') requestSync();
-  }, [clearRemoteCallMedia, mergeDirectMessages, mergeMessages, playShareNotification, requestAttachmentFromPeer, requestDirectSync, sendAttachmentToPeer]);
+  }, [clearRemoteCallMedia, flushRemoteDiagnostics, mergeDirectMessages, mergeMessages, playShareNotification, requestAttachmentFromPeer, requestDirectSync, sendAttachmentToPeer]);
 
   const {
     closePeer,
@@ -1936,6 +2008,8 @@ function App() {
     cameraStreamRef,
     screenStreamRef,
     screenAudioSessionRef,
+    screenShareRunRef,
+    screenDiagnosticsConfigRef,
     videoProfileRef,
     remoteStreamsRef,
     sendSignal,
@@ -1959,10 +2033,13 @@ function App() {
   } = useScreenSfu({
     inCall,
     isSharing,
+    localPeerIdRef: peerIdRef,
     onError: setPermissionError,
     peerConnectionsRef,
     remoteStreamsRef,
     screenStreamRef,
+    screenShareRunRef,
+    screenDiagnosticsConfigRef,
     sendSignal,
     setPeerScreenTransport,
     setRemoteStreams,
@@ -2365,6 +2442,7 @@ function App() {
 
   const leaveCall = useCallback(() => {
     const wasSharing = Boolean(screenStreamRef.current);
+    const stoppedRun = screenShareRunRef.current;
     const previousScreenStream = screenStreamRef.current;
     screenStreamRef.current = null;
     void screenAudioSessionRef.current?.stop();
@@ -2374,6 +2452,7 @@ function App() {
     audioStreamRef.current = null;
     outboundAudioStreamRef.current = null;
     screenAudioSessionRef.current = null;
+    screenShareRunRef.current = null;
     cameraStreamRef.current = null;
     screenStreamRef.current = null;
     void replacePeerTrack('audioSender', null);
@@ -2389,8 +2468,8 @@ function App() {
     setIsMuted(false);
     setIsDeafened(false);
     setCallPanelOpen(false);
-    if (wasSharing) playLocalShareStopped();
-  }, [announceCallState, playLocalShareStopped, replacePeerTrack]);
+    if (wasSharing) handleLocalShareStopped(stoppedRun);
+  }, [announceCallState, handleLocalShareStopped, replacePeerTrack]);
 
   const joinRoom = useCallback((nextRoomId, nextRoomName = '', nextRoomPassword = '') => {
     const normalizedId = slugify(nextRoomId);
@@ -2530,9 +2609,10 @@ function App() {
     cameraStreamRef,
     inCallRef,
     onShareStarted: playLocalShareStarted,
-    onShareStopped: playLocalShareStopped,
+    onShareStopped: handleLocalShareStopped,
     replacePeerTrack,
     screenAudioSessionRef,
+    screenShareRunRef,
     screenStreamRef,
     setIsSharing,
     setPermissionError,
@@ -3150,6 +3230,7 @@ function App() {
                         <CallStreamCard
                           key={person.peerId}
                           avatar={<Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xl" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} speaking={personIsSpeaking} />}
+                          diagnosticsSession={person.self ? null : remoteBundle?.screenShareDiagnosticsSession}
                           hasVideo={hasVideo}
                           isDeafened={isDeafened}
                           isFocused={focusedCallPeerId === person.peerId}

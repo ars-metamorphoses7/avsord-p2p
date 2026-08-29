@@ -11,6 +11,13 @@ import {
   screenShareProfile,
 } from '../media/screenShareProfiles.js';
 import { createScreenShareTelemetrySnapshot } from '../media/screenShareTelemetry.js';
+import {
+  createScreenShareDiagnosticsSession,
+  createScreenShareReceiverSample,
+  createScreenShareSenderSample,
+  flushScreenShareDiagnosticsSession,
+  isScreenShareDiagnosticsEnabled,
+} from '../media/screenShareDiagnostics.js';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_MIN_VIEWERS = 3;
@@ -28,6 +35,45 @@ function closeQuietly(entity) {
   try { entity?.close?.(); } catch { /* Already closed. */ }
 }
 
+function sfuSenderParameters(producer) {
+  const parameters = producer?.rtpSender?.getParameters?.();
+  if (!parameters) return null;
+  return {
+    trackId: producer.track?.id || null,
+    degradationPreference: parameters.degradationPreference || null,
+    encodings: (parameters.encodings || []).map((encoding) => ({
+      active: encoding.active ?? null,
+      maxBitrate: Number(encoding.maxBitrate) || null,
+      maxFramerate: Number(encoding.maxFramerate) || null,
+      scaleResolutionDownBy: Number(encoding.scaleResolutionDownBy) || null,
+      scalabilityMode: encoding.scalabilityMode || null,
+    })),
+  };
+}
+
+function ensureSfuDiagnosticsSession(slot, key, options) {
+  if (!isScreenShareDiagnosticsEnabled() || !options?.run?.runId) return null;
+  const current = slot[key];
+  if (current?.runId === options.run.runId) return current;
+  if (current) void flushScreenShareDiagnosticsSession(current, 'run-replaced');
+  const session = createScreenShareDiagnosticsSession({
+    enabled: true,
+    runId: options.run.runId,
+    role: options.role,
+    participantId: options.participantId,
+    peerId: options.peerId,
+    sourcePeerId: options.sourcePeerId,
+    transportMode: 'sfu',
+    environment: options.environment || {},
+    startedAtMs: options.run.startedAtMs,
+    performanceTimeOriginMs: options.run.performanceTimeOriginMs,
+    monotonicStartMs: options.run.monotonicStartMs,
+    capture: options.run.capture,
+  });
+  slot[key] = session;
+  return session;
+}
+
 /**
  * Adds an SFU screen-only path alongside the existing mesh. Camera, voice,
  * screen audio, chat and file transfer stay P2P. A publisher keeps each mesh
@@ -37,10 +83,13 @@ function closeQuietly(entity) {
 export function useScreenSfu({
   inCall,
   isSharing,
+  localPeerIdRef,
   onError,
   peerConnectionsRef,
   remoteStreamsRef,
   screenStreamRef,
+  screenShareRunRef,
+  screenDiagnosticsConfigRef,
   sendSignal,
   setPeerScreenTransport,
   setRemoteStreams,
@@ -57,6 +106,7 @@ export function useScreenSfu({
   const producerDiagnosticsRef = useRef(null);
   const producerTelemetryRef = useRef(null);
   const producerAdaptationRef = useRef(null);
+  const producerDiagnosticsSessionRef = useRef(null);
   const producerLastBitrateIncreaseAtRef = useRef(0);
   const runtimeCodecOverridesRef = useRef(new Map());
   const consumersRef = useRef(new Map());
@@ -110,6 +160,8 @@ export function useScreenSfu({
     const entry = consumersRef.current.get(producerId);
     if (!entry) return false;
     consumersRef.current.delete(producerId);
+    void flushScreenShareDiagnosticsSession(entry.receiverDiagnosticsSession, 'consumer-closed');
+    entry.receiverDiagnosticsSession = null;
     restoreMeshVideo(entry.peerId, entry.consumer);
     if (notify) void request('close-consumer', { consumerId: entry.consumer.id }).catch(() => {});
     closeQuietly(entry.consumer);
@@ -127,6 +179,7 @@ export function useScreenSfu({
       videoStream: null,
       microphoneStream: null,
       screenAudioStream: null,
+      screenShareDiagnosticsSession: null,
     };
     slot.remoteBundle.stream = incoming;
     slot.remoteBundle.videoStream = stream;
@@ -207,7 +260,11 @@ export function useScreenSfu({
         rtpCapabilities: deviceRef.current.recvRtpCapabilities,
       });
       const consumer = await transport.consume(options);
-      const entry = { consumer, peerId: options.peerId || peerId };
+      const entry = {
+        consumer,
+        peerId: options.peerId || peerId,
+        runId: options.screenShareRunId || options.appData?.screenShareRunId || null,
+      };
       consumersRef.current.set(producerId, entry);
       consumer.on('transportclose', () => closeConsumer(producerId));
       consumer.on('trackended', () => closeConsumer(producerId));
@@ -239,6 +296,8 @@ export function useScreenSfu({
   const stopPublishing = useCallback(async ({ notify = true } = {}) => {
     const producer = producerRef.current;
     producerRef.current = null;
+    void flushScreenShareDiagnosticsSession(producerDiagnosticsSessionRef.current, 'sfu-publishing-stopped');
+    producerDiagnosticsSessionRef.current = null;
     producerDiagnosticsRef.current = null;
     producerTelemetryRef.current = null;
     producerAdaptationRef.current = null;
@@ -309,7 +368,11 @@ export function useScreenSfu({
       // mediasoup send transport. Per-profile x-google-start-bitrate values
       // reuse the same payload type and Chromium rejects the next BUNDLE offer
       // as a codec collision. maxBitrate above remains the authoritative cap.
-      appData: { mediaTag: 'screen', profileId: profile.id },
+      appData: {
+        mediaTag: 'screen',
+        profileId: profile.id,
+        ...(screenShareRunRef.current?.runId ? { screenShareRunId: screenShareRunRef.current.runId } : {}),
+      },
     });
     producerRef.current = producer;
     producerAdaptationRef.current = initialAdaptation;
@@ -445,6 +508,42 @@ export function useScreenSfu({
           }
           producerAdaptationRef.current = next;
         }
+        const run = screenShareRunRef.current;
+        if (isScreenShareDiagnosticsEnabled() && run?.runId) {
+          if (producerDiagnosticsSessionRef.current?.runId !== run.runId) {
+            if (producerDiagnosticsSessionRef.current) {
+              void flushScreenShareDiagnosticsSession(producerDiagnosticsSessionRef.current, 'run-replaced');
+            }
+            producerDiagnosticsSessionRef.current = createScreenShareDiagnosticsSession({
+              enabled: true,
+              runId: run.runId,
+              role: 'sender',
+              participantId: localPeerIdRef.current,
+              peerId: localPeerIdRef.current,
+              transportMode: 'sfu',
+              environment: screenDiagnosticsConfigRef.current?.environment,
+              startedAtMs: run.startedAtMs,
+              performanceTimeOriginMs: run.performanceTimeOriginMs,
+              monotonicStartMs: run.monotonicStartMs,
+              capture: run.capture,
+            });
+          }
+          const session = producerDiagnosticsSessionRef.current;
+          if (session) {
+            session.updateMetadata({
+              capture: { ...(run.capture || {}), trackSettings },
+              transport: telemetry.network,
+            });
+            session.recordSample(createScreenShareSenderSample({
+              telemetry,
+              adaptation: producerAdaptationRef.current || next,
+              senderParameters: sfuSenderParameters(producer),
+              peerId: localPeerIdRef.current,
+              trackSettings,
+              peerCount: 1,
+            }));
+          }
+        }
       } catch {
         // A missing stats field must not interrupt the active SFU stream. The
         // next interval retries until an actual encoder is observable.
@@ -460,6 +559,70 @@ export function useScreenSfu({
       window.clearInterval(interval);
     };
   }, [isSharing, screenStreamRef, stopPublishing, syncPublishing]);
+
+  useEffect(() => {
+    if (!isScreenShareDiagnosticsEnabled()) return undefined;
+    let running = false;
+    const sampleConsumers = async () => {
+      if (running) return;
+      running = true;
+      try {
+        await Promise.all([...consumersRef.current.entries()].map(async ([producerId, entry]) => {
+          if (typeof entry.consumer?.getStats !== 'function' || entry.consumer.closed) return;
+          try {
+            const reports = await entry.consumer.getStats();
+            const telemetry = createScreenShareTelemetrySnapshot(
+              reports,
+              entry.telemetry || null,
+              { timestampMs: performance.timeOrigin + performance.now() },
+            );
+            if (!telemetry.ids.inbound) return;
+            entry.telemetry = telemetry;
+            const slot = peerConnectionsRef.current.get(entry.peerId);
+            const runId = entry.runId || slot?.remoteMediaState?.screenShareRunId || '';
+            if (!runId) return;
+            const run = {
+              runId,
+              startedAtMs: slot?.remoteMediaState?.screenShareRunStartedAtMs || Date.now(),
+              performanceTimeOriginMs: performance.timeOrigin,
+              monotonicStartMs: performance.now(),
+              capture: null,
+            };
+            const session = ensureSfuDiagnosticsSession(entry, 'receiverDiagnosticsSession', {
+              run,
+              role: 'receiver',
+              participantId: localPeerIdRef.current,
+              peerId: localPeerIdRef.current,
+              sourcePeerId: entry.peerId,
+              environment: screenDiagnosticsConfigRef.current?.environment,
+            });
+            if (!session) return;
+            if (slot?.remoteBundle) {
+              slot.remoteBundle.screenShareDiagnosticsSession = session;
+              setRemoteStreams((current) => ({
+                ...current,
+                [entry.peerId]: { ...slot.remoteBundle },
+              }));
+            }
+            session.updateMetadata({ transport: telemetry.network });
+            session.recordSample(createScreenShareReceiverSample({
+              telemetry,
+              peerId: localPeerIdRef.current,
+              sourcePeerId: entry.peerId,
+              receiver: { producerId },
+            }));
+          } catch {
+            // Optional mediasoup stats must never affect the active consumer.
+          }
+        }));
+      } finally {
+        running = false;
+      }
+    };
+    const timer = window.setInterval(() => { void sampleConsumers(); }, SCREEN_SHARE_ADAPT_INTERVAL_MS);
+    void sampleConsumers();
+    return () => window.clearInterval(timer);
+  }, [localPeerIdRef, peerConnectionsRef, screenDiagnosticsConfigRef, setRemoteStreams]);
 
   const setConsumerWatching = useCallback(async (peerId, watching) => {
     const entry = [...consumersRef.current.values()].find((candidate) => candidate.peerId === peerId);

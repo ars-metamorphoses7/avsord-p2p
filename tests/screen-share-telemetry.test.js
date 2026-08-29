@@ -20,6 +20,10 @@ function fixture({
   decodeQp = 1_500,
   reportedFps = 0,
   jitter = 0,
+  jitterBufferDelay = 0,
+  jitterBufferTargetDelay = 0,
+  jitterBufferMinimumDelay = 0,
+  jitterBufferEmittedCount = 0,
   remoteJitter = 0,
   rtt = 0,
   packetsLost = 0,
@@ -37,6 +41,14 @@ function fixture({
   totalFreezesDuration = 0,
 } = {}) {
   return new Map([
+    ['local-candidate', {
+      id: 'local-candidate', type: 'local-candidate', candidateType: 'host', protocol: 'udp',
+      networkType: 'wifi', address: '192.0.2.1', port: 1234,
+    }],
+    ['remote-candidate', {
+      id: 'remote-candidate', type: 'remote-candidate', candidateType: 'srflx', protocol: 'udp',
+      address: '198.51.100.2', port: 5678,
+    }],
     ['codec-in', {
       id: 'codec-in', type: 'codec', timestamp, mimeType: 'video/VP9', payloadType: 98,
     }],
@@ -44,6 +56,7 @@ function fixture({
       id: 'pair', type: 'candidate-pair', timestamp, state: 'succeeded', nominated: true,
       availableOutgoingBitrate: 0, availableIncomingBitrate: 0,
       currentRoundTripTime: rtt, bytesSent: 0, bytesReceived: 0,
+      localCandidateId: 'local-candidate', remoteCandidateId: 'remote-candidate',
     }],
     ['remote-in', {
       id: 'remote-in', type: 'remote-inbound-rtp', kind: 'video', timestamp,
@@ -63,7 +76,8 @@ function fixture({
       framesDecoded: decoded, framesDropped: 0, bytesReceived: receivedBytes,
       keyFramesDecoded,
       totalDecodeTime: decodeTime, qpSum: decodeQp, framesPerSecond: reportedFps,
-      packetsLost: 0, jitter, jitterBufferDelay: 0, jitterBufferEmittedCount: 0,
+      packetsLost: 0, jitter, jitterBufferDelay, jitterBufferTargetDelay,
+      jitterBufferMinimumDelay, jitterBufferEmittedCount,
       freezeCount, totalFreezesDuration,
       nackCount: inboundNackCount, pliCount: inboundPliCount, firCount: inboundFirCount,
     }],
@@ -93,10 +107,18 @@ test('resolves the complete linked screen-share stats path', () => {
   assert.equal(resolved.outbound.id, 'out');
   assert.equal(resolved.remoteInbound.id, 'remote-in');
   assert.equal(resolved.candidatePair.id, 'pair');
+  assert.equal(resolved.localCandidate.candidateType, 'host');
+  assert.equal(resolved.remoteCandidate.candidateType, 'srflx');
   assert.equal(resolved.inbound.id, 'in');
   assert.equal(resolved.codec.id, 'codec-out');
   assert.equal(resolved.inboundCodec.id, 'codec-in');
   assert.equal(resolved.transport.id, 'transport');
+  const snapshot = createScreenShareTelemetrySnapshot(fixture());
+  assert.equal(snapshot.network.localCandidateType, 'host');
+  assert.equal(snapshot.network.remoteCandidateType, 'srflx');
+  assert.equal(snapshot.network.relay, false);
+  assert.equal(snapshot.reports.localCandidate.address, undefined);
+  assert.equal(snapshot.reports.remoteCandidate.port, undefined);
 });
 
 test('preserves real zero values instead of treating them as missing', () => {
@@ -160,6 +182,10 @@ test('derives stage FPS, bitrates, time per frame, QP and jitter from deltas', (
     inboundFirCount: 2,
     freezeCount: 2,
     totalFreezesDuration: 0.35,
+    jitterBufferDelay: 1.2,
+    jitterBufferTargetDelay: 0.9,
+    jitterBufferMinimumDelay: 0.6,
+    jitterBufferEmittedCount: 60,
   }), previous);
 
   assert.equal(current.sequence, 1);
@@ -177,6 +203,9 @@ test('derives stage FPS, bitrates, time per frame, QP and jitter from deltas', (
   assert.equal(current.derived.inboundJitterMs, 12);
   assert.equal(current.derived.remoteInboundJitterMs, 7);
   assert.equal(current.derived.currentRoundTripTimeMs, 25);
+  assert.equal(current.derived.averageJitterBufferDelayMs, 20);
+  assert.equal(current.derived.averageJitterBufferTargetDelayMs, 15);
+  assert.equal(current.derived.averageJitterBufferMinimumDelayMs, 10);
   assert.equal(current.derived.packetLossRatio, 2 / 42);
   assert.equal(current.derived.retransmissionRatio, 4 / 42);
   assert.equal(current.derived.keyFramesEncoded, 3);
@@ -209,6 +238,9 @@ test('returns zero rates for unchanged counters and null averages without new fr
   assert.equal(current.derived.averageDecodeTimeMs, null);
   assert.equal(current.derived.averageEncodeQp, null);
   assert.equal(current.derived.averageDecodeQp, null);
+  assert.equal(current.derived.averageJitterBufferDelayMs, null);
+  assert.equal(current.derived.averageJitterBufferTargetDelayMs, null);
+  assert.equal(current.derived.averageJitterBufferMinimumDelayMs, null);
 });
 
 test('counter resets do not produce negative telemetry and snapshots remain serializable', () => {
@@ -228,6 +260,7 @@ test('counter resets do not produce negative telemetry and snapshots remain seri
   assert.equal(current.derived.sendFps, null);
   assert.equal(current.derived.sendBitrateBps, null);
   assert.equal(current.derived.receiveBitrateBps, null);
+  assert.equal(current.derived.averageJitterBufferTargetDelayMs, null);
   assert.doesNotThrow(() => JSON.stringify(current));
   assert.equal(current.reports.outbound.codecId, 'codec-out');
 });

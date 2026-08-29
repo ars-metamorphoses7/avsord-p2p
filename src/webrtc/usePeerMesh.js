@@ -14,6 +14,13 @@ import {
   screenSharePlaybackBuffer,
 } from '../media/screenShareProfiles.js';
 import { createScreenShareTelemetrySnapshot } from '../media/screenShareTelemetry.js';
+import {
+  createScreenShareDiagnosticsSession,
+  createScreenShareReceiverSample,
+  createScreenShareSenderSample,
+  flushScreenShareDiagnosticsSession,
+  isScreenShareDiagnosticsEnabled,
+} from '../media/screenShareDiagnostics.js';
 
 const ICE_RESTART_DELAY_MS = 4_000;
 const ICE_RESTART_RETRY_MS = 10_000;
@@ -64,6 +71,40 @@ function senderParameterSnapshot(sender) {
 
 function primaryEncoding(snapshot) {
   return snapshot?.encodings?.[0] || {};
+}
+
+function ensureDiagnosticsSession(slot, key, options) {
+  if (!isScreenShareDiagnosticsEnabled() || !options?.run?.runId) return null;
+  const current = slot[key];
+  if (current?.runId === options.run.runId) return current;
+  if (current) void flushScreenShareDiagnosticsSession(current, 'run-replaced');
+  const session = createScreenShareDiagnosticsSession({
+    enabled: true,
+    runId: options.run.runId,
+    role: options.role,
+    participantId: options.participantId,
+    peerId: options.peerId,
+    sourcePeerId: options.sourcePeerId,
+    transportMode: options.transportMode,
+    environment: options.environment || {},
+    startedAtMs: options.run.startedAtMs,
+    performanceTimeOriginMs: options.run.performanceTimeOriginMs,
+    monotonicStartMs: options.run.monotonicStartMs,
+    capture: options.run.capture,
+  });
+  slot[key] = session;
+  return session;
+}
+
+function flushDiagnosticsOnSlot(slot, reason) {
+  if (!slot) return;
+  ['senderDiagnosticsSession', 'receiverDiagnosticsSession'].forEach((key) => {
+    const session = slot[key];
+    if (!session) return;
+    void flushScreenShareDiagnosticsSession(session, reason);
+    slot[key] = null;
+  });
+  if (slot.remoteBundle) slot.remoteBundle.screenShareDiagnosticsSession = null;
 }
 
 function encodingValueChanged(before, after, key) {
@@ -154,7 +195,13 @@ function publishRemoteTrack(slot, peerId, event, remoteStreamsRef, setRemoteStre
   const incoming = remoteStreamsRef.current.get(peerId) || new MediaStream();
   addIncomingTrack(incoming, event);
   remoteStreamsRef.current.set(peerId, incoming);
-  slot.remoteBundle ||= { stream: incoming, videoStream: null, microphoneStream: null, screenAudioStream: null };
+  slot.remoteBundle ||= {
+    stream: incoming,
+    videoStream: null,
+    microphoneStream: null,
+    screenAudioStream: null,
+    screenShareDiagnosticsSession: null,
+  };
   slot.remoteBundle.stream = incoming;
   const role = remoteTrackRole(slot.pc, event.transceiver, event.track);
   const roleStream = streamForTrack(event.track);
@@ -236,6 +283,8 @@ export function usePeerMesh({
   cameraStreamRef,
   screenStreamRef,
   screenAudioSessionRef,
+  screenShareRunRef,
+  screenDiagnosticsConfigRef,
   videoProfileRef,
   remoteStreamsRef,
   sendSignal,
@@ -388,7 +437,7 @@ export function usePeerMesh({
               });
               if (events.length > 1_000) events.shift();
             }
-            return mutateVideoSender(slot, 'adapt', sender, () => adaptVideoSender(
+            const adaptationResult = await mutateVideoSender(slot, 'adapt', sender, () => adaptVideoSender(
               sender,
               videoProfileRef.current,
               activePeerCount,
@@ -416,6 +465,33 @@ export function usePeerMesh({
               recoveryProbeMaxBitrate: nextAdaptation.recoveryProbeMaxBitrate,
               recoveryProbeReason: nextAdaptation.recoveryProbeReason,
             });
+            const diagnosticsSession = ensureDiagnosticsSession(slot, 'senderDiagnosticsSession', {
+              run: screenShareRunRef.current,
+              role: 'sender',
+              participantId: localPeerIdRef.current,
+              peerId: slot.peerId,
+              transportMode: 'mesh',
+              environment: screenDiagnosticsConfigRef.current?.environment,
+            });
+            if (diagnosticsSession) {
+              const senderSnapshot = senderParameterSnapshot(sender);
+              diagnosticsSession.updateMetadata({
+                capture: {
+                  ...(screenShareRunRef.current?.capture || {}),
+                  trackSettings,
+                },
+                transport: telemetry.network,
+              });
+              diagnosticsSession.recordSample(createScreenShareSenderSample({
+                telemetry,
+                adaptation: nextAdaptation,
+                senderParameters: senderSnapshot,
+                peerId: slot.peerId,
+                trackSettings,
+                peerCount: activePeerCount,
+              }));
+            }
+            return adaptationResult;
           })
         )));
       } finally {
@@ -424,7 +500,7 @@ export function usePeerMesh({
     };
     const timer = window.setInterval(() => { void tuneVideo(); }, SCREEN_SHARE_ADAPT_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [peerConnectionsRef, screenStreamRef, videoProfileRef]);
+  }, [localPeerIdRef, peerConnectionsRef, screenDiagnosticsConfigRef, screenShareRunRef, screenStreamRef, videoProfileRef]);
 
   useEffect(() => {
     const telemetryEnabled = new URLSearchParams(window.location.search).has('streamTelemetry');
@@ -459,6 +535,44 @@ export function usePeerMesh({
             slot.screenAudioTransceiver?.receiver,
             slot.playbackAdaptation.targetMs,
           );
+          if (slot.remoteMediaState?.sharing && slot.remoteMediaState.screenShareRunId) {
+            const diagnosticsSession = ensureDiagnosticsSession(slot, 'receiverDiagnosticsSession', {
+              run: {
+                runId: slot.remoteMediaState.screenShareRunId,
+                startedAtMs: slot.remoteMediaState.screenShareRunStartedAtMs || Date.now(),
+                performanceTimeOriginMs: performance.timeOrigin,
+                monotonicStartMs: performance.now(),
+                capture: null,
+              },
+              role: 'receiver',
+              participantId: localPeerIdRef.current,
+              peerId: localPeerIdRef.current,
+              sourcePeerId: slot.peerId,
+              transportMode: 'mesh',
+              environment: screenDiagnosticsConfigRef.current?.environment,
+            });
+            if (diagnosticsSession) {
+              if (slot.remoteBundle) {
+                slot.remoteBundle.screenShareDiagnosticsSession = diagnosticsSession;
+                setRemoteStreams((current) => ({
+                  ...current,
+                  [slot.peerId]: { ...slot.remoteBundle },
+                }));
+              }
+              const receiver = slot.videoTransceiver?.receiver;
+              diagnosticsSession.updateMetadata({ transport: telemetry.network });
+              diagnosticsSession.recordSample(createScreenShareReceiverSample({
+                telemetry,
+                peerId: localPeerIdRef.current,
+                sourcePeerId: slot.peerId,
+                adaptation: slot.playbackAdaptation,
+                receiver: {
+                  configuredTargetMs: Number(receiver?.jitterBufferTarget) || null,
+                  playbackTargetMs: slot.playbackAdaptation?.targetMs ?? null,
+                },
+              }));
+            }
+          }
           if (telemetryEnabled) {
             slot.inboundVideoTelemetryHistory ||= [];
             slot.inboundVideoTelemetryHistory.push(telemetry);
@@ -473,10 +587,11 @@ export function usePeerMesh({
     const timer = window.setInterval(() => { void sampleReceivers(); }, SCREEN_SHARE_ADAPT_INTERVAL_MS);
     void sampleReceivers();
     return () => window.clearInterval(timer);
-  }, [peerConnectionsRef]);
+  }, [localPeerIdRef, peerConnectionsRef, screenDiagnosticsConfigRef, setRemoteStreams]);
 
   const closePeer = useCallback((peerId) => {
     const slot = peerConnectionsRef.current.get(peerId);
+    flushDiagnosticsOnSlot(slot, 'peer-closed');
     if (slot?.recoveryTimer) window.clearTimeout(slot.recoveryTimer);
     if (slot?.offerTimer) window.clearTimeout(slot.offerTimer);
     peerConnectionsRef.current.delete(peerId);
