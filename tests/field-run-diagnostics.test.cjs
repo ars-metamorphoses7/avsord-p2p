@@ -73,20 +73,20 @@ test('disabling field diagnostics removes only its switch and respects an enviro
 
 test('config build info uses a valid override first and otherwise reads embedded metadata', async () => {
   const metadata = await readBuildMetadata('embedded-build-metadata.json', async () => JSON.stringify({
-    version: '1.0.24',
+    version: '1.0.25',
     commit: 'e304baaad71c3114290f06c790d228319132078d',
     builtAt: '2026-08-29T20:00:00.000Z',
   }));
   assert.deepEqual(resolveDiagnosticsBuildInfo({ appVersion: '43.4.1', buildMetadata: metadata }), {
-    appVersion: '1.0.24',
+    appVersion: '1.0.25',
     appCommit: 'e304baaad71c3114290f06c790d228319132078d',
   });
   assert.deepEqual(resolveDiagnosticsBuildInfo({
-    appVersion: '1.0.24',
+    appVersion: '1.0.25',
     commitOverride: 'diagnostics-integration-test',
     buildMetadata: metadata,
   }), {
-    appVersion: '1.0.24',
+    appVersion: '1.0.25',
     appCommit: 'diagnostics-integration-test',
   });
 });

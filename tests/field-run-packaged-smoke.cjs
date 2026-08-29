@@ -71,19 +71,25 @@ async function waitForReady(debugPort) {
   await waitFor(() => evaluate(debugPort, 'typeof globalThis.jumpDesktop?.getStreamDiagnosticsConfig === "function"'), 'o preload do JUMP');
 }
 
-function startPackagedJump({ debugPort, fieldMode = false, appDataDirectory }) {
+function startPackagedJump({ debugPort, fieldMode = false, appDataDirectory, roomId = 'jump-house', signalOrigin = '', signalPort }) {
   const args = [
     `--remote-debugging-port=${debugPort}`,
+    `--user-data-dir=${appDataDirectory}`,
     '--use-fake-device-for-media-stream',
     '--use-fake-ui-for-media-stream',
     '--autoplay-policy=no-user-gesture-required',
+    '--auto-select-desktop-capture-source=Entire screen',
   ];
   if (fieldMode) args.push('--jump-stream-diagnostics');
+  const deepLink = new URLSearchParams({ room: roomId });
+  if (signalOrigin) deepLink.set('signal', signalOrigin);
+  args.push(`jump://join?${deepLink.toString()}`);
+  const localSignalPort = signalPort || (20_000 + Math.floor(Math.random() * 1_000));
   const environment = {
     ...process.env,
     APPDATA: appDataDirectory,
     LOCALAPPDATA: appDataDirectory,
-    PORT: String(20_000 + Math.floor(Math.random() * 1_000)),
+    PORT: String(localSignalPort),
     HOST: '127.0.0.1',
     JUMP_USER_DATA_DIR: appDataDirectory,
     JUMP_STREAM_DIAGNOSTICS: '',
@@ -123,6 +129,38 @@ async function openSettingsAndRead(debugPort) {
   }, 'a tela Field Run Diagnostics');
 }
 
+async function click(debugPort, selector) {
+  const clicked = await evaluate(debugPort, `(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element) return false;
+    element.click();
+    return true;
+  })()`);
+  assert.equal(clicked, true, `elemento ausente: ${selector}`);
+}
+
+async function instrumentReceiverVideoFrames(debugPort) {
+  return evaluate(debugPort, `(() => {
+    const native = HTMLVideoElement.prototype.requestVideoFrameCallback;
+    if (typeof native !== 'function') return false;
+    globalThis.__jumpRenderFrameCallbackRegistrations = 0;
+    HTMLVideoElement.prototype.requestVideoFrameCallback = function instrumentedRequestVideoFrameCallback(...args) {
+      globalThis.__jumpRenderFrameCallbackRegistrations += 1;
+      return native.call(this, ...args);
+    };
+    return true;
+  })()`);
+}
+
+async function readArtifacts(appDataDirectory) {
+  const root = path.join(appDataDirectory, 'diagnostics', 'screen-share');
+  if (!await fs.stat(root).then(() => true).catch(() => false)) return [];
+  const entries = await fs.readdir(root);
+  return Promise.all(entries.filter((entry) => entry.endsWith('.json')).map(async (entry) => (
+    JSON.parse(await fs.readFile(path.join(root, entry), 'utf8'))
+  )));
+}
+
 async function run() {
   assert.equal(await fs.stat(executable).then(() => true).catch(() => false), true, 'Execute npm run desktop:dir antes do smoke empacotado.');
   smokeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jump-field-packaged-smoke-'));
@@ -132,13 +170,13 @@ async function run() {
   await fs.mkdir(fieldAppData, { recursive: true });
 
   const normalPort = 22_001;
-  const normal = startPackagedJump({ debugPort: normalPort, appDataDirectory: normalAppData });
+  const normal = startPackagedJump({ debugPort: normalPort, appDataDirectory: normalAppData, signalPort: 23_001 });
   try {
     await waitForReady(normalPort);
     const config = await readConfig(normalPort);
     assert.equal(config.enabled, false);
     assert.equal(config.activationSource, 'off');
-    assert.equal(config.appVersion, '1.0.24');
+    assert.equal(config.appVersion, '1.0.25');
     assert.match(config.appCommit || '', /^[0-9a-f]{7,64}$/i);
     assert.equal((await fs.readdir(config.outputDirectory).catch(() => [])).length, 0, 'o modo normal não cria artefatos');
     const settings = await openSettingsAndRead(normalPort);
@@ -148,55 +186,108 @@ async function run() {
     await wait(500);
   }
 
-  const fieldPort = 22_002;
-  startPackagedJump({ debugPort: fieldPort, fieldMode: true, appDataDirectory: fieldAppData });
+  const roomId = `packaged-field-smoke-${Date.now()}`;
+  const senderPort = 22_002;
+  const receiverPort = 22_003;
+  const senderSignalPort = 23_002;
+  const receiverSignalPort = 23_003;
+  const sender = startPackagedJump({
+    debugPort: senderPort,
+    fieldMode: true,
+    appDataDirectory: normalAppData,
+    roomId,
+    signalPort: senderSignalPort,
+  });
+  let receiver;
   try {
-    await waitForReady(fieldPort);
-    let config = await readConfig(fieldPort);
+    await waitForReady(senderPort);
+    receiver = startPackagedJump({
+      debugPort: receiverPort,
+      fieldMode: true,
+      appDataDirectory: fieldAppData,
+      roomId,
+      signalOrigin: `http://127.0.0.1:${senderSignalPort}`,
+      signalPort: receiverSignalPort,
+    });
+    await waitForReady(receiverPort);
+    const receiverUrl = new URL(await evaluate(receiverPort, 'location.href'));
+    assert.equal(receiverUrl.searchParams.has('streamTelemetry'), false, 'receiver não deve usar ?streamTelemetry');
+    const receiverVideoFramesAvailable = await instrumentReceiverVideoFrames(receiverPort);
+    const config = await readConfig(receiverPort);
     assert.equal(config.enabled, true);
     assert.equal(config.activationSource, 'cli');
-    assert.equal(config.appVersion, '1.0.24');
+    assert.equal(config.appVersion, '1.0.25');
     assert.match(config.appCommit || '', /^[0-9a-f]{7,64}$/i);
-    const settings = await openSettingsAndRead(fieldPort);
+    const settings = await openSettingsAndRead(receiverPort);
     assert.match(settings, /Ativado/);
     assert.match(settings, /Abrir pasta de diagnóstico/);
-    await evaluate(fieldPort, `document.querySelector('button[aria-label="Fechar configurações"]')?.click()`);
+    await click(receiverPort, 'button[aria-label="Fechar configurações"]');
 
-    const callPanelOpened = await evaluate(fieldPort, `(() => {
-      const button = document.querySelector('button[aria-label="Abrir chamada"]');
-      if (!button) return false;
-      button.click();
-      return true;
-    })()`);
-    assert.equal(callPanelOpened, true);
-    await waitFor(() => evaluate(fieldPort, "Boolean(document.querySelector('.join-call-button'))"), 'o controle para entrar na chamada');
-    const joined = await evaluate(fieldPort, `(() => {
-      const button = document.querySelector('.join-call-button');
-      if (!button) return false;
-      button.click();
-      return true;
-    })()`);
-    assert.equal(joined, true);
-    await waitFor(() => evaluate(fieldPort, "Boolean(document.querySelector('.leave-button'))"), 'a entrada na chamada');
-    await waitFor(() => evaluate(fieldPort, "document.querySelector('.field-diagnostics-indicator')?.textContent === 'FIELD DIAGNOSTICS ON'"), 'o indicador FIELD DIAGNOSTICS ON');
+    await waitFor(() => Promise.all([senderPort, receiverPort].map((debugPort) => evaluate(
+      debugPort,
+      "document.querySelector('.signal-badge.is-connected')?.textContent.includes('conectados')",
+    ))).then((values) => values.every(Boolean)), 'clientes empacotados sinalizados');
+    await click(senderPort, 'button[aria-label="Abrir chamada"]');
+    await click(senderPort, '.join-call-button');
+    await click(receiverPort, 'button[aria-label="Abrir chamada"]');
+    await click(receiverPort, '.join-call-button');
+    await waitFor(() => Promise.all([senderPort, receiverPort].map((debugPort) => evaluate(
+      debugPort,
+      "Boolean(document.querySelector('.leave-button'))",
+    ))).then((values) => values.every(Boolean)), 'clientes empacotados dentro da chamada');
+    await waitFor(() => evaluate(receiverPort, "document.querySelector('.field-diagnostics-indicator')?.textContent === 'FIELD DIAGNOSTICS ON'"), 'indicador Field Diagnostics no receiver');
 
-    const written = await evaluate(fieldPort, `globalThis.jumpDesktop.writeScreenShareDiagnosticsArtifact({
-      schemaVersion: 1,
-      runId: 'packaged-field-smoke',
-      role: 'sender',
-      participantId: 'smoke',
-      samples: []
-    })`);
-    assert.equal(written?.written, true);
-    assert.equal(await fs.stat(written.path).then(() => true).catch(() => false), true, 'o pacote deve gravar um artefato local');
-    const opened = await evaluate(fieldPort, 'globalThis.jumpDesktop.openStreamDiagnosticsDirectory()');
+    await click(senderPort, 'button[aria-label="Compartilhar tela"]');
+    await waitFor(() => evaluate(senderPort, "document.querySelectorAll('.screen-share-source').length > 0"), 'fontes de captura empacotadas');
+    await click(senderPort, '.screen-share-source');
+    await click(senderPort, '.screen-share-actions .dialog-primary');
+    await waitFor(() => evaluate(senderPort, "Boolean(document.querySelector('button[aria-label=\"Parar compartilhamento\"]'))"), 'compartilhamento empacotado ativo');
+    await waitFor(() => evaluate(receiverPort, "Boolean(document.querySelector('.voice-member-mic.is-sharing'))"), 'runId do sender no receiver empacotado');
+    await waitFor(() => evaluate(receiverPort, "document.querySelectorAll('.call-stream-card video').length > 0"), 'vídeo remoto empacotado recebido');
+    await waitFor(() => evaluate(receiverPort, "document.readyState === 'complete' && Boolean(document.querySelector('.leave-button')) && document.querySelectorAll('.call-stream-card video').length > 0"), 'renderer empacotado do receiver vivo');
+    await wait(3_500);
+
+    const receiverRenderFrameCallbackRegistrations = receiverVideoFramesAvailable
+      ? await evaluate(receiverPort, 'globalThis.__jumpRenderFrameCallbackRegistrations || 0')
+      : 0;
+    if (receiverVideoFramesAvailable && receiverRenderFrameCallbackRegistrations < 1) {
+      const receiverState = await evaluate(receiverPort, `(async () => ({
+        url: location.href,
+        diagnostics: await globalThis.jumpDesktop?.getStreamDiagnosticsConfig?.(),
+        videos: [...document.querySelectorAll('.call-stream-card video')].map((video) => ({
+          readyState: video.readyState,
+          paused: video.paused,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+          hasStream: Boolean(video.srcObject),
+        })),
+        remoteStreams: [...(globalThis.__jumpPeerMesh?.remoteStreamsRef.current || [])].map(([peerId, bundle]) => ({
+          peerId,
+          hasVideo: Boolean(bundle.videoStream),
+          videoTracks: bundle.videoStream?.getVideoTracks?.().length || 0,
+          hasDiagnostics: Boolean(bundle.screenShareDiagnosticsSession),
+        })),
+      }))()`);
+      throw new Error(`receiver não registrou requestVideoFrameCallback: ${JSON.stringify(receiverState)}`);
+    }
+    await click(senderPort, 'button[aria-label="Parar compartilhamento"]');
+    await waitFor(async () => (await readArtifacts(fieldAppData)).length >= 1, 'artefato do receiver empacotado', 20_000);
+    const receiverArtifacts = (await readArtifacts(fieldAppData)).filter((artifact) => artifact.role === 'receiver');
+    assert.ok(receiverArtifacts.length >= 1, 'o receiver empacotado deve gravar um artefato');
+    const receiverRenderWindowCount = receiverArtifacts.reduce((count, artifact) => count + (artifact.render?.windows?.length || 0), 0);
+    if (receiverVideoFramesAvailable) assert.ok(receiverRenderWindowCount > 0, 'o artefato do receiver deve conter render diagnostics');
+    await waitFor(() => evaluate(receiverPort, "document.readyState === 'complete' && Boolean(document.querySelector('.leave-button'))"), 'receiver vivo após render diagnostics');
+
+    const opened = await evaluate(receiverPort, 'globalThis.jumpDesktop.openStreamDiagnosticsDirectory()');
     assert.equal(opened?.opened, true, opened?.error || 'a pasta de diagnóstico não abriu');
-
-    // Relaunch enable/disable is covered deterministically with a fake Electron
-    // app in field-run-diagnostics.test.cjs. This packaged smoke keeps focus on
-    // the installed user path: OFF by default, CLI field mode, visible marker,
-    // local artifact, and operating-system folder open.
+    process.stdout.write(`${JSON.stringify({
+      receiverVideoFramesAvailable,
+      receiverRenderFrameCallbackRegistrations,
+      receiverRenderWindowCount,
+      receiverArtifacts: receiverArtifacts.length,
+    }, null, 2)}\n`);
   } finally {
+    sender.kill();
     await stopWorkspaceJumpProcesses();
   }
 }
