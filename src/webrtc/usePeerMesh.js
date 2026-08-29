@@ -410,6 +410,8 @@ export function usePeerMesh({
               adaptationLevel: nextAdaptation.level,
               temporalLevel: nextAdaptation.temporalLevel,
               recoveryProbeActive: nextAdaptation.recoveryProbeActive,
+              recoveryProbeSamples: nextAdaptation.recoveryProbeSamples,
+              recoveryProbeCooldownSamples: nextAdaptation.recoveryProbeCooldownSamples,
               recoveryProbeMaxBitrate: nextAdaptation.recoveryProbeMaxBitrate,
               recoveryProbeReason: nextAdaptation.recoveryProbeReason,
             });

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   SCREEN_SHARE_PROFILES,
+  RECOVERY_PROBE_COOLDOWN_SAMPLES,
+  RECOVERY_PROBE_MAX_SAMPLES,
   adaptVideoSender,
   configureVideoSender,
   evenScreenCaptureConstraints,
@@ -763,6 +765,8 @@ test('spatial recovery probe derives a temporary cap from the next operating poi
   assert.equal(state.level, 2);
   assert.equal(state.temporalLevel, 0);
   assert.equal(state.recoveryProbeActive, true);
+  assert.equal(state.recoveryProbeSamples, 0);
+  assert.equal(state.recoveryProbeCooldownSamples, 0);
   assert.equal(state.recoveryProbeReason, 'insufficient-next-point-headroom');
   assert.equal(state.recoveryProbeMaxBitrate, 5_500_000);
   assert.equal(state.reason, 'spatial-recovery-probe');
@@ -777,6 +781,7 @@ test('spatial recovery probe recovers exactly one level after headroom appears',
     stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples,
     fpsEma: 57,
     recoveryProbeActive: true,
+    recoveryProbeSamples: RECOVERY_PROBE_MAX_SAMPLES - 1,
     recoveryProbeMaxBitrate: 5_500_000,
     recoveryProbeReason: 'insufficient-next-point-headroom',
   }, 'performance', {
@@ -791,7 +796,138 @@ test('spatial recovery probe recovers exactly one level after headroom appears',
   assert.equal(state.temporalLevel, 0);
   assert.equal(state.reason, 'recovery');
   assert.equal(state.recoveryProbeActive, false);
+  assert.equal(state.recoveryProbeSamples, 0);
+  assert.equal(state.recoveryProbeCooldownSamples, 0);
   assert.equal(state.recoveryProbeMaxBitrate, null);
+});
+
+test('spatial recovery probe times out and restores the operating-point cap', () => {
+  const state = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 14,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples,
+    fpsEma: 57,
+    recoveryProbeActive: true,
+    recoveryProbeSamples: RECOVERY_PROBE_MAX_SAMPLES - 1,
+    recoveryProbeMaxBitrate: 5_500_000,
+    recoveryProbeReason: 'insufficient-next-point-headroom',
+  }, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 57,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 3_600_000,
+    peerCount: 1,
+  });
+  assert.equal(state.level, 2);
+  assert.equal(state.scale, 2);
+  assert.equal(state.temporalLevel, 0);
+  assert.equal(state.frameRate, 60);
+  assert.equal(state.recoveryProbeActive, false);
+  assert.equal(state.recoveryProbeSamples, 0);
+  assert.equal(state.recoveryProbeCooldownSamples, RECOVERY_PROBE_COOLDOWN_SAMPLES);
+  assert.equal(state.recoveryProbeMaxBitrate, null);
+  assert.equal(state.recoveryProbeReason, 'spatial-recovery-probe-timeout');
+  assert.equal(state.recoveryProbeAbortReason, 'insufficient-next-point-headroom');
+  assert.equal(state.networkPressure, false);
+  assert.equal(state.transportPressure, false);
+});
+
+test('probe timeout immediately removes the temporary sender cap', async () => {
+  const sender = fakeSender();
+  sender.parameters.encodings[0].maxBitrate = 5_500_000;
+  sender.parameters.encodings[0].scaleResolutionDownBy = 2;
+  sender.parameters.encodings[0].maxFramerate = 60;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 3_600_000,
+    adaptationScale: 2,
+    targetFrameRate: 60,
+    networkPressure: false,
+    transportPressure: false,
+    recoveryProbeActive: false,
+    recoveryProbeMaxBitrate: null,
+    allowBitrateIncrease: false,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 2_000_000);
+  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 2);
+  assert.equal(sender.parameters.encodings[0].maxFramerate, 60);
+});
+
+test('probe retry cooldown delays only the next probe and keeps stable samples', () => {
+  const state = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 14,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples,
+    fpsEma: 57,
+    recoveryProbeCooldownSamples: RECOVERY_PROBE_COOLDOWN_SAMPLES,
+    recoveryProbeReason: 'spatial-recovery-probe-timeout',
+  }, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 57,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 3_600_000,
+    peerCount: 1,
+  });
+  assert.equal(state.recoveryProbeActive, false);
+  assert.equal(state.recoveryProbeCooldownSamples, RECOVERY_PROBE_COOLDOWN_SAMPLES - 1);
+  assert.equal(state.stableSamples, SCREEN_SHARE_PROFILES.performance.recoverySamples + 1);
+});
+
+test('probe retry opens after its separate cooldown expires', () => {
+  const state = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 14,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples - 1,
+    fpsEma: 57,
+    recoveryProbeCooldownSamples: 1,
+    recoveryProbeReason: 'spatial-recovery-probe-timeout',
+  }, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 57,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 3_600_000,
+    peerCount: 1,
+  });
+  assert.equal(state.recoveryProbeActive, true);
+  assert.equal(state.recoveryProbeSamples, 0);
+  assert.equal(state.recoveryProbeCooldownSamples, 0);
+});
+
+test('a later capacity increase lets a retry probe recover one spatial level', () => {
+  const firstProbe = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 14,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples - 1,
+    fpsEma: 57,
+    recoveryProbeCooldownSamples: 1,
+  }, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 57,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 3_600_000,
+    peerCount: 1,
+  });
+  const recovered = evaluateCaptureAdaptation(firstProbe, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 57,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 6_000_000,
+    peerCount: 1,
+  });
+  assert.equal(firstProbe.recoveryProbeActive, true);
+  assert.equal(recovered.level, 1);
+  assert.equal(recovered.scale, 4 / 3);
+  assert.equal(recovered.reason, 'recovery');
+  assert.equal(recovered.recoveryProbeActive, false);
+  assert.equal(recovered.recoveryProbeSamples, 0);
+  assert.equal(recovered.recoveryProbeCooldownSamples, 0);
 });
 
 test('spatial recovery probe aborts when transport pressure appears', () => {
@@ -802,6 +938,7 @@ test('spatial recovery probe aborts when transport pressure appears', () => {
     sampleCount: 14,
     stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples,
     recoveryProbeActive: true,
+    recoveryProbeSamples: 3,
     recoveryProbeMaxBitrate: 5_500_000,
     recoveryProbeReason: 'insufficient-next-point-headroom',
   }, 'performance', {
@@ -812,11 +949,38 @@ test('spatial recovery probe aborts when transport pressure appears', () => {
     packetLossRatio: 0.03,
   });
   assert.equal(state.recoveryProbeActive, false);
+  assert.equal(state.recoveryProbeSamples, 0);
+  assert.equal(state.recoveryProbeCooldownSamples, 2);
   assert.equal(state.recoveryProbeMaxBitrate, null);
   assert.equal(state.networkPressure, true);
   assert.equal(state.level, 2);
   assert.equal(state.temporalLevel, 0);
   assert.equal(state.cooldownSamples, 3);
+});
+
+test('normal network adaptation remains active during probe retry cooldown', () => {
+  let state = {
+    ...initialCaptureAdaptation('performance'),
+    level: 1,
+    scale: 4 / 3,
+    sampleCount: 20,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples,
+    fpsEma: 57,
+    recoveryProbeCooldownSamples: RECOVERY_PROBE_COOLDOWN_SAMPLES,
+  };
+  for (let sample = 0; sample < 4; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', {
+      captureFps: 57,
+      framesPerSecond: 57,
+      averageEncodeTimeMs: 2,
+      availableOutgoingBitrate: 1_000_000,
+      peerCount: 1,
+    });
+  }
+  assert.equal(state.level, 2);
+  assert.equal(state.reason, 'network-spatial-downshift');
+  assert.equal(state.recoveryProbeActive, false);
+  assert.equal(state.recoveryProbeCooldownSamples, RECOVERY_PROBE_COOLDOWN_SAMPLES - 4);
 });
 
 test('level zero and temporal degradation never start a spatial recovery probe', () => {

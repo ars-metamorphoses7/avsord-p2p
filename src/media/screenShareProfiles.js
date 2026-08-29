@@ -80,6 +80,10 @@ export const SCREEN_SHARE_PROFILES = {
 
 export const SCREEN_SHARE_ADAPT_INTERVAL_MS = 1_500;
 export const SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS = 6_000;
+// A probe is intentionally finite: at the adaptation cadence this is about
+// 12 seconds of extra bitrate, followed by a separate retry cooldown.
+export const RECOVERY_PROBE_MAX_SAMPLES = 8;
+export const RECOVERY_PROBE_COOLDOWN_SAMPLES = 10;
 
 const ENCODER_DOWNSCALE_OBSERVATION_SAMPLES = 3;
 const ENCODER_DOWNSCALE_MIN_DELIVERY_GAIN = 0.08;
@@ -489,6 +493,8 @@ export function initialCaptureAdaptation(profileId) {
     scale: 1,
     reason: 'initial',
     recoveryProbeActive: false,
+    recoveryProbeSamples: 0,
+    recoveryProbeCooldownSamples: 0,
     recoveryProbeMaxBitrate: null,
     recoveryProbeReason: null,
     encoderTrial: null,
@@ -676,6 +682,13 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   let cooldownSamples = Math.max(0, Number(current.cooldownSamples) - 1);
   let reason = current.reason;
   let recoveryProbeActive = current.recoveryProbeActive === true;
+  let recoveryProbeSamples = recoveryProbeActive
+    ? Math.max(0, Number(current.recoveryProbeSamples) || 0)
+    : 0;
+  let recoveryProbeCooldownSamples = Math.max(
+    0,
+    (Number(current.recoveryProbeCooldownSamples) || 0) - 1,
+  );
   let recoveryProbeMaxBitrate = Number(current.recoveryProbeMaxBitrate) || null;
   let recoveryProbeReason = current.recoveryProbeReason || null;
   let recoveryProbeAbortReason = null;
@@ -693,8 +706,21 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
         : !encoderRecoveryReady ? 'encoder-recovery-not-ready'
           : temporalLevel > 0 ? 'temporal-level-active' : 'level-zero';
     recoveryProbeReason = 'spatial-recovery-probe-aborted';
+    recoveryProbeSamples = 0;
+    recoveryProbeCooldownSamples = Math.max(recoveryProbeCooldownSamples, 2);
     cooldownSamples = Math.max(cooldownSamples, 3);
     reason = recoveryProbeReason;
+  } else if (recoveryProbeActive) {
+    recoveryProbeSamples += 1;
+    if (!networkRecoveryReady && recoveryProbeSamples >= RECOVERY_PROBE_MAX_SAMPLES) {
+      recoveryProbeActive = false;
+      recoveryProbeSamples = 0;
+      recoveryProbeCooldownSamples = RECOVERY_PROBE_COOLDOWN_SAMPLES;
+      recoveryProbeMaxBitrate = null;
+      recoveryProbeReason = 'spatial-recovery-probe-timeout';
+      recoveryProbeAbortReason = 'insufficient-next-point-headroom';
+      reason = recoveryProbeReason;
+    }
   }
   let encoderTrial = current.encoderTrial ? { ...current.encoderTrial } : null;
   let downscaleEffectiveness = current.downscaleEffectiveness || {
@@ -946,8 +972,10 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
       && !networkPressure
       && encoderRecoveryReady
       && !networkRecoveryReady
+      && recoveryProbeCooldownSamples === 0
       && stableSamples >= profile.recoverySamples) {
     recoveryProbeActive = true;
+    recoveryProbeSamples = 0;
     recoveryProbeMaxBitrate = screenShareRecoveryProbeBitrate(
       profile.id,
       diagnostics.peerCount,
@@ -965,6 +993,8 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
       reason = 'recovery';
     }
     recoveryProbeActive = false;
+    recoveryProbeSamples = 0;
+    recoveryProbeCooldownSamples = 0;
     recoveryProbeMaxBitrate = null;
     recoveryProbeReason = null;
     stableSamples = 0;
@@ -1059,6 +1089,8 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     networkRecoveryHeadroomRatio,
     networkRecoveryReady,
     recoveryProbeActive,
+    recoveryProbeSamples,
+    recoveryProbeCooldownSamples,
     recoveryProbeMaxBitrate,
     recoveryProbeReason,
     recoveryProbeAbortReason,
