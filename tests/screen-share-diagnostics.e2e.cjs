@@ -70,6 +70,19 @@ async function createReceiverWindow() {
   return receiver;
 }
 
+async function instrumentReceiverVideoFrames(receiver) {
+  return receiver.webContents.executeJavaScript(`(() => {
+    const native = HTMLVideoElement.prototype.requestVideoFrameCallback;
+    if (typeof native !== 'function') return false;
+    globalThis.__jumpRenderFrameCallbackRegistrations = 0;
+    HTMLVideoElement.prototype.requestVideoFrameCallback = function instrumentedRequestVideoFrameCallback(...args) {
+      globalThis.__jumpRenderFrameCallbackRegistrations += 1;
+      return native.call(this, ...args);
+    };
+    return true;
+  })()`);
+}
+
 function diagnosticsRoot() {
   return path.join(userData, 'diagnostics', 'screen-share');
 }
@@ -94,6 +107,10 @@ async function run() {
   await waitFor(() => sender.webContents.executeJavaScript("document.readyState === 'complete'").catch(() => false), 'carga inicial da janela principal');
   await sender.loadURL(`http://127.0.0.1:${port}/?room=${room}&meshDebug=1`);
   const receiver = await createReceiverWindow();
+  if (new URL(receiver.webContents.getURL()).searchParams.has('streamTelemetry')) {
+    throw new Error('O receiver de diagnostics não deve depender de ?streamTelemetry.');
+  }
+  const receiverVideoFramesAvailable = await instrumentReceiverVideoFrames(receiver);
 
   await waitFor(() => Promise.all([sender, receiver].map((window) => (
     window.webContents.executeJavaScript('globalThis.jumpDesktop?.streamDiagnosticsEnabled === true')
@@ -101,7 +118,7 @@ async function run() {
   const config = await sender.webContents.executeJavaScript('globalThis.jumpDesktop.getStreamDiagnosticsConfig()');
   const expectedOutputDirectory = path.join(userData, 'diagnostics', 'screen-share');
   if (!config.enabled || config.outputDirectory !== expectedOutputDirectory
-      || config.activationSource !== 'environment' || config.appVersion !== '1.0.24'
+      || config.activationSource !== 'environment' || config.appVersion !== '1.0.25'
       || config.appCommit !== 'diagnostics-integration-test'
       || !config.environment?.electronVersion || !config.environment?.display) {
     throw new Error(`A bridge de diagnóstico não retornou o manifesto de ambiente esperado: ${JSON.stringify(config)}`);
@@ -116,7 +133,7 @@ async function run() {
     const dialog = document.querySelector('.app-settings-dialog');
     return dialog?.textContent.includes('Field Run Diagnostics')
       && dialog.textContent.includes('Ativado — forçado pelo ambiente')
-      && dialog.textContent.includes('1.0.24')
+      && dialog.textContent.includes('1.0.25')
       && Boolean(dialog.querySelector('button[disabled]'));
   })()`), 'configurações de Field Run Diagnostics');
   await click(sender, 'button[aria-label="Fechar configurações"]');
@@ -148,6 +165,9 @@ async function run() {
   await waitFor(() => receiver.webContents.executeJavaScript(
     "document.querySelectorAll('.call-stream-card video').length > 0",
   ), 'vídeo remoto recebido');
+  await waitFor(() => receiver.webContents.executeJavaScript(
+    "document.readyState === 'complete' && Boolean(document.querySelector('.leave-button')) && document.querySelectorAll('.call-stream-card video').length > 0",
+  ), 'renderer do receiver vivo com vídeo remoto');
   await wait(3_500);
 
   await click(sender, 'button[aria-label="Parar compartilhamento"]');
@@ -174,6 +194,19 @@ async function run() {
   if (artifacts.some((artifact) => artifact.capture?.source?.name || artifact.capture?.source?.title || artifact.capture?.source?.windowTitle)) {
     throw new Error('O smoke test encontrou título de janela no artefato de diagnóstico.');
   }
+  const receiverRenderWindowCount = receiverArtifacts.reduce((count, artifact) => count + (artifact.render?.windows?.length || 0), 0);
+  const receiverRenderFrameCallbackRegistrations = receiverVideoFramesAvailable
+    ? await receiver.webContents.executeJavaScript('globalThis.__jumpRenderFrameCallbackRegistrations || 0')
+    : 0;
+  if (receiverVideoFramesAvailable && receiverRenderFrameCallbackRegistrations < 1) {
+    throw new Error('O receiver não registrou requestVideoFrameCallback apesar de o runtime suportá-lo.');
+  }
+  if (receiverVideoFramesAvailable && receiverRenderWindowCount < 1) {
+    throw new Error('O artefato do receiver não contém render diagnostics.');
+  }
+  await waitFor(() => receiver.webContents.executeJavaScript(
+    "document.readyState === 'complete' && Boolean(document.querySelector('.leave-button'))",
+  ), 'receiver vivo após a coleta de render diagnostics');
   const receiverWithCorrelation = receiverArtifacts.find((artifact) => artifact.correlation);
   if (!receiverWithCorrelation || !Object.prototype.hasOwnProperty.call(receiverWithCorrelation.correlation, 'senderAnnouncedStartedAtMs')) {
     throw new Error('O smoke test encontrou receiver sem correlação explícita do timestamp remoto.');
@@ -183,6 +216,9 @@ async function run() {
     artifactCount: artifacts.length,
     senderCount: senderArtifacts.length,
     receiverCount: receiverArtifacts.length,
+    receiverVideoFramesAvailable,
+    receiverRenderFrameCallbackRegistrations,
+    receiverRenderWindowCount,
     runId: runIds[0],
     sampleCounts: artifacts.map((artifact) => ({ role: artifact.role, participantId: artifact.participantId, samples: artifact.samples.length })),
   };
