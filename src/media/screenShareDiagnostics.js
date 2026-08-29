@@ -49,6 +49,19 @@ function jsonSafe(value, depth = 0) {
   return result;
 }
 
+function sanitizeDiagnosticsCapture(capture) {
+  const safeCapture = jsonSafe(capture);
+  if (!safeCapture || typeof safeCapture !== 'object' || Array.isArray(safeCapture)) return safeCapture;
+  if (!safeCapture.source || typeof safeCapture.source !== 'object' || Array.isArray(safeCapture.source)) {
+    return safeCapture;
+  }
+  const safeSource = { ...safeCapture.source };
+  delete safeSource.name;
+  delete safeSource.title;
+  delete safeSource.windowTitle;
+  return { ...safeCapture, source: safeSource };
+}
+
 function normalizeRunId(value) {
   return String(value || '').trim().slice(0, 128);
 }
@@ -92,7 +105,7 @@ export function createScreenShareRunContext(capture = {}) {
     startedAtMs: clock.wallTimeMs,
     performanceTimeOriginMs: clock.timeOriginMs,
     monotonicStartMs: clock.monotonicMs,
-    capture: jsonSafe(capture),
+    capture: sanitizeDiagnosticsCapture(capture),
   };
 }
 
@@ -453,6 +466,7 @@ export function createScreenShareDiagnosticsSession({
   performanceTimeOriginMs = finiteNumber(globalThis.performance?.timeOrigin),
   monotonicStartMs = globalThis.performance?.now?.() ?? null,
   capture = null,
+  correlation = null,
 } = {}) {
   if (!enabled || !normalizeRunId(runId) || !['sender', 'receiver'].includes(role)) return null;
 
@@ -472,7 +486,8 @@ export function createScreenShareDiagnosticsSession({
     performanceTimeOriginMs: finiteNumber(performanceTimeOriginMs),
     monotonicStartMs: startMonotonicMs,
     environment: normalizeScreenShareDiagnosticsEnvironment({ ...environment, role }),
-    capture: jsonSafe(capture),
+    correlation: jsonSafe(correlation),
+    capture: sanitizeDiagnosticsCapture(capture),
     transport: null,
     samples: [],
     render: { available: false, windows: [] },
@@ -493,7 +508,8 @@ export function createScreenShareDiagnosticsSession({
     get active() { return active; },
     updateMetadata(metadata = {}) {
       if (!active || !metadata || typeof metadata !== 'object') return false;
-      if (metadata.capture !== undefined) artifact.capture = jsonSafe(metadata.capture);
+      if (metadata.capture !== undefined) artifact.capture = sanitizeDiagnosticsCapture(metadata.capture);
+      if (metadata.correlation !== undefined) artifact.correlation = jsonSafe(metadata.correlation);
       if (metadata.transport !== undefined) artifact.transport = jsonSafe(metadata.transport);
       if (metadata.environment !== undefined) {
         artifact.environment = normalizeScreenShareDiagnosticsEnvironment({ ...metadata.environment, role });
@@ -504,6 +520,7 @@ export function createScreenShareDiagnosticsSession({
       if (!active || artifact.samples.length >= MAX_SCREEN_SHARE_DIAGNOSTIC_SAMPLES) return false;
       const clock = nowClock();
       const monotonic = finiteNumber(sample.monotonicMs) ?? clock.monotonicMs;
+      // elapsedMs is always local monotonic time; wall clocks between machines must not be subtracted.
       const elapsedMs = finiteNumber(sample.elapsedMs)
         ?? (monotonic === null || startMonotonicMs === null ? 0 : Math.max(0, monotonic - startMonotonicMs));
       artifact.samples.push({

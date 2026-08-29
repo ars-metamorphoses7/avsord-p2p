@@ -134,7 +134,15 @@ test('sender and receiver sessions preserve separate participant artifacts for o
     enabled: true, ...run, role: 'sender', participantId: 'sender-a', peerId: 'sender-a', transportMode: 'mesh',
   });
   const receiverA = createScreenShareDiagnosticsSession({
-    enabled: true, ...run, role: 'receiver', participantId: 'receiver-a', peerId: 'receiver-a', sourcePeerId: 'sender-a', transportMode: 'mesh',
+    enabled: true,
+    ...run,
+    role: 'receiver',
+    participantId: 'receiver-a',
+    peerId: 'receiver-a',
+    sourcePeerId: 'sender-a',
+    transportMode: 'mesh',
+    startedAtMs: 1_700_000_000_900,
+    correlation: { senderAnnouncedStartedAtMs: run.startedAtMs },
   });
   const receiverB = createScreenShareDiagnosticsSession({
     enabled: true, ...run, role: 'receiver', participantId: 'receiver-b', peerId: 'receiver-b', sourcePeerId: 'sender-a', transportMode: 'mesh',
@@ -149,7 +157,45 @@ test('sender and receiver sessions preserve separate participant artifacts for o
   assert.equal(receiverArtifactA.runId, receiverArtifactB.runId);
   assert.equal(receiverArtifactA.sourcePeerId, 'sender-a');
   assert.notEqual(receiverArtifactA.participantId, receiverArtifactB.participantId);
+  assert.equal(receiverArtifactA.startedAtMs, 1_700_000_000_900);
+  assert.equal(receiverArtifactA.correlation.senderAnnouncedStartedAtMs, run.startedAtMs);
   assert.equal(senderArtifact.endReason, 'share-stopped');
+});
+
+test('receiver elapsed time uses local monotonic clock, never sender wall clock', () => {
+  const session = createScreenShareDiagnosticsSession({
+    enabled: true,
+    runId: 'clock-semantics-run',
+    role: 'receiver',
+    startedAtMs: 2_000_000,
+    performanceTimeOriginMs: 1_900_000,
+    monotonicStartMs: 500,
+    correlation: { senderAnnouncedStartedAtMs: 1_000_000 },
+  });
+  session.recordSample({ monotonicMs: 500, pipeline: { captureFps: 60 } });
+  session.recordSample({ monotonicMs: 1_250, pipeline: { captureFps: 60 } });
+  const artifact = session.finish('test');
+  assert.equal(artifact.startedAtMs, 2_000_000);
+  assert.equal(artifact.correlation.senderAnnouncedStartedAtMs, 1_000_000);
+  assert.equal(artifact.samples[0].elapsedMs, 0);
+  assert.equal(artifact.samples[1].elapsedMs, 750);
+});
+
+test('diagnostics capture omits arbitrary source window titles', () => {
+  const session = createScreenShareDiagnosticsSession({
+    enabled: true,
+    runId: 'source-privacy-run',
+    role: 'sender',
+    capture: {
+      profileId: 'performance',
+      source: { id: 'window:limited-id', type: 'window', name: 'Private Window Title', title: 'Private Title' },
+    },
+  });
+  const artifact = session.finish('test');
+  const serialized = JSON.stringify(artifact);
+  assert.equal(serialized.includes('Private Window Title'), false);
+  assert.equal(serialized.includes('Private Title'), false);
+  assert.deepEqual(artifact.capture.source, { id: 'window:limited-id', type: 'window' });
 });
 
 test('summary includes operating-point transitions and sender retention', () => {

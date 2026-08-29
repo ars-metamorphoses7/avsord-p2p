@@ -132,9 +132,8 @@ export function useScreenShare({
           profileId: profile.id,
           source: selectedVideo ? {
             id: String(selectedVideo.id || '').slice(0, 120),
-            name: String(selectedVideo.name || '').slice(0, 160),
             type: selectedVideo.type || 'desktop-picker',
-          } : { id: '', name: '', type: 'browser-picker' },
+          } : { id: '', type: 'browser-picker' },
           requestedConstraints: screenCaptureConstraints(profile.id, selectedVideo?.id || ''),
           trackSettings: safeTrackSnapshot(videoTrack, 'getSettings'),
           trackConstraints: safeTrackSnapshot(videoTrack, 'getConstraints'),

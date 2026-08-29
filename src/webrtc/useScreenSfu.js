@@ -69,6 +69,7 @@ function ensureSfuDiagnosticsSession(slot, key, options) {
     performanceTimeOriginMs: options.run.performanceTimeOriginMs,
     monotonicStartMs: options.run.monotonicStartMs,
     capture: options.run.capture,
+    correlation: options.correlation,
   });
   slot[key] = session;
   return session;
@@ -583,13 +584,15 @@ export function useScreenSfu({
             if (!runId) return;
             const run = {
               runId,
-              startedAtMs: slot?.remoteMediaState?.screenShareRunStartedAtMs || Date.now(),
+              startedAtMs: Date.now(),
               performanceTimeOriginMs: performance.timeOrigin,
               monotonicStartMs: performance.now(),
               capture: null,
             };
+            const senderAnnouncedStartedAtMs = slot?.remoteMediaState?.screenShareRunStartedAtMs || null;
             const session = ensureSfuDiagnosticsSession(entry, 'receiverDiagnosticsSession', {
               run,
+              correlation: { senderAnnouncedStartedAtMs },
               role: 'receiver',
               participantId: localPeerIdRef.current,
               peerId: localPeerIdRef.current,

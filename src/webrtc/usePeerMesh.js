@@ -91,6 +91,7 @@ function ensureDiagnosticsSession(slot, key, options) {
     performanceTimeOriginMs: options.run.performanceTimeOriginMs,
     monotonicStartMs: options.run.monotonicStartMs,
     capture: options.run.capture,
+    correlation: options.correlation,
   });
   slot[key] = session;
   return session;
@@ -536,14 +537,18 @@ export function usePeerMesh({
             slot.playbackAdaptation.targetMs,
           );
           if (slot.remoteMediaState?.sharing && slot.remoteMediaState.screenShareRunId) {
+            const receiverStartedAtMs = Date.now();
+            const receiverMonotonicStartMs = performance.now();
+            const senderAnnouncedStartedAtMs = slot.remoteMediaState.screenShareRunStartedAtMs || null;
             const diagnosticsSession = ensureDiagnosticsSession(slot, 'receiverDiagnosticsSession', {
               run: {
                 runId: slot.remoteMediaState.screenShareRunId,
-                startedAtMs: slot.remoteMediaState.screenShareRunStartedAtMs || Date.now(),
+                startedAtMs: receiverStartedAtMs,
                 performanceTimeOriginMs: performance.timeOrigin,
-                monotonicStartMs: performance.now(),
+                monotonicStartMs: receiverMonotonicStartMs,
                 capture: null,
               },
+              correlation: { senderAnnouncedStartedAtMs },
               role: 'receiver',
               participantId: localPeerIdRef.current,
               peerId: localPeerIdRef.current,

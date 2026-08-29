@@ -18,6 +18,12 @@ Os arquivos ficam em:
 
 Cada arquivo contém `schemaVersion`, o `runId` compartilhado, `role` (`sender` ou `receiver`), participante/origem, modo de transporte (`mesh` ou `sfu`), manifesto do ambiente, captura, série temporal, janelas agregadas de renderização e `summary`. O mesmo `runId` permite agrupar o sender e todos os receivers de uma transmissão; o nome inclui ainda papel, participante, timestamp e sequência para evitar colisões entre arquivos.
 
+### Semântica de relógio e privacidade da fonte
+
+`startedAtMs`, `performanceTimeOriginMs` e `monotonicStartMs` pertencem à máquina que gerou o artefato. O receiver registra seu próprio `startedAtMs` local quando cria a sessão; ele nunca reutiliza o timestamp de início anunciado pelo sender. Se esse timestamp remoto estiver disponível, ele aparece somente como `correlation.senderAnnouncedStartedAtMs`. `samples[*].elapsedMs` é calculado exclusivamente a partir do relógio monotônico local. Wall clocks entre máquinas não devem ser subtraídos.
+
+O diagnóstico preserva apenas um identificador de fonte limitado e o tipo (`screen`, `window` etc.), além de perfil, constraints e configurações da track. Nome ou título arbitrário de janela/aplicação não é persistido no artefato.
+
 Para conferir o contrato localmente:
 
 ```powershell

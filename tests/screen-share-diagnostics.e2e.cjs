@@ -144,6 +144,13 @@ async function run() {
   if (artifacts.some((artifact) => !artifact.environment?.electronVersion || !artifact.environment?.display)) {
     throw new Error('O smoke test encontrou artefato sem manifesto de ambiente.');
   }
+  if (artifacts.some((artifact) => artifact.capture?.source?.name || artifact.capture?.source?.title || artifact.capture?.source?.windowTitle)) {
+    throw new Error('O smoke test encontrou título de janela no artefato de diagnóstico.');
+  }
+  const receiverWithCorrelation = receiverArtifacts.find((artifact) => artifact.correlation);
+  if (!receiverWithCorrelation || !Object.prototype.hasOwnProperty.call(receiverWithCorrelation.correlation, 'senderAnnouncedStartedAtMs')) {
+    throw new Error('O smoke test encontrou receiver sem correlação explícita do timestamp remoto.');
+  }
   const output = {
     userData,
     artifactCount: artifacts.length,
