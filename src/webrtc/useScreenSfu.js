@@ -434,6 +434,7 @@ export function useScreenSfu({
           allowBitrateIncrease,
           networkPressure: next.networkPressure,
           transportPressure: next.transportPressure,
+          startupBitrateGuardActive: next.startupBitrateGuardActive,
           recoveryProbeActive: next.recoveryProbeActive,
           recoveryProbeMaxBitrate: next.recoveryProbeMaxBitrate,
         });

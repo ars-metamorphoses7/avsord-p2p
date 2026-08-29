@@ -401,6 +401,7 @@ export function usePeerMesh({
                 targetFrameRate: nextAdaptation.frameRate,
                 networkPressure: nextAdaptation.networkPressure,
                 transportPressure: nextAdaptation.transportPressure,
+                startupBitrateGuardActive: nextAdaptation.startupBitrateGuardActive,
                 recoveryProbeActive: nextAdaptation.recoveryProbeActive,
                 recoveryProbeMaxBitrate: nextAdaptation.recoveryProbeMaxBitrate,
               },

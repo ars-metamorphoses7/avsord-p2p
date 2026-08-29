@@ -421,6 +421,13 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
     ? Math.min(profile.maxBitrate, requestedRecoveryProbeMaxBitrate)
     : null;
   const previousBitrate = Number(encoding.maxBitrate) || targetBitrate;
+  const structuralChange = Math.abs(currentScale - adaptationScale) >= 0.01
+    || Number(encoding.maxFramerate) !== targetFrameRate
+    || parameters.degradationPreference !== profile.degradationPreference;
+  const startupBitrateGuardActive = diagnostics.startupBitrateGuardActive === true;
+  const capacityOnlyBitrateReduction = targetBitrate < previousBitrate
+    && !transportPressure
+    && !structuralChange;
   // Bandwidth estimates are intentionally noisy. Chasing every sample makes
   // queues empty/fill in bursts and the receiver compensates by varying
   // playout. A falling estimate is a hard ceiling: stepping down over several
@@ -443,10 +450,13 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
       // lower cadence preserves the old recovery time without asking
       // OpenH264/driver encoders for a keyframe every adaptation sample.
       : Math.min(targetBitrate, Math.round(previousBitrate * 1.40));
+  if (startupBitrateGuardActive && capacityOnlyBitrateReduction && recoveryProbeMaxBitrate === null) {
+    // GCC's first reports are often conservative. Do not turn a capacity-only
+    // bootstrap estimate into a hard cap before the existing startup window
+    // has elapsed; real transport pressure remains an immediate bypass.
+    nextBitrate = previousBitrate;
+  }
   if (recoveryProbeMaxBitrate !== null) nextBitrate = recoveryProbeMaxBitrate;
-  const structuralChange = Math.abs(currentScale - adaptationScale) >= 0.01
-    || Number(encoding.maxFramerate) !== targetFrameRate
-    || parameters.degradationPreference !== profile.degradationPreference;
   if (!structuralChange && recoveryProbeMaxBitrate === null && nextBitrate > previousBitrate
       && diagnostics.allowBitrateIncrease === false) {
     nextBitrate = previousBitrate;
@@ -669,6 +679,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     && encoderRecoveryReady;
   const sampleCount = (Number(current.sampleCount) || 0) + 1;
   const observingStartup = sampleCount <= profile.startupSamples;
+  const startupBitrateGuardActive = observingStartup;
   const encoderImplementation = String(diagnostics.encoderImplementation || '');
   const softwareEncoder = diagnostics.powerEfficientEncoder === false
     || /openh264|libvpx|ffmpeg|software/i.test(encoderImplementation);
@@ -1081,6 +1092,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     retransmissionRatio,
     averagePacketSendDelayMs,
     packetsDiscardedOnSend,
+    startupBitrateGuardActive,
     pressureSamplesRequired,
     networkSustained: actionableNetworkPressure,
     networkHeadroomRatio,

@@ -224,6 +224,84 @@ test('adaptive sender clamps a sudden capacity collapse in one sample', async ()
   assert.equal(sender.parameters.encodings[0].maxBitrate, 780_000);
 });
 
+test('startup bitrate guard preserves a capacity-only cap through its startup samples', async () => {
+  const sender = fakeSender();
+  await configureVideoSender(sender, 'performance', 1);
+  const startupCapacity = {
+    availableOutgoingBitrate: 750_000,
+    adaptationScale: 1,
+    targetFrameRate: 60,
+    startupBitrateGuardActive: true,
+  };
+  for (let sample = 0; sample < 3; sample += 1) {
+    await adaptVideoSender(sender, 'performance', 1, startupCapacity);
+    assert.equal(sender.parameters.encodings[0].maxBitrate, 8_000_000);
+  }
+
+  await adaptVideoSender(sender, 'performance', 1, {
+    ...startupCapacity,
+    startupBitrateGuardActive: false,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 585_000);
+});
+
+test('startup bitrate guard is exposed exactly by the existing startup sample window', () => {
+  let state = initialCaptureAdaptation('performance');
+  const diagnostics = {
+    captureFps: 60,
+    framesPerSecond: 59,
+    averageEncodeTimeMs: 3,
+    availableOutgoingBitrate: 20_000_000,
+  };
+  for (let sample = 0; sample < 3; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', diagnostics);
+    assert.equal(state.startupBitrateGuardActive, true);
+  }
+  state = evaluateCaptureAdaptation(state, 'performance', diagnostics);
+  assert.equal(state.startupBitrateGuardActive, false);
+});
+
+test('startup bitrate guard yields to every existing transport pressure signal', async () => {
+  const pressureCases = [
+    { packetLossRatio: 0.03 },
+    { retransmissionRatio: 0.10 },
+    { averagePacketSendDelayMs: 20 },
+    { packetsDiscardedOnSend: 1 },
+  ];
+  for (const pressure of pressureCases) {
+    const sender = fakeSender();
+    await configureVideoSender(sender, 'performance', 1);
+    await adaptVideoSender(sender, 'performance', 1, {
+      availableOutgoingBitrate: 750_000,
+      adaptationScale: 1,
+      targetFrameRate: 60,
+      startupBitrateGuardActive: true,
+      ...pressure,
+    });
+    assert.ok(sender.parameters.encodings[0].maxBitrate < 8_000_000, JSON.stringify(pressure));
+  }
+});
+
+test('startup bitrate guard never restores a cap previously reduced by transport pressure', async () => {
+  const sender = fakeSender();
+  await configureVideoSender(sender, 'performance', 1);
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 750_000,
+    packetLossRatio: 0.03,
+    adaptationScale: 1,
+    startupBitrateGuardActive: true,
+  });
+  const pressureCap = sender.parameters.encodings[0].maxBitrate;
+  assert.equal(pressureCap, 525_000);
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 600_000,
+    adaptationScale: 1,
+    startupBitrateGuardActive: true,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, pressureCap);
+  assert.notEqual(sender.parameters.encodings[0].maxBitrate, 8_000_000);
+});
+
 test('temporal fallback reduces sender cadence and its nominal bitrate', async () => {
   const sender = fakeSender();
   await configureVideoSender(sender, 'performance', 1);
@@ -236,6 +314,22 @@ test('temporal fallback reduces sender cadence and its nominal bitrate', async (
   assert.equal(sender.parameters.encodings[0].maxFramerate, 30);
   assert.equal(sender.parameters.encodings[0].maxBitrate, 2_000_000);
   assert.equal(screenShareEncodingBitrate('performance', 1, 2), 2_000_000);
+});
+
+test('startup bitrate guard preserves the current cap during software structural safe start', async () => {
+  const sender = fakeSender();
+  await configureVideoSender(sender, 'performance', 1);
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 0,
+    adaptationScale: 4 / 3,
+    targetFrameRate: 30,
+    sourceWidth: 1280,
+    sourceHeight: 720,
+    startupBitrateGuardActive: true,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 4_500_000);
+  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 4 / 3);
+  assert.equal(sender.parameters.encodings[0].maxFramerate, 30);
 });
 
 test('adaptive sender applies the 360p floor to the real ultrawide source height', async () => {
@@ -1033,6 +1127,7 @@ test('sender applies the spatial probe cap without changing scale or cadence', a
     transportPressure: false,
     recoveryProbeActive: true,
     recoveryProbeMaxBitrate: 5_500_000,
+    startupBitrateGuardActive: true,
     allowBitrateIncrease: false,
   });
   assert.equal(sender.parameters.encodings[0].maxBitrate, 5_500_000);
