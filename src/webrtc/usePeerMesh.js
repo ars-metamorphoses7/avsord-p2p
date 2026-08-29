@@ -399,12 +399,19 @@ export function usePeerMesh({
                     >= SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS,
                 adaptationScale: nextAdaptation.scale,
                 targetFrameRate: nextAdaptation.frameRate,
+                networkPressure: nextAdaptation.networkPressure,
+                transportPressure: nextAdaptation.transportPressure,
+                recoveryProbeActive: nextAdaptation.recoveryProbeActive,
+                recoveryProbeMaxBitrate: nextAdaptation.recoveryProbeMaxBitrate,
               },
             ), {
               profileId: videoProfileRef.current,
               adaptationReason: nextAdaptation.reason,
               adaptationLevel: nextAdaptation.level,
               temporalLevel: nextAdaptation.temporalLevel,
+              recoveryProbeActive: nextAdaptation.recoveryProbeActive,
+              recoveryProbeMaxBitrate: nextAdaptation.recoveryProbeMaxBitrate,
+              recoveryProbeReason: nextAdaptation.recoveryProbeReason,
             });
           })
         )));

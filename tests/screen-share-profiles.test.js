@@ -14,6 +14,7 @@ import {
   safeVideoSenderScale,
   screenCaptureConstraints,
   screenShareEncodingBitrate,
+  screenShareRecoveryProbeBitrate,
   screenShareCodecOrder,
   screenSharePlaybackBuffer,
 } from '../src/media/screenShareProfiles.js';
@@ -278,6 +279,67 @@ test('performance controller preserves pixels when capture is source-limited', (
   assert.equal(state.sourceLimited, true);
   assert.equal(state.effectiveWidth, 1280);
   assert.equal(state.effectiveHeight, 720);
+});
+
+test('57/60 capture and encode is healthy for the current operating point', () => {
+  let state = {
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 4,
+    fpsEma: 57,
+  };
+  for (let sample = 0; sample < SCREEN_SHARE_PROFILES.performance.recoverySamples; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', {
+      captureFps: 57,
+      framesPerSecond: 57,
+      averageEncodeTimeMs: 2,
+      availableOutgoingBitrate: 3_600_000,
+      peerCount: 1,
+    });
+  }
+  assert.equal(state.currentOperatingPointHealthy, true);
+  assert.equal(state.level, 2);
+  assert.equal(state.temporalLevel, 0);
+  assert.equal(state.networkRecoveryReady, false);
+  assert.equal(state.stableSamples, SCREEN_SHARE_PROFILES.performance.recoverySamples);
+  assert.equal(state.recoveryProbeActive, true);
+});
+
+test('source-limited 45/45 does not count as current-point health or start a probe', () => {
+  const state = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 4,
+  }, 'performance', {
+    captureFps: 45,
+    framesPerSecond: 45,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 3_600_000,
+  });
+  assert.equal(state.sourceLimited, true);
+  assert.equal(state.currentOperatingPointHealthy, false);
+  assert.equal(state.stableSamples, 0);
+  assert.equal(state.recoveryProbeActive, false);
+});
+
+test('encoder delivery loss at 57/40 does not count as current-point health', () => {
+  const state = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 4,
+  }, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 40,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 3_600_000,
+  });
+  assert.equal(state.sourceLimited, false);
+  assert.equal(state.encoderDeliveryRatio < 0.92, true);
+  assert.equal(state.currentOperatingPointHealthy, false);
+  assert.equal(state.recoveryProbeActive, false);
 });
 
 test('actual software encoder stats start from a conservative operating point', () => {
@@ -682,12 +744,141 @@ test('temporal recovery waits for capacity headroom for the richer level', () =>
   assert.equal(state.reason, 'temporal-recovery');
 });
 
+test('spatial recovery probe derives a temporary cap from the next operating point', () => {
+  let state = {
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 4,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples - 1,
+    fpsEma: 57,
+  };
+  state = evaluateCaptureAdaptation(state, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 57,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 3_600_000,
+    peerCount: 1,
+  });
+  assert.equal(state.level, 2);
+  assert.equal(state.temporalLevel, 0);
+  assert.equal(state.recoveryProbeActive, true);
+  assert.equal(state.recoveryProbeReason, 'insufficient-next-point-headroom');
+  assert.equal(state.recoveryProbeMaxBitrate, 5_500_000);
+  assert.equal(state.reason, 'spatial-recovery-probe');
+});
+
+test('spatial recovery probe recovers exactly one level after headroom appears', () => {
+  const state = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 14,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples,
+    fpsEma: 57,
+    recoveryProbeActive: true,
+    recoveryProbeMaxBitrate: 5_500_000,
+    recoveryProbeReason: 'insufficient-next-point-headroom',
+  }, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 57,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 6_000_000,
+    peerCount: 1,
+  });
+  assert.equal(state.level, 1);
+  assert.equal(state.scale, 4 / 3);
+  assert.equal(state.temporalLevel, 0);
+  assert.equal(state.reason, 'recovery');
+  assert.equal(state.recoveryProbeActive, false);
+  assert.equal(state.recoveryProbeMaxBitrate, null);
+});
+
+test('spatial recovery probe aborts when transport pressure appears', () => {
+  const state = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 14,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples,
+    recoveryProbeActive: true,
+    recoveryProbeMaxBitrate: 5_500_000,
+    recoveryProbeReason: 'insufficient-next-point-headroom',
+  }, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 57,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 6_000_000,
+    packetLossRatio: 0.03,
+  });
+  assert.equal(state.recoveryProbeActive, false);
+  assert.equal(state.recoveryProbeMaxBitrate, null);
+  assert.equal(state.networkPressure, true);
+  assert.equal(state.level, 2);
+  assert.equal(state.temporalLevel, 0);
+  assert.equal(state.cooldownSamples, 3);
+});
+
+test('level zero and temporal degradation never start a spatial recovery probe', () => {
+  const healthyLevelZero = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    sampleCount: 4,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples - 1,
+  }, 'performance', {
+    captureFps: 57,
+    framesPerSecond: 57,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 20_000_000,
+  });
+  const temporal = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    temporalLevel: 1,
+    frameRate: 30,
+    sampleCount: 4,
+    stableSamples: SCREEN_SHARE_PROFILES.performance.recoverySamples - 1,
+  }, 'performance', {
+    captureFps: 30,
+    framesPerSecond: 30,
+    averageEncodeTimeMs: 2,
+    availableOutgoingBitrate: 1_000_000,
+  });
+  assert.equal(healthyLevelZero.recoveryProbeActive, false);
+  assert.equal(temporal.recoveryProbeActive, false);
+});
+
 test('sender bitrate recovers gradually instead of following noisy estimates in bursts', async () => {
   const sender = fakeSender();
   sender.parameters.encodings[0].maxBitrate = 2_000_000;
   sender.parameters.encodings[0].maxFramerate = 60;
   await adaptVideoSender(sender, 'performance', 1, { availableOutgoingBitrate: 20_000_000 });
   assert.equal(sender.parameters.encodings[0].maxBitrate, 2_800_000);
+});
+
+test('sender applies the spatial probe cap without changing scale or cadence', async () => {
+  const sender = fakeSender();
+  sender.parameters.encodings[0].maxBitrate = 2_000_000;
+  sender.parameters.encodings[0].scaleResolutionDownBy = 2;
+  sender.parameters.encodings[0].maxFramerate = 60;
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 3_600_000,
+    adaptationScale: 2,
+    targetFrameRate: 60,
+    networkPressure: false,
+    transportPressure: false,
+    recoveryProbeActive: true,
+    recoveryProbeMaxBitrate: 5_500_000,
+    allowBitrateIncrease: false,
+  });
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 5_500_000);
+  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 2);
+  assert.equal(sender.parameters.encodings[0].maxFramerate, 60);
+});
+
+test('spatial probe cap preserves per-peer mesh bitrate math', () => {
+  assert.equal(screenShareRecoveryProbeBitrate('performance', 1, 4 / 3), 5_500_000);
+  assert.equal(screenShareRecoveryProbeBitrate('performance', 3, 4 / 3), 2_650_000);
 });
 
 test('sender coalesces bitrate-only recovery updates to avoid keyframe churn', async () => {

@@ -85,6 +85,9 @@ const ENCODER_DOWNSCALE_OBSERVATION_SAMPLES = 3;
 const ENCODER_DOWNSCALE_MIN_DELIVERY_GAIN = 0.08;
 const ENCODER_DOWNSCALE_MIN_COST_REDUCTION = 0.15;
 const INEFFECTIVE_DOWNSCALE_COOLDOWN_SAMPLES = 6;
+const RECOVERY_PROBE_HEADROOM_RATIO = 1.22;
+const BITRATE_QUANTUM = 50_000;
+const CURRENT_HEALTH_FPS_MARGIN = 0.03;
 
 const LEGACY_PROFILE_ALIASES = {
   competitive: 'performance',
@@ -199,6 +202,20 @@ export function screenShareEncodingBitrate(profileId, peerCount = 1, scale = 1) 
     profile.minimumAdaptiveBitrate,
     Math.round(profile.maxBitrate / meshFactor / (spatialScale ** 2)),
   );
+}
+
+/**
+ * Temporary exploration ceiling for the next spatial operating point. Keep
+ * it above the recovery gate so GCC can discover capacity, but never above
+ * the profile's nominal maximum bitrate.
+ */
+export function screenShareRecoveryProbeBitrate(profileId, peerCount = 1, scale = 1) {
+  const profile = screenShareProfile(profileId);
+  const requiredBitrate = screenShareEncodingBitrate(profile.id, peerCount, scale);
+  const requested = Math.ceil(
+    (requiredBitrate * RECOVERY_PROBE_HEADROOM_RATIO) / BITRATE_QUANTUM,
+  ) * BITRATE_QUANTUM;
+  return Math.min(profile.maxBitrate, Math.max(requiredBitrate, requested));
 }
 
 export function screenCaptureConstraints(profileId, sourceId = '') {
@@ -392,6 +409,13 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   const targetBitrate = available > 0
     ? Math.max(32_000, Math.min(resolutionBudget, networkBudget))
     : resolutionBudget;
+  const requestedRecoveryProbeMaxBitrate = Number(diagnostics.recoveryProbeMaxBitrate) || 0;
+  const recoveryProbeMaxBitrate = diagnostics.recoveryProbeActive === true
+    && requestedRecoveryProbeMaxBitrate > resolutionBudget
+    && !transportPressure
+    && diagnostics.networkPressure !== true
+    ? Math.min(profile.maxBitrate, requestedRecoveryProbeMaxBitrate)
+    : null;
   const previousBitrate = Number(encoding.maxBitrate) || targetBitrate;
   // Bandwidth estimates are intentionally noisy. Chasing every sample makes
   // queues empty/fill in bursts and the receiver compensates by varying
@@ -415,10 +439,11 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
       // lower cadence preserves the old recovery time without asking
       // OpenH264/driver encoders for a keyframe every adaptation sample.
       : Math.min(targetBitrate, Math.round(previousBitrate * 1.40));
+  if (recoveryProbeMaxBitrate !== null) nextBitrate = recoveryProbeMaxBitrate;
   const structuralChange = Math.abs(currentScale - adaptationScale) >= 0.01
     || Number(encoding.maxFramerate) !== targetFrameRate
     || parameters.degradationPreference !== profile.degradationPreference;
-  if (!structuralChange && nextBitrate > previousBitrate
+  if (!structuralChange && recoveryProbeMaxBitrate === null && nextBitrate > previousBitrate
       && diagnostics.allowBitrateIncrease === false) {
     nextBitrate = previousBitrate;
   }
@@ -452,6 +477,7 @@ export function initialCaptureAdaptation(profileId) {
     level: 0,
     temporalLevel: 0,
     frameRate: profile.adaptationFrameRates[0],
+    currentOperatingPointHealthy: false,
     poorSamples: 0,
     stableSamples: 0,
     cooldownSamples: 0,
@@ -462,6 +488,9 @@ export function initialCaptureAdaptation(profileId) {
     encodeEma: 0,
     scale: 1,
     reason: 'initial',
+    recoveryProbeActive: false,
+    recoveryProbeMaxBitrate: null,
+    recoveryProbeReason: null,
     encoderTrial: null,
     downscaleEffectiveness: {
       status: 'idle',
@@ -591,6 +620,23 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     && instantEncodeRatio < 0.65
     && limitation !== 'cpu'
     && !networkPressure;
+  // Health of the current operating point is distinct from proof that the
+  // next, richer point will fit. A source delivering 57/60 FPS with virtually
+  // no encoder loss is healthy even though it is below the nominal 60 FPS;
+  // use the rolling FPS trend so normal capture jitter does not erase health
+  // every 1.5-second sample. The nominal stableFpsRatio remains the recovery
+  // gate; this tolerance only classifies the current point as healthy.
+  const currentHealthFpsRatio = Math.max(
+    profile.pressureFpsRatio,
+    profile.stableFpsRatio - CURRENT_HEALTH_FPS_MARGIN,
+  );
+  const currentOperatingPointHealthy = hasPipelineFps
+    && !sourceLimited
+    && fpsRatio >= currentHealthFpsRatio
+    && encoderDeliveryRatio >= 0.92
+    && encodeRatio < 0.66
+    && limitation !== 'cpu'
+    && !networkPressure;
   const fpsPipelinePressure = hasPipelineFps
     && !sourceLimited
     && encodedRatio < profile.pressureFpsRatio
@@ -612,13 +658,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
       // explicitly reports CPU limitation.
       && (encoderDeliveryRatio < 0.94 || instantEncodeRatio > 1 || limitation === 'cpu'))
     || limitation === 'cpu';
-  const stable = (encodedFps !== null || captureFps !== null)
-    && !sourceLimited
-    && encodedRatio >= profile.stableFpsRatio
-    && fpsRatio >= profile.stableFpsRatio - 0.02
-    && encodeRatio < 0.66
-    && limitation !== 'cpu'
-    && !networkPressure
+  const stable = currentOperatingPointHealthy
     && networkRecoveryReady
     && encoderRecoveryReady;
   const sampleCount = (Number(current.sampleCount) || 0) + 1;
@@ -631,10 +671,31 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const levelBeforeDecision = level;
   const temporalLevelBeforeDecision = nextTemporalLevel;
   let poorSamples = moderatePressure && !observingStartup ? current.poorSamples + 1 : 0;
-  let stableSamples = stable ? current.stableSamples + 1 : 0;
+  let stableSamples = currentOperatingPointHealthy ? current.stableSamples + 1 : 0;
   let sourceSamples = sourceLimited ? (Number(current.sourceSamples) || 0) + 1 : 0;
   let cooldownSamples = Math.max(0, Number(current.cooldownSamples) - 1);
   let reason = current.reason;
+  let recoveryProbeActive = current.recoveryProbeActive === true;
+  let recoveryProbeMaxBitrate = Number(current.recoveryProbeMaxBitrate) || null;
+  let recoveryProbeReason = current.recoveryProbeReason || null;
+  let recoveryProbeAbortReason = null;
+  if (recoveryProbeActive && (
+    level === 0
+    || temporalLevel > 0
+    || !currentOperatingPointHealthy
+    || networkPressure
+    || !encoderRecoveryReady
+  )) {
+    recoveryProbeActive = false;
+    recoveryProbeMaxBitrate = null;
+    recoveryProbeAbortReason = !currentOperatingPointHealthy ? 'current-operating-point-unhealthy'
+      : networkPressure ? 'transport-or-network-pressure'
+        : !encoderRecoveryReady ? 'encoder-recovery-not-ready'
+          : temporalLevel > 0 ? 'temporal-level-active' : 'level-zero';
+    recoveryProbeReason = 'spatial-recovery-probe-aborted';
+    cooldownSamples = Math.max(cooldownSamples, 3);
+    reason = recoveryProbeReason;
+  }
   let encoderTrial = current.encoderTrial ? { ...current.encoderTrial } : null;
   let downscaleEffectiveness = current.downscaleEffectiveness || {
     status: 'idle',
@@ -649,7 +710,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   if (sourceLimited) bottleneck = 'source';
   else if (networkPressure) bottleneck = 'network';
   else if (moderatePressure || severePressure) bottleneck = 'encoder';
-  else if (stable) bottleneck = 'healthy';
+  else if (currentOperatingPointHealthy) bottleneck = 'healthy';
   const lastSpatialTrialWasIneffective = downscaleEffectiveness.status === 'ineffective'
     && downscaleEffectiveness.fromLevel === level
     && downscaleEffectiveness.toLevel === level + 1;
@@ -878,6 +939,23 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     poorSamples = 0;
     stableSamples = 0;
     cooldownSamples = 2;
+  } else if (!recoveryProbeActive
+      && level > 0
+      && temporalLevel === 0
+      && currentOperatingPointHealthy
+      && !networkPressure
+      && encoderRecoveryReady
+      && !networkRecoveryReady
+      && stableSamples >= profile.recoverySamples) {
+    recoveryProbeActive = true;
+    recoveryProbeMaxBitrate = screenShareRecoveryProbeBitrate(
+      profile.id,
+      diagnostics.peerCount,
+      recoveryScale,
+    );
+    recoveryProbeReason = 'insufficient-next-point-headroom';
+    recoveryProbeAbortReason = null;
+    reason = 'spatial-recovery-probe';
   } else if (stable && stableSamples >= profile.recoverySamples) {
     if (nextTemporalLevel > 0) {
       nextTemporalLevel -= 1;
@@ -886,9 +964,14 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
       level -= 1;
       reason = 'recovery';
     }
+    recoveryProbeActive = false;
+    recoveryProbeMaxBitrate = null;
+    recoveryProbeReason = null;
     stableSamples = 0;
     poorSamples = 0;
     cooldownSamples = 5;
+  } else if (recoveryProbeActive) {
+    reason = 'spatial-recovery-probe';
   } else if (sourceLimited) {
     reason = 'source-limited';
   } else if (networkPressure) {
@@ -948,6 +1031,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     cooldownSamples,
     scale,
     frameRate,
+    currentOperatingPointHealthy,
     reason,
     targetFps: frameRate,
     measuredFps,
@@ -974,6 +1058,10 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     recoveryRequiredBitrate,
     networkRecoveryHeadroomRatio,
     networkRecoveryReady,
+    recoveryProbeActive,
+    recoveryProbeMaxBitrate,
+    recoveryProbeReason,
+    recoveryProbeAbortReason,
     projectedRecoveryEncodeMs,
     encoderRecoveryReady,
     encoderTrial,

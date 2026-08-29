@@ -432,6 +432,10 @@ export function useScreenSfu({
           adaptationScale: next.scale,
           targetFrameRate: next.frameRate,
           allowBitrateIncrease,
+          networkPressure: next.networkPressure,
+          transportPressure: next.transportPressure,
+          recoveryProbeActive: next.recoveryProbeActive,
+          recoveryProbeMaxBitrate: next.recoveryProbeMaxBitrate,
         });
         if (applied) {
           const nextBitrate = Number(producer.rtpSender?.getParameters?.().encodings?.[0]?.maxBitrate) || 0;
