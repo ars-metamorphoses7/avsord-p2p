@@ -1,6 +1,6 @@
 {
   "name": "jump-p2p",
-  "version": "1.0.25",
+  "version": "1.0.26",
   "private": true,
   "type": "module",
   "description": "JUMP — salas privadas com mídia WebRTC e compartilhamento de tela híbrido",
