@@ -508,6 +508,7 @@ export function useScreenSfu({
           networkPressure: next.networkPressure,
           transportPressure: next.transportPressure,
           startupBitrateGuardActive: next.startupBitrateGuardActive,
+          startupExplorationActive: next.startupExplorationActive,
           recoveryProbeActive: next.recoveryProbeActive,
           recoveryProbeMaxBitrate: next.recoveryProbeMaxBitrate,
         });

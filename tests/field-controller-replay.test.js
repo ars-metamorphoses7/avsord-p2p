@@ -148,6 +148,41 @@ const A1_REUSED_PC_STARTUP_SAMPLES = [
   },
 ];
 
+const A1_6F98_SEVERE_STARTUP_SAMPLES = [
+  {
+    elapsedMs: 1_200,
+    captureFps: 47,
+    framesPerSecond: 1,
+    averageEncodeTimeMs: 1,
+    availableOutgoingBitrate: 225_884,
+    averagePacketSendDelayMs: null,
+  },
+  {
+    elapsedMs: 2_700,
+    captureFps: 49.9925,
+    framesPerSecond: 19.3304,
+    averageEncodeTimeMs: 2.6,
+    availableOutgoingBitrate: 367_231,
+    averagePacketSendDelayMs: 455.2216,
+  },
+  {
+    elapsedMs: 4_200,
+    captureFps: 52.0027,
+    framesPerSecond: 22.6678,
+    averageEncodeTimeMs: 2.8,
+    availableOutgoingBitrate: 412_160,
+    averagePacketSendDelayMs: 85.4689,
+  },
+  {
+    elapsedMs: 5_700,
+    captureFps: 51.3339,
+    framesPerSecond: 9.3334,
+    averageEncodeTimeMs: 2.8,
+    availableOutgoingBitrate: 448_855,
+    averagePacketSendDelayMs: 3.9565,
+  },
+];
+
 function replaySample(state, sample) {
   return evaluateCaptureAdaptation(state, 'performance', {
     captureFps: sample.captureFps,
@@ -172,6 +207,7 @@ async function replaySender(samples) {
   await configureVideoSender(sender, 'performance', 1);
   let state = initialCaptureAdaptation('performance');
   const states = [];
+  const maxBitrates = [];
 
   for (const sample of samples) {
     state = replaySample(state, sample);
@@ -181,12 +217,14 @@ async function replaySender(samples) {
       adaptationScale: state.scale,
       targetFrameRate: state.frameRate,
       startupBitrateGuardActive: state.startupBitrateGuardActive,
+      startupExplorationActive: state.startupExplorationActive,
       sourceWidth: 1280,
       sourceHeight: 720,
     });
+    maxBitrates.push(sender.parameters.encodings[0].maxBitrate);
   }
 
-  return { sender, states };
+  return { sender, states, maxBitrates };
 }
 
 test('TEST 1 replay probe reproduces A1 and A2 without encoding a startup policy', async () => {
@@ -196,7 +234,7 @@ test('TEST 1 replay probe reproduces A1 and A2 without encoding a startup policy
     { captureFps: 55, framesPerSecond: 8, averageEncodeTimeMs: 3, availableOutgoingBitrate: 195_000, averagePacketSendDelayMs: 792 },
     { captureFps: 55, framesPerSecond: 12.7, averageEncodeTimeMs: 3, availableOutgoingBitrate: 219_000, averagePacketSendDelayMs: 636 },
   ]);
-  assert.deepEqual(a1.states.map((state) => state.level), [0, 0, 0, 1]);
+  assert.deepEqual(a1.states.map((state) => state.level), [0, 0, 0, 0]);
   assert.equal(a1.states[0].startupBitrateGuardActive, true);
   assert.equal(a1.states[1].transportPressure, true);
   assert.equal(a1.sender.parameters.encodings[0].maxBitrate < 8_000_000, true);
@@ -438,23 +476,36 @@ test('low capacity is not classified as healthy during startup pacer analysis', 
   assert.equal(state.startupPacerOnly, false);
 });
 
-test('81f field replay confirms probe self-abort is soft-only transport pressure', () => {
+test('81f field replay tolerates the first probe pacer-only excursion', () => {
   const probeStart = replaySample(
     WHOLE_SCREEN_81F_PRE_PROBE_STATE,
     WHOLE_SCREEN_81F_PROBE_SAMPLES[0],
   );
-  const observedAbort = replaySample(probeStart, WHOLE_SCREEN_81F_PROBE_SAMPLES[1]);
+  const observedTransient = replaySample(probeStart, WHOLE_SCREEN_81F_PROBE_SAMPLES[1]);
 
   assert.equal(probeStart.recoveryProbeActive, true);
   assert.equal(probeStart.networkRecoveryHeadroomRatio < 1, true);
-  assert.equal(observedAbort.recoveryProbeActive, false);
-  assert.equal(observedAbort.recoveryProbeAbortReason, 'transport-or-network-pressure');
-  assert.equal(observedAbort.hardTransportPressure, false);
-  assert.equal(observedAbort.transportPressure, true);
-  assert.equal(observedAbort.packetLossRatio, 0);
-  assert.equal(observedAbort.retransmissionRatio, 0);
-  assert.equal(observedAbort.packetsDiscardedOnSend, 0);
-  assert.equal(observedAbort.averagePacketSendDelayMs > 80, true);
+  assert.equal(observedTransient.recoveryProbeActive, true);
+  assert.equal(observedTransient.recoveryProbeAbortReason, null);
+  assert.equal(observedTransient.hardTransportPressure, false);
+  assert.equal(observedTransient.softTransportPressure, true);
+  assert.equal(observedTransient.transportPressure, true);
+  assert.equal(observedTransient.recoveryProbeStressSamples, 1);
+  assert.equal(observedTransient.packetLossRatio, 0);
+  assert.equal(observedTransient.retransmissionRatio, 0);
+  assert.equal(observedTransient.packetsDiscardedOnSend, 0);
+  assert.equal(observedTransient.averagePacketSendDelayMs > 80, true);
+
+  const recovered = replaySample(observedTransient, {
+    ...WHOLE_SCREEN_81F_PROBE_SAMPLES[0],
+    framesPerSecond: 56,
+    averageEncodeTimeMs: 2.8,
+    availableOutgoingBitrate: 6_000_000,
+    averagePacketSendDelayMs: 0,
+  });
+  assert.equal(recovered.recoveryProbeActive, false);
+  assert.equal(recovered.level, 1);
+  assert.equal(recovered.reason, 'recovery');
 });
 
 test('81f probe replay counterfactuals separate hard, soft, persistent and capacity cases', () => {
@@ -469,12 +520,20 @@ test('81f probe replay counterfactuals separate hard, soft, persistent and capac
   assert.equal(hardAbort.hardTransportPressure, true);
   assert.equal(hardAbort.recoveryProbeAbortReason, 'transport-or-network-pressure');
 
-  const persistentPacerAbort = replaySample(probeStart, {
+  const persistentPacerSample = replaySample(probeStart, {
     ...sample,
     framesPerSecond: 56,
     averageEncodeTimeMs: 2.8,
     averagePacketSendDelayMs: 50,
   });
+  const persistentPacerAbort = replaySample(persistentPacerSample, {
+    ...sample,
+    framesPerSecond: 56,
+    averageEncodeTimeMs: 2.8,
+    averagePacketSendDelayMs: 50,
+  });
+  assert.equal(persistentPacerSample.recoveryProbeActive, true);
+  assert.equal(persistentPacerSample.recoveryProbeStressSamples, 1);
   assert.equal(persistentPacerAbort.recoveryProbeActive, false);
   assert.equal(persistentPacerAbort.hardTransportPressure, false);
   assert.equal(persistentPacerAbort.transportPressure, true);
@@ -493,6 +552,23 @@ test('81f probe replay counterfactuals separate hard, soft, persistent and capac
   assert.equal(insufficient.recoveryProbeActive, false);
   assert.equal(insufficient.recoveryProbeReason, 'spatial-recovery-probe-timeout');
 
+  const degradedSample = replaySample(probeStart, {
+    ...sample,
+    framesPerSecond: 40,
+    averageEncodeTimeMs: 2.5,
+    averagePacketSendDelayMs: 0,
+  });
+  const degradedAbort = replaySample(degradedSample, {
+    ...sample,
+    framesPerSecond: 40,
+    averageEncodeTimeMs: 2.5,
+    averagePacketSendDelayMs: 0,
+  });
+  assert.equal(degradedSample.recoveryProbeActive, true);
+  assert.equal(degradedSample.recoveryProbeStressSamples, 1);
+  assert.equal(degradedAbort.recoveryProbeActive, false);
+  assert.equal(degradedAbort.recoveryProbeAbortReason, 'current-operating-point-unhealthy');
+
   const capacityDiscovered = replaySample(probeStart, {
     ...sample,
     framesPerSecond: 56,
@@ -505,21 +581,52 @@ test('81f probe replay counterfactuals separate hard, soft, persistent and capac
   assert.equal(capacityDiscovered.reason, 'recovery');
 });
 
-test('A1 reused-PC startup replay records low estimator plus pacer-driven collapse', () => {
-  let state = initialCaptureAdaptation('performance');
-  const states = A1_REUSED_PC_STARTUP_SAMPLES.map((sample) => {
-    state = replaySample(state, sample);
-    return state;
-  });
+test('A1 reused-PC startup replay bounds exploration during estimator recovery', async () => {
+  const { states, maxBitrates } = await replaySender(A1_REUSED_PC_STARTUP_SAMPLES);
 
-  assert.deepEqual(states.map((next) => next.level), [0, 1, 1, 1, 1, 1, 1, 2]);
+  assert.deepEqual(states.map((next) => next.level), [0, 0, 0, 1, 1, 1, 1, 2]);
   assert.equal(states[0].networkRecoveryHeadroomRatio < 0.1, true);
   assert.equal(states[1].networkPressure, true);
   assert.equal(states[1].hardTransportPressure, false);
+  assert.equal(states[1].startupStructuralHold, true);
   assert.equal(states[1].transportPressure, true);
-  assert.equal(states[3].currentOperatingPointHealthy, true);
+  assert.equal(states[5].currentOperatingPointHealthy, true);
   assert.equal(states[4].averagePacketSendDelayMs > 100, true);
   assert.equal(states[7].level, 2);
   assert.equal(states[7].hardTransportPressure, false);
   assert.equal(states[7].networkRecoveryHeadroomRatio < 0.6, true);
+  assert.equal(maxBitrates[0] > A1_REUSED_PC_STARTUP_SAMPLES[0].availableOutgoingBitrate * 2, true);
+  assert.equal(maxBitrates.slice(0, 3).every((bitrate) => bitrate < 8_000_000), true);
+  assert.equal(maxBitrates[0] < 4_000_000, true);
+});
+
+test('6f98 severe startup does not blind-cap or structurally collapse on its first soft sample', async () => {
+  const { states, maxBitrates } = await replaySender(A1_6F98_SEVERE_STARTUP_SAMPLES);
+
+  assert.equal(states[0].startupExplorationActive, true);
+  assert.equal(states[1].softTransportPressure, true);
+  assert.equal(states[1].hardTransportPressure, false);
+  assert.equal(states[1].level, 0);
+  assert.equal(states[2].level, 0);
+  assert.equal(maxBitrates[0] > A1_6F98_SEVERE_STARTUP_SAMPLES[0].availableOutgoingBitrate * 2, true);
+  assert.equal(maxBitrates[0] < 8_000_000, true);
+  assert.equal(states[3].startupBitrateGuardActive, false);
+});
+
+test('really low startup capacity eventually downshifts after bounded exploration', () => {
+  let state = initialCaptureAdaptation('performance');
+  for (let sample = 0; sample < 7; sample += 1) {
+    state = replaySample(state, {
+      captureFps: 60,
+      framesPerSecond: 60,
+      averageEncodeTimeMs: 3,
+      availableOutgoingBitrate: 750_000,
+      averagePacketSendDelayMs: 0,
+    });
+  }
+
+  assert.equal(state.startupBitrateGuardActive, false);
+  assert.equal(state.startupExplorationActive, false);
+  assert.ok(state.level > 0 || state.temporalLevel > 0);
+  assert.equal(state.hardTransportPressure, false);
 });

@@ -221,6 +221,34 @@ export function screenShareRecoveryProbeBitrate(profileId, peerCount = 1, scale 
   return Math.min(profile.maxBitrate, Math.max(requiredBitrate, requested));
 }
 
+function classifyTransportPressure(profile, diagnostics = {}) {
+  const packetLossRatio = Math.max(0, Number(diagnostics.packetLossRatio) || 0);
+  const retransmissionRatio = Math.max(0, Number(diagnostics.retransmissionRatio) || 0);
+  const averagePacketSendDelayMs = Math.max(0, Number(diagnostics.averagePacketSendDelayMs) || 0);
+  const packetsDiscardedOnSend = Math.max(0, Number(diagnostics.packetsDiscardedOnSend) || 0);
+  const packetLossPressure = packetLossRatio >= profile.packetLossPressureRatio;
+  const retransmissionPressure = retransmissionRatio >= profile.retransmissionPressureRatio;
+  const pacerPressure = averagePacketSendDelayMs >= profile.packetSendDelayPressureMs;
+  const discardedPacketPressure = packetsDiscardedOnSend > 0;
+  const hardTransportPressure = packetLossPressure
+    || retransmissionPressure
+    || discardedPacketPressure;
+  const softTransportPressure = pacerPressure && !hardTransportPressure;
+  return {
+    packetLossRatio,
+    retransmissionRatio,
+    averagePacketSendDelayMs,
+    packetsDiscardedOnSend,
+    packetLossPressure,
+    retransmissionPressure,
+    pacerPressure,
+    discardedPacketPressure,
+    hardTransportPressure,
+    softTransportPressure,
+    rawTransportPressure: hardTransportPressure || pacerPressure,
+  };
+}
+
 export function screenCaptureConstraints(profileId, sourceId = '') {
   const profile = screenShareProfile(profileId);
   if (sourceId) {
@@ -390,22 +418,23 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
     adaptationScale,
   );
   const available = Number(diagnostics.availableOutgoingBitrate) || 0;
-  const packetLossRatio = Math.max(0, Number(diagnostics.packetLossRatio) || 0);
-  const retransmissionRatio = Math.max(0, Number(diagnostics.retransmissionRatio) || 0);
-  const averagePacketSendDelayMs = Math.max(0, Number(diagnostics.averagePacketSendDelayMs) || 0);
-  const packetsDiscardedOnSend = Math.max(0, Number(diagnostics.packetsDiscardedOnSend) || 0);
   const startupBitrateGuardActive = diagnostics.startupBitrateGuardActive === true;
-  const hardTransportPressure = packetLossRatio >= profile.packetLossPressureRatio
-    || retransmissionRatio >= profile.retransmissionPressureRatio
-    || packetsDiscardedOnSend > 0;
-  const pacerPressure = averagePacketSendDelayMs >= profile.packetSendDelayPressureMs;
-  const rawTransportPressure = hardTransportPressure || pacerPressure;
+  const transportClassification = classifyTransportPressure(profile, diagnostics);
+  const {
+    packetLossRatio,
+    retransmissionRatio,
+    averagePacketSendDelayMs,
+    packetsDiscardedOnSend,
+    hardTransportPressure,
+    softTransportPressure,
+    rawTransportPressure,
+  } = transportClassification;
   // A high, measured estimate is evidence that the current operating point
   // fits. During startup, a pacer spike by itself is too soft to bypass the
   // bitrate guard or be treated as hard congestion; low capacity and hard
   // transport signals retain their existing immediate protection.
   const startupPacerOnly = startupBitrateGuardActive
-    && pacerPressure
+    && softTransportPressure
     && !hardTransportPressure
     && available >= resolutionBudget;
   const transportPressure = rawTransportPressure && !startupPacerOnly;
@@ -423,6 +452,29 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   const targetBitrate = available > 0
     ? Math.max(32_000, Math.min(resolutionBudget, networkBudget))
     : resolutionBudget;
+  const requestedStartupExploration = diagnostics.startupExplorationActive;
+  const startupExplorationActive = startupBitrateGuardActive
+    && requestedStartupExploration === true
+    && !hardTransportPressure
+    && available > 0
+    && available < resolutionBudget;
+  // Use a geometric midpoint between the measured safe budget and the
+  // current operating-point demand. This keeps a reused-PC low estimate from
+  // collapsing the cap to a few hundred kbps, while still bounding the first
+  // excursion well below the previous/current-point maximum. Subsequent
+  // increases retain the existing 1.40x ramp limit.
+  const startupExplorationTargetBitrate = startupExplorationActive
+    ? Math.min(
+      resolutionBudget,
+      Math.max(
+        networkBudget,
+        Math.round(
+          Math.sqrt(Math.max(BITRATE_QUANTUM, networkBudget) * resolutionBudget)
+            / BITRATE_QUANTUM,
+        ) * BITRATE_QUANTUM,
+      ),
+    )
+    : null;
   const requestedRecoveryProbeMaxBitrate = Number(diagnostics.recoveryProbeMaxBitrate) || 0;
   const recoveryProbeMaxBitrate = diagnostics.recoveryProbeActive === true
     && requestedRecoveryProbeMaxBitrate > resolutionBudget
@@ -459,7 +511,14 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
       // lower cadence preserves the old recovery time without asking
       // OpenH264/driver encoders for a keyframe every adaptation sample.
       : Math.min(targetBitrate, Math.round(previousBitrate * 1.40));
-  if (startupBitrateGuardActive && capacityOnlyBitrateReduction && recoveryProbeMaxBitrate === null) {
+  if (startupExplorationTargetBitrate !== null) {
+    nextBitrate = previousBitrate > startupExplorationTargetBitrate
+      ? startupExplorationTargetBitrate
+      : Math.min(startupExplorationTargetBitrate, Math.round(previousBitrate * 1.40));
+  }
+  if (startupBitrateGuardActive && capacityOnlyBitrateReduction
+      && recoveryProbeMaxBitrate === null
+      && startupExplorationTargetBitrate === null) {
     // GCC's first reports are often conservative. Do not turn a capacity-only
     // bootstrap estimate into a hard cap before the existing startup window
     // has elapsed; real transport pressure remains an immediate bypass.
@@ -513,6 +572,7 @@ export function initialCaptureAdaptation(profileId) {
     reason: 'initial',
     recoveryProbeActive: false,
     recoveryProbeSamples: 0,
+    recoveryProbeStressSamples: 0,
     recoveryProbeCooldownSamples: 0,
     recoveryProbeMaxBitrate: null,
     recoveryProbeReason: null,
@@ -568,10 +628,6 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const observingStartup = sampleCount <= profile.startupSamples;
   const limitation = diagnostics.qualityLimitationReason || 'none';
   const availableOutgoingBitrate = Number(diagnostics.availableOutgoingBitrate) || 0;
-  const packetLossRatio = Math.max(0, Number(diagnostics.packetLossRatio) || 0);
-  const retransmissionRatio = Math.max(0, Number(diagnostics.retransmissionRatio) || 0);
-  const averagePacketSendDelayMs = Math.max(0, Number(diagnostics.averagePacketSendDelayMs) || 0);
-  const packetsDiscardedOnSend = Math.max(0, Number(diagnostics.packetsDiscardedOnSend) || 0);
   const requiredBitrate = screenShareEncodingBitrate(
     profile.id,
     diagnostics.peerCount,
@@ -584,27 +640,51 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     ? availableOutgoingBitrate / requiredBitrate
     : null;
   const capacityPressure = networkHeadroomRatio !== null && networkHeadroomRatio < 0.92;
-  const packetLossPressure = packetLossRatio >= profile.packetLossPressureRatio;
-  const retransmissionPressure = retransmissionRatio >= profile.retransmissionPressureRatio;
-  const pacerPressure = averagePacketSendDelayMs >= profile.packetSendDelayPressureMs;
-  const discardedPacketPressure = packetsDiscardedOnSend > 0;
-  const hardTransportPressure = packetLossPressure || retransmissionPressure || discardedPacketPressure;
-  const rawTransportPressure = hardTransportPressure || pacerPressure;
+  const transportClassification = classifyTransportPressure(profile, diagnostics);
+  const {
+    packetLossRatio,
+    retransmissionRatio,
+    averagePacketSendDelayMs,
+    packetsDiscardedOnSend,
+    packetLossPressure,
+    retransmissionPressure,
+    pacerPressure,
+    discardedPacketPressure,
+    hardTransportPressure,
+    softTransportPressure,
+    rawTransportPressure,
+  } = transportClassification;
   const startupPacerOnly = observingStartup
-    && pacerPressure
+    && softTransportPressure
     && !hardTransportPressure
     && !capacityPressure
     && networkHeadroomRatio !== null
     && networkHeadroomRatio >= 1;
   const transportPressure = rawTransportPressure;
   const networkPressure = capacityPressure || transportPressure;
+  const estimatorRamping = networkHeadroomRatio !== null
+    && current.networkHeadroomRatio !== null
+    && networkHeadroomRatio > current.networkHeadroomRatio;
+  const startupStructuralHold = !hardTransportPressure
+    && networkHeadroomRatio !== null
+    && networkHeadroomRatio < 1
+    && sampleCount <= profile.startupSamples + profile.packetPressureSamples
+    && (observingStartup || estimatorRamping);
+  const startupExplorationActive = observingStartup
+    && !hardTransportPressure
+    && availableOutgoingBitrate > 0
+    && networkHeadroomRatio !== null
+    && networkHeadroomRatio < 1;
+  const recoveryProbeWasActive = current.recoveryProbeActive === true;
   let networkSamples = networkPressure ? (Number(current.networkSamples) || 0) + 1 : 0;
   const pressureSamplesRequired = discardedPacketPressure
     ? 1
     : transportPressure ? profile.packetPressureSamples : profile.networkPressureSamples;
   const actionableNetworkPressure = networkPressure
     && networkSamples >= pressureSamplesRequired
-    && !startupPacerOnly;
+    && !startupPacerOnly
+    && !startupStructuralHold
+    && !recoveryProbeWasActive;
   const recoveryScale = temporalLevel > 0
     ? profile.adaptationScales[current.level]
     : profile.adaptationScales[Math.max(0, current.level - 1)];
@@ -676,6 +756,10 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
       && encodeRatio < 0.66
       && limitation !== 'cpu'
       && !networkPressure);
+  const probeEncoderHealthy = hasPipelineFps
+    && encoderDeliveryRatio >= 0.92
+    && encodeRatio < 0.66
+    && limitation !== 'cpu';
   const fpsPipelinePressure = hasPipelineFps
     && !sourceLimited
     && encodedRatio < profile.pressureFpsRatio
@@ -709,13 +793,25 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const levelBeforeDecision = level;
   const temporalLevelBeforeDecision = nextTemporalLevel;
   let poorSamples = moderatePressure && !observingStartup ? current.poorSamples + 1 : 0;
-  let stableSamples = currentOperatingPointHealthy ? current.stableSamples + 1 : 0;
+  const toleratedProbeSoftPressure = recoveryProbeWasActive
+    && softTransportPressure
+    && !hardTransportPressure
+    && current.currentOperatingPointHealthy === true
+    && (Number(current.recoveryProbeStressSamples) || 0) < profile.packetPressureSamples;
+  let stableSamples = currentOperatingPointHealthy
+    ? current.stableSamples + 1
+    : toleratedProbeSoftPressure ? current.stableSamples : 0;
   let sourceSamples = sourceLimited ? (Number(current.sourceSamples) || 0) + 1 : 0;
   let cooldownSamples = Math.max(0, Number(current.cooldownSamples) - 1);
   let reason = current.reason;
-  let recoveryProbeActive = current.recoveryProbeActive === true;
+  let recoveryProbeActive = recoveryProbeWasActive;
   let recoveryProbeSamples = recoveryProbeActive
     ? Math.max(0, Number(current.recoveryProbeSamples) || 0)
+    : 0;
+  let recoveryProbeStressSamples = recoveryProbeActive
+    ? ((softTransportPressure || !probeEncoderHealthy)
+      ? (Number(current.recoveryProbeStressSamples) || 0) + 1
+      : 0)
     : 0;
   let recoveryProbeCooldownSamples = Math.max(
     0,
@@ -724,21 +820,25 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   let recoveryProbeMaxBitrate = Number(current.recoveryProbeMaxBitrate) || null;
   let recoveryProbeReason = current.recoveryProbeReason || null;
   let recoveryProbeAbortReason = null;
+  const persistentSoftPressure = softTransportPressure
+    && recoveryProbeStressSamples >= profile.packetPressureSamples;
   if (recoveryProbeActive && (
-    level === 0
+    hardTransportPressure
+    || level === 0
     || temporalLevel > 0
-    || !probeCurrentPointHealthy
-    || networkPressure
+    || recoveryProbeStressSamples >= profile.packetPressureSamples
     || !encoderRecoveryReady
   )) {
     recoveryProbeActive = false;
     recoveryProbeMaxBitrate = null;
-    recoveryProbeAbortReason = networkPressure ? 'transport-or-network-pressure'
-      : !probeCurrentPointHealthy ? 'current-operating-point-unhealthy'
+    recoveryProbeAbortReason = hardTransportPressure || persistentSoftPressure
+      ? 'transport-or-network-pressure'
+      : !probeEncoderHealthy ? 'current-operating-point-unhealthy'
         : !encoderRecoveryReady ? 'encoder-recovery-not-ready'
           : temporalLevel > 0 ? 'temporal-level-active' : 'level-zero';
     recoveryProbeReason = 'spatial-recovery-probe-aborted';
     recoveryProbeSamples = 0;
+    recoveryProbeStressSamples = 0;
     recoveryProbeCooldownSamples = Math.max(recoveryProbeCooldownSamples, 2);
     cooldownSamples = Math.max(cooldownSamples, 3);
     reason = recoveryProbeReason;
@@ -747,6 +847,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     if (!networkRecoveryReady && recoveryProbeSamples >= RECOVERY_PROBE_MAX_SAMPLES) {
       recoveryProbeActive = false;
       recoveryProbeSamples = 0;
+      recoveryProbeStressSamples = 0;
       recoveryProbeCooldownSamples = RECOVERY_PROBE_COOLDOWN_SAMPLES;
       recoveryProbeMaxBitrate = null;
       recoveryProbeReason = 'spatial-recovery-probe-timeout';
@@ -949,6 +1050,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
       cooldownSamples = 2;
       recoveryProbeActive = false;
       recoveryProbeSamples = 0;
+      recoveryProbeStressSamples = 0;
       recoveryProbeMaxBitrate = null;
       recoveryProbeReason = null;
       recoveryProbeAbortReason = null;
@@ -959,6 +1061,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
         && recoveryProbeCooldownSamples === 0) {
       recoveryProbeActive = true;
       recoveryProbeSamples = 0;
+      recoveryProbeStressSamples = 0;
       recoveryProbeMaxBitrate = screenShareRecoveryProbeBitrate(
         profile.id,
         diagnostics.peerCount,
@@ -991,7 +1094,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     networkSamples = 0;
     cooldownSamples = 2;
     bottleneck = 'network';
-  } else if (severePressure) {
+  } else if (severePressure && !startupStructuralHold && !recoveryProbeWasActive) {
     if (level < profile.adaptationScales.length - 1 && !spatialRetryBlocked) {
       level += profile.severeStep;
       reason = fpsPipelinePressure ? 'encoder-fps-severe' : 'encode-severe';
@@ -1007,7 +1110,8 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     poorSamples = 0;
     stableSamples = 0;
     cooldownSamples = 2;
-  } else if (moderatePressure && poorSamples >= profile.pressureSamples) {
+  } else if (moderatePressure && poorSamples >= profile.pressureSamples
+      && !startupStructuralHold && !recoveryProbeWasActive) {
     if (level < profile.adaptationScales.length - 1 && !spatialRetryBlocked) {
       level += 1;
       reason = limitation === 'cpu' ? 'cpu' : instantEncodeRatio > 0.82 ? 'encode' : 'encoder-fps';
@@ -1034,6 +1138,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
       && stableSamples >= profile.recoverySamples) {
     recoveryProbeActive = true;
     recoveryProbeSamples = 0;
+    recoveryProbeStressSamples = 0;
     recoveryProbeMaxBitrate = screenShareRecoveryProbeBitrate(
       profile.id,
       diagnostics.peerCount,
@@ -1052,6 +1157,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     }
     recoveryProbeActive = false;
     recoveryProbeSamples = 0;
+    recoveryProbeStressSamples = 0;
     recoveryProbeCooldownSamples = 0;
     recoveryProbeMaxBitrate = null;
     recoveryProbeReason = null;
@@ -1131,8 +1237,12 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     networkPressure,
     capacityPressure,
     transportPressure,
+    rawTransportPressure,
     hardTransportPressure,
+    softTransportPressure,
     startupPacerOnly,
+    startupStructuralHold,
+    startupExplorationActive,
     packetLossPressure,
     retransmissionPressure,
     pacerPressure,
@@ -1149,8 +1259,11 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     recoveryRequiredBitrate,
     networkRecoveryHeadroomRatio,
     networkRecoveryReady,
+    probeCurrentPointHealthy,
+    probeEncoderHealthy,
     recoveryProbeActive,
     recoveryProbeSamples,
+    recoveryProbeStressSamples,
     recoveryProbeCooldownSamples,
     recoveryProbeMaxBitrate,
     recoveryProbeReason,

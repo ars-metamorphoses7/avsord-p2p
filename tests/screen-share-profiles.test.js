@@ -224,7 +224,7 @@ test('adaptive sender clamps a sudden capacity collapse in one sample', async ()
   assert.equal(sender.parameters.encodings[0].maxBitrate, 780_000);
 });
 
-test('startup bitrate guard preserves a capacity-only cap through its startup samples', async () => {
+test('startup exploration bounds a capacity-only estimate through its startup samples', async () => {
   const sender = fakeSender();
   await configureVideoSender(sender, 'performance', 1);
   const startupCapacity = {
@@ -232,10 +232,13 @@ test('startup bitrate guard preserves a capacity-only cap through its startup sa
     adaptationScale: 1,
     targetFrameRate: 60,
     startupBitrateGuardActive: true,
+    startupExplorationActive: true,
   };
   for (let sample = 0; sample < 3; sample += 1) {
     await adaptVideoSender(sender, 'performance', 1, startupCapacity);
-    assert.equal(sender.parameters.encodings[0].maxBitrate, 8_000_000);
+    assert.equal(sender.parameters.encodings[0].maxBitrate, 2_150_000);
+    assert.ok(sender.parameters.encodings[0].maxBitrate > 750_000);
+    assert.ok(sender.parameters.encodings[0].maxBitrate < 8_000_000);
   }
 
   await adaptVideoSender(sender, 'performance', 1, {

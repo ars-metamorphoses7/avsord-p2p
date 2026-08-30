@@ -525,6 +525,7 @@ export function usePeerMesh({
                 networkPressure: nextAdaptation.networkPressure,
                 transportPressure: nextAdaptation.transportPressure,
                 startupBitrateGuardActive: nextAdaptation.startupBitrateGuardActive,
+                startupExplorationActive: nextAdaptation.startupExplorationActive,
                 recoveryProbeActive: nextAdaptation.recoveryProbeActive,
                 recoveryProbeMaxBitrate: nextAdaptation.recoveryProbeMaxBitrate,
               },
