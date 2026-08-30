@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  RECOVERY_PROBE_MAX_SAMPLES,
   SCREEN_SHARE_PROFILES,
   adaptVideoSender,
   configureVideoSender,
@@ -79,13 +80,13 @@ test('TEST 1 replay probe reproduces A1 and A2 without encoding a startup policy
   ]);
   assert.equal(a2.states[1].networkRecoveryHeadroomRatio > 1, true);
   assert.equal(a2.states[2].transportPressure, true);
-  // This is the current behavior, retained as an observation until the
-  // startup invariant is chosen; it is intentionally not a desired-policy
-  // assertion for the next production checkpoint.
-  assert.equal(a2.states[2].level, 1);
+  assert.equal(a2.states[2].startupPacerOnly, true);
+  assert.equal(a2.states[2].level, 0);
+  assert.equal(a2.states[3].level, 1);
+  assert.equal(a2.states[3].reason, 'encoder-fps-severe');
 });
 
-test('RED TEST 2: source-limited recovery must not promote without next-point capacity', () => {
+test('TEST 2: source-limited recovery must not promote without next-point capacity', () => {
   const result = evaluateCaptureAdaptation({
     ...initialCaptureAdaptation('performance'),
     level: 2,
@@ -108,6 +109,7 @@ test('RED TEST 2: source-limited recovery must not promote without next-point ca
 
   assert.equal(result.sourceLimited, true);
   assert.equal(result.networkRecoveryReady, false);
+  assert.equal(result.recoveryProbeActive, true);
   assert.equal(
     result.level,
     2,
@@ -115,7 +117,7 @@ test('RED TEST 2: source-limited recovery must not promote without next-point ca
   );
 });
 
-test('RED TEST 3: 57 capture / 55.5 encode must accumulate recovery health', () => {
+test('TEST 3: 57 capture / 55.5 encode must accumulate recovery health', () => {
   let state = {
     ...initialCaptureAdaptation('performance'),
     level: 2,
@@ -148,4 +150,161 @@ test('RED TEST 3: 57 capture / 55.5 encode must accumulate recovery health', () 
     },
     'health based on source-delivery ratio should allow recovery probing without accepting encoder frame loss',
   );
+});
+
+test('source-limited recovery promotes when the next point has demonstrated headroom', () => {
+  const result = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 10,
+    sourceSamples: 1,
+    cooldownSamples: 0,
+    fpsEma: 49,
+    encodeEma: 3.5,
+  }, 'performance', {
+    captureFps: 49,
+    framesPerSecond: 48,
+    averageEncodeTimeMs: 3.5,
+    availableOutgoingBitrate: 6_000_000,
+    peerCount: 1,
+    qualityLimitationReason: 'none',
+    encoderImplementation: HARDWARE_ENCODER,
+    powerEfficientEncoder: true,
+  });
+
+  assert.equal(result.sourceLimited, true);
+  assert.equal(result.networkRecoveryReady, true);
+  assert.equal(result.level, 1);
+  assert.equal(result.reason, 'source-limited-recovery');
+  assert.equal(result.recoveryProbeActive, false);
+});
+
+test('source-limited recovery probe is finite and promotes only after capacity appears', () => {
+  let state = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 10,
+    sourceSamples: 1,
+    cooldownSamples: 0,
+    fpsEma: 49,
+    encodeEma: 3.5,
+  }, 'performance', {
+    captureFps: 49,
+    framesPerSecond: 48,
+    averageEncodeTimeMs: 3.5,
+    availableOutgoingBitrate: 3_600_000,
+    peerCount: 1,
+  });
+
+  assert.equal(state.level, 2);
+  assert.equal(state.recoveryProbeActive, true);
+  assert.equal(state.recoveryProbeSamples, 0);
+
+  for (let sample = 0; sample < RECOVERY_PROBE_MAX_SAMPLES; sample += 1) {
+    state = evaluateCaptureAdaptation(state, 'performance', {
+      captureFps: 49,
+      framesPerSecond: 48,
+      averageEncodeTimeMs: 3.5,
+      availableOutgoingBitrate: 3_600_000,
+      peerCount: 1,
+    });
+  }
+
+  assert.equal(state.level, 2);
+  assert.equal(state.recoveryProbeActive, false);
+  assert.equal(state.recoveryProbeSamples, 0);
+  assert.equal(state.recoveryProbeReason, 'spatial-recovery-probe-timeout');
+  assert.equal(state.recoveryProbeCooldownSamples, 10);
+
+  state = evaluateCaptureAdaptation(state, 'performance', {
+    captureFps: 49,
+    framesPerSecond: 48,
+    averageEncodeTimeMs: 3.5,
+    availableOutgoingBitrate: 6_000_000,
+    peerCount: 1,
+  });
+  assert.equal(state.networkRecoveryReady, true);
+  assert.equal(state.level, 1);
+  assert.equal(state.reason, 'source-limited-recovery');
+});
+
+test('source-limited recovery probe aborts and holds when network pressure appears', () => {
+  const state = evaluateCaptureAdaptation({
+    ...initialCaptureAdaptation('performance'),
+    level: 2,
+    scale: 2,
+    sampleCount: 10,
+    sourceSamples: 2,
+    fpsEma: 49,
+    encodeEma: 3.5,
+    recoveryProbeActive: true,
+    recoveryProbeSamples: 3,
+    recoveryProbeMaxBitrate: 5_500_000,
+    recoveryProbeReason: 'insufficient-next-point-headroom',
+  }, 'performance', {
+    captureFps: 49,
+    framesPerSecond: 48,
+    averageEncodeTimeMs: 3.5,
+    availableOutgoingBitrate: 6_000_000,
+    packetLossRatio: 0.03,
+    peerCount: 1,
+  });
+
+  assert.equal(state.networkPressure, true);
+  assert.equal(state.recoveryProbeActive, false);
+  assert.equal(state.recoveryProbeMaxBitrate, null);
+  assert.equal(state.recoveryProbeAbortReason, 'transport-or-network-pressure');
+  assert.equal(state.level, 2);
+});
+
+test('startup pacer-only pressure does not bypass the sender bitrate guard', async () => {
+  const sender = fakeSender();
+  await configureVideoSender(sender, 'performance', 1);
+  await adaptVideoSender(sender, 'performance', 1, {
+    availableOutgoingBitrate: 8_300_000,
+    averagePacketSendDelayMs: 275,
+    adaptationScale: 1,
+    targetFrameRate: 60,
+    startupBitrateGuardActive: true,
+  });
+
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 8_000_000);
+  assert.equal(sender.parameters.encodings[0].scaleResolutionDownBy, 1);
+});
+
+test('hard transport pressure can still bypass the startup bitrate guard', async () => {
+  const pressureCases = [
+    { packetLossRatio: 0.03 },
+    { retransmissionRatio: 0.10 },
+    { packetsDiscardedOnSend: 1 },
+  ];
+  for (const pressure of pressureCases) {
+    const sender = fakeSender();
+    await configureVideoSender(sender, 'performance', 1);
+    await adaptVideoSender(sender, 'performance', 1, {
+      availableOutgoingBitrate: 8_300_000,
+      adaptationScale: 1,
+      targetFrameRate: 60,
+      startupBitrateGuardActive: true,
+      ...pressure,
+    });
+    assert.ok(sender.parameters.encodings[0].maxBitrate < 8_000_000, JSON.stringify(pressure));
+  }
+});
+
+test('low capacity is not classified as healthy during startup pacer analysis', () => {
+  const state = evaluateCaptureAdaptation(initialCaptureAdaptation('performance'), 'performance', {
+    captureFps: 60,
+    framesPerSecond: 60,
+    averageEncodeTimeMs: 3,
+    availableOutgoingBitrate: 750_000,
+    averagePacketSendDelayMs: 0,
+    peerCount: 1,
+  });
+
+  assert.equal(state.capacityPressure, true);
+  assert.equal(state.currentOperatingPointHealthy, false);
+  assert.equal(state.startupPacerOnly, false);
 });

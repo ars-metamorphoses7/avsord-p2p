@@ -91,7 +91,6 @@ const ENCODER_DOWNSCALE_MIN_COST_REDUCTION = 0.15;
 const INEFFECTIVE_DOWNSCALE_COOLDOWN_SAMPLES = 6;
 const RECOVERY_PROBE_HEADROOM_RATIO = 1.22;
 const BITRATE_QUANTUM = 50_000;
-const CURRENT_HEALTH_FPS_MARGIN = 0.03;
 
 const LEGACY_PROFILE_ALIASES = {
   competitive: 'performance',
@@ -395,13 +394,24 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   const retransmissionRatio = Math.max(0, Number(diagnostics.retransmissionRatio) || 0);
   const averagePacketSendDelayMs = Math.max(0, Number(diagnostics.averagePacketSendDelayMs) || 0);
   const packetsDiscardedOnSend = Math.max(0, Number(diagnostics.packetsDiscardedOnSend) || 0);
-  const transportPressure = packetLossRatio >= profile.packetLossPressureRatio
+  const startupBitrateGuardActive = diagnostics.startupBitrateGuardActive === true;
+  const hardTransportPressure = packetLossRatio >= profile.packetLossPressureRatio
     || retransmissionRatio >= profile.retransmissionPressureRatio
-    || averagePacketSendDelayMs >= profile.packetSendDelayPressureMs
     || packetsDiscardedOnSend > 0;
+  const pacerPressure = averagePacketSendDelayMs >= profile.packetSendDelayPressureMs;
+  const rawTransportPressure = hardTransportPressure || pacerPressure;
+  // A high, measured estimate is evidence that the current operating point
+  // fits. During startup, a pacer spike by itself is too soft to bypass the
+  // bitrate guard or be treated as hard congestion; low capacity and hard
+  // transport signals retain their existing immediate protection.
+  const startupPacerOnly = startupBitrateGuardActive
+    && pacerPressure
+    && !hardTransportPressure
+    && available >= resolutionBudget;
+  const transportPressure = rawTransportPressure && !startupPacerOnly;
   const severeTransportPressure = packetLossRatio >= profile.packetLossPressureRatio * 2.5
     || retransmissionRatio >= profile.retransmissionPressureRatio * 1.75
-    || averagePacketSendDelayMs >= profile.packetSendDelayPressureMs * 2
+    || (averagePacketSendDelayMs >= profile.packetSendDelayPressureMs * 2 && !startupPacerOnly)
     || packetsDiscardedOnSend > 0;
   // Leave transport headroom for Opus, retransmissions and signaling. A
   // flashing/full-motion screen otherwise fills the queue and loses frames.
@@ -424,7 +434,6 @@ export async function adaptVideoSender(sender, profileId, peerCount, diagnostics
   const structuralChange = Math.abs(currentScale - adaptationScale) >= 0.01
     || Number(encoding.maxFramerate) !== targetFrameRate
     || parameters.degradationPreference !== profile.degradationPreference;
-  const startupBitrateGuardActive = diagnostics.startupBitrateGuardActive === true;
   const capacityOnlyBitrateReduction = targetBitrate < previousBitrate
     && !transportPressure
     && !structuralChange;
@@ -555,6 +564,8 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const encodeEma = measuredEncode > 0 ? (current.encodeEma > 0 ? (current.encodeEma * 0.58) + (measuredEncode * 0.42) : measuredEncode) : current.encodeEma;
   const instantEncodeRatio = measuredEncode / encodeBudgetMs;
   const encodeRatio = encodeEma / encodeBudgetMs;
+  const sampleCount = (Number(current.sampleCount) || 0) + 1;
+  const observingStartup = sampleCount <= profile.startupSamples;
   const limitation = diagnostics.qualityLimitationReason || 'none';
   const availableOutgoingBitrate = Number(diagnostics.availableOutgoingBitrate) || 0;
   const packetLossRatio = Math.max(0, Number(diagnostics.packetLossRatio) || 0);
@@ -577,14 +588,23 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const retransmissionPressure = retransmissionRatio >= profile.retransmissionPressureRatio;
   const pacerPressure = averagePacketSendDelayMs >= profile.packetSendDelayPressureMs;
   const discardedPacketPressure = packetsDiscardedOnSend > 0;
-  const transportPressure = packetLossPressure || retransmissionPressure || pacerPressure || discardedPacketPressure;
+  const hardTransportPressure = packetLossPressure || retransmissionPressure || discardedPacketPressure;
+  const rawTransportPressure = hardTransportPressure || pacerPressure;
+  const startupPacerOnly = observingStartup
+    && pacerPressure
+    && !hardTransportPressure
+    && !capacityPressure
+    && networkHeadroomRatio !== null
+    && networkHeadroomRatio >= 1;
+  const transportPressure = rawTransportPressure;
   const networkPressure = capacityPressure || transportPressure;
   let networkSamples = networkPressure ? (Number(current.networkSamples) || 0) + 1 : 0;
   const pressureSamplesRequired = discardedPacketPressure
     ? 1
     : transportPressure ? profile.packetPressureSamples : profile.networkPressureSamples;
   const actionableNetworkPressure = networkPressure
-    && networkSamples >= pressureSamplesRequired;
+    && networkSamples >= pressureSamplesRequired
+    && !startupPacerOnly;
   const recoveryScale = temporalLevel > 0
     ? profile.adaptationScales[current.level]
     : profile.adaptationScales[Math.max(0, current.level - 1)];
@@ -637,22 +657,25 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     && limitation !== 'cpu'
     && !networkPressure;
   // Health of the current operating point is distinct from proof that the
-  // next, richer point will fit. A source delivering 57/60 FPS with virtually
-  // no encoder loss is healthy even though it is below the nominal 60 FPS;
-  // use the rolling FPS trend so normal capture jitter does not erase health
-  // every 1.5-second sample. The nominal stableFpsRatio remains the recovery
-  // gate; this tolerance only classifies the current point as healthy.
-  const currentHealthFpsRatio = Math.max(
-    profile.pressureFpsRatio,
-    profile.stableFpsRatio - CURRENT_HEALTH_FPS_MARGIN,
-  );
+  // next, richer point will fit. Compare the encoder with the cadence the
+  // source actually produces, while still rejecting a severely slow source.
+  // The nominal stableFpsRatio remains the recovery gate for the next point;
+  // it must not turn a healthy 57/55.5 source/encoder pair into a dead zone.
+  const sourceCadenceHealthy = hasPipelineFps
+    && captureRatio >= profile.pressureFpsRatio;
   const currentOperatingPointHealthy = hasPipelineFps
     && !sourceLimited
-    && fpsRatio >= currentHealthFpsRatio
+    && sourceCadenceHealthy
     && encoderDeliveryRatio >= 0.92
     && encodeRatio < 0.66
     && limitation !== 'cpu'
     && !networkPressure;
+  const probeCurrentPointHealthy = currentOperatingPointHealthy
+    || (sourceLimited
+      && encoderDeliveryRatio >= 0.92
+      && encodeRatio < 0.66
+      && limitation !== 'cpu'
+      && !networkPressure);
   const fpsPipelinePressure = hasPipelineFps
     && !sourceLimited
     && encodedRatio < profile.pressureFpsRatio
@@ -677,8 +700,6 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const stable = currentOperatingPointHealthy
     && networkRecoveryReady
     && encoderRecoveryReady;
-  const sampleCount = (Number(current.sampleCount) || 0) + 1;
-  const observingStartup = sampleCount <= profile.startupSamples;
   const startupBitrateGuardActive = observingStartup;
   const encoderImplementation = String(diagnostics.encoderImplementation || '');
   const softwareEncoder = diagnostics.powerEfficientEncoder === false
@@ -706,14 +727,14 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   if (recoveryProbeActive && (
     level === 0
     || temporalLevel > 0
-    || !currentOperatingPointHealthy
+    || !probeCurrentPointHealthy
     || networkPressure
     || !encoderRecoveryReady
   )) {
     recoveryProbeActive = false;
     recoveryProbeMaxBitrate = null;
-    recoveryProbeAbortReason = !currentOperatingPointHealthy ? 'current-operating-point-unhealthy'
-      : networkPressure ? 'transport-or-network-pressure'
+    recoveryProbeAbortReason = networkPressure ? 'transport-or-network-pressure'
+      : !probeCurrentPointHealthy ? 'current-operating-point-unhealthy'
         : !encoderRecoveryReady ? 'encoder-recovery-not-ready'
           : temporalLevel > 0 ? 'temporal-level-active' : 'level-zero';
     recoveryProbeReason = 'spatial-recovery-probe-aborted';
@@ -916,15 +937,41 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     // before either stage had reached steady state.
     reason = 'startup-observation';
   } else if (sourceLimited && level > 0 && sourceSamples >= 2) {
-    // Undo an earlier encoder/network downshift when it no longer helps. A
-    // source-limited cadence should retain spatial quality rather than waiting
-    // forever for an impossible 60 FPS recovery signal.
-    level -= 1;
-    poorSamples = 0;
-    stableSamples = 0;
-    sourceSamples = 0;
-    cooldownSamples = 2;
-    reason = 'source-limited-recovery';
+    // Undo an earlier encoder/network downshift when it no longer helps, but
+    // only after the next spatial point has demonstrated capacity. If GCC is
+    // still hiding that capacity behind the current cap, reuse the finite
+    // bitrate probe instead of bouncing between source and network decisions.
+    if (networkRecoveryReady) {
+      level -= 1;
+      poorSamples = 0;
+      stableSamples = 0;
+      sourceSamples = 0;
+      cooldownSamples = 2;
+      recoveryProbeActive = false;
+      recoveryProbeSamples = 0;
+      recoveryProbeMaxBitrate = null;
+      recoveryProbeReason = null;
+      recoveryProbeAbortReason = null;
+      recoveryProbeCooldownSamples = 0;
+      reason = 'source-limited-recovery';
+    } else if (!recoveryProbeActive
+        && encoderRecoveryReady
+        && recoveryProbeCooldownSamples === 0) {
+      recoveryProbeActive = true;
+      recoveryProbeSamples = 0;
+      recoveryProbeMaxBitrate = screenShareRecoveryProbeBitrate(
+        profile.id,
+        diagnostics.peerCount,
+        recoveryScale,
+      );
+      recoveryProbeReason = 'insufficient-next-point-headroom';
+      recoveryProbeAbortReason = null;
+      reason = 'spatial-recovery-probe';
+    } else if (recoveryProbeActive) {
+      reason = 'spatial-recovery-probe';
+    } else {
+      reason = 'source-limited-recovery-hold';
+    }
   } else if (actionableNetworkPressure) {
     // Once the capacity deficit survives the startup/ramp-up window, reduce
     // the encoded pixel rate instead of squeezing the same 720p/1080p stream
@@ -1084,6 +1131,8 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     networkPressure,
     capacityPressure,
     transportPressure,
+    hardTransportPressure,
+    startupPacerOnly,
     packetLossPressure,
     retransmissionPressure,
     pacerPressure,
@@ -1111,6 +1160,7 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
     encoderTrial,
     downscaleEffectiveness,
     averageEncodeTimeMs: measuredEncode,
+    sourceCadenceHealthy,
     fpsEma,
     encodeEma,
     effectiveWidth: Math.round(profile.width / scale),
