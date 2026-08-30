@@ -25,6 +25,9 @@ import {
   flushScreenShareDiagnosticsSession,
   isScreenShareDiagnosticsEnabled,
 } from '../media/screenShareDiagnostics.js';
+import {
+  meshCodecPolicyForLocalCapabilities,
+} from './meshCodecPolicy.js';
 
 const ICE_RESTART_DELAY_MS = 4_000;
 const ICE_RESTART_RETRY_MS = 10_000;
@@ -306,21 +309,6 @@ function remoteDescriptionHasTrack(pc, transceiver) {
   if (!mid) return false;
   const sections = String(pc.remoteDescription?.sdp || '').split(/\r?\nm=/);
   return sections.some((section) => section.includes(`a=mid:${mid}`) && /(?:^|\r?\n)a=msid:/m.test(section));
-}
-
-function codecCapabilitiesForRemotePolicy(policyKey, localCapabilities = {}) {
-  const key = String(policyKey || '').toLowerCase();
-  if (!key.startsWith('software-only:') && !key.startsWith('runtime-software:')) {
-    return localCapabilities;
-  }
-  const requested = key.split(':').at(-1);
-  return {
-    ...localCapabilities,
-    hardwareVideoEncoding: false,
-    videoEncode: 'disabled_software',
-    preferredSoftwareCodec: ['h264', 'vp8', 'vp9'].includes(requested)
-      ? requested.toUpperCase() : 'VP8',
-  };
 }
 
 /**
@@ -717,13 +705,15 @@ export function usePeerMesh({
         slot.needsIceRestart = false;
         const offer = await slot.pc.createOffer(restart ? { iceRestart: true } : undefined);
         await slot.pc.setLocalDescription(offer);
+        // Codec compatibility is already represented by the SDP offer.
+        // Never send this peer's encoder capability as a remote policy:
+        // the answerer must choose its own outbound codec locally.
         sendSignal({
           type: 'signal',
           target: peerId,
           data: {
             type: 'offer',
             sdp: slot.pc.localDescription,
-            codecPolicy: slot.videoCodecPolicyKey || 'hardware-or-unknown',
           },
         });
         return true;
@@ -816,10 +806,10 @@ export function usePeerMesh({
     const slots = [...peerConnectionsRef.current.values()].filter((slot) => slot?.videoSender);
     await Promise.all(slots.map((slot) => enqueueSenderMutation(slot, 'videoSender', async (sender) => {
       if (!sender || slot.pc.connectionState === 'closed') return false;
-      const nextCodecPolicyKey = effectiveCapabilities.hardwareVideoEncoding === false
-        || String(effectiveCapabilities.videoEncode || '').toLowerCase() === 'disabled_software'
-        ? `software-only:${normalizedProfileId}:${String(effectiveCapabilities.preferredSoftwareCodec || 'auto').toLowerCase()}`
-        : 'hardware-or-unknown';
+      const nextCodecPolicyKey = meshCodecPolicyForLocalCapabilities(
+        effectiveCapabilities,
+        normalizedProfileId,
+      );
       if (slot.videoCodecPolicyKey !== nextCodecPolicyKey) {
         preferVideoCodecs(slot.videoTransceiver, normalizedProfileId, effectiveCapabilities);
         slot.videoCodecPolicyKey = nextCodecPolicyKey;
@@ -1116,10 +1106,10 @@ export function usePeerMesh({
         if (slot.videoTransceiver) preferVideoCodecs(
           slot.videoTransceiver,
           videoProfileRef.current,
-          codecCapabilitiesForRemotePolicy(
-            data.codecPolicy,
-            mediaCapabilitiesRef.current || {},
-          ),
+          // The offerer's codecPolicy describes its encoder only. It must not
+          // override this peer's outbound encoder preference; the SDP answer
+          // still intersects the codecs the offer actually contains.
+          mediaCapabilitiesRef.current || {},
         );
         slot.audioSender ||= slot.audioTransceiver?.sender || null;
         slot.videoSender ||= slot.videoTransceiver?.sender || null;

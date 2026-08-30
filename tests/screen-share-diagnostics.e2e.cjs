@@ -118,7 +118,7 @@ async function run() {
   const config = await sender.webContents.executeJavaScript('globalThis.jumpDesktop.getStreamDiagnosticsConfig()');
   const expectedOutputDirectory = path.join(userData, 'diagnostics', 'screen-share');
   if (!config.enabled || config.outputDirectory !== expectedOutputDirectory
-      || config.activationSource !== 'environment' || config.appVersion !== '1.0.26'
+      || config.activationSource !== 'environment' || config.appVersion !== '1.0.27'
       || config.appCommit !== 'diagnostics-integration-test'
       || !config.environment?.electronVersion || !config.environment?.display) {
     throw new Error(`A bridge de diagnóstico não retornou o manifesto de ambiente esperado: ${JSON.stringify(config)}`);
@@ -133,7 +133,7 @@ async function run() {
     const dialog = document.querySelector('.app-settings-dialog');
     return dialog?.textContent.includes('Field Run Diagnostics')
       && dialog.textContent.includes('Ativado — forçado pelo ambiente')
-      && dialog.textContent.includes('1.0.26')
+      && dialog.textContent.includes('1.0.27')
       && Boolean(dialog.querySelector('button[disabled]'));
   })()`), 'configurações de Field Run Diagnostics');
   await click(sender, 'button[aria-label="Fechar configurações"]');

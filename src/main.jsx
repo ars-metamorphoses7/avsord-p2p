@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
+import packageJson from '../package.json';
 import {
   Circle,
   CircleMinus,
@@ -55,6 +56,7 @@ import { useScreenSfu } from './webrtc/useScreenSfu.js';
 const INITIAL_QUERY = new URLSearchParams(window.location.search);
 const DEFAULT_ROOM_ID = INITIAL_QUERY.get('room') || 'jump-house';
 const SIGNAL_ORIGIN = normalizeSignalOrigin(INITIAL_QUERY.get('signal'));
+const APP_VERSION = String(packageJson.version || '').trim() || 'desconhecida';
 const TONES = ['yellow', 'mint', 'violet', 'coral', 'blue'];
 const MAX_ROOM_MESSAGES = 50_000;
 const MAX_DIRECT_MESSAGES = 50_000;
@@ -1087,7 +1089,7 @@ function App() {
     enabled: globalThis.jumpDesktop?.streamDiagnosticsEnabled === true,
     activationSource: globalThis.jumpDesktop?.streamDiagnosticsEnabled === true ? 'cli' : 'off',
     outputDirectory: null,
-    appVersion: null,
+    appVersion: APP_VERSION,
     appCommit: null,
   }));
   const [fieldDiagnosticsBusy, setFieldDiagnosticsBusy] = useState(false);
@@ -1147,14 +1149,17 @@ function App() {
   const setPeerPlaybackProfileRef = useRef(null);
 
   useEffect(() => {
-    if (globalThis.jumpDesktop?.streamDiagnosticsEnabled !== true) return undefined;
     let active = true;
-    const readConfig = globalThis.jumpDesktop.getStreamDiagnosticsConfig;
+    const readConfig = globalThis.jumpDesktop?.getStreamDiagnosticsConfig;
     if (typeof readConfig !== 'function') return () => { active = false; };
     void readConfig().then((config) => {
       if (!active || !config) return;
       screenDiagnosticsConfigRef.current = config;
-      setFieldDiagnosticsConfig(config);
+      setFieldDiagnosticsConfig((current) => ({
+        ...current,
+        ...config,
+        appVersion: config.appVersion || current.appVersion || APP_VERSION,
+      }));
     }).catch(() => {});
     return () => { active = false; };
   }, []);
@@ -2960,7 +2965,11 @@ function App() {
     const config = await readConfig();
     if (config) {
       screenDiagnosticsConfigRef.current = config;
-      setFieldDiagnosticsConfig(config);
+      setFieldDiagnosticsConfig((current) => ({
+        ...current,
+        ...config,
+        appVersion: config.appVersion || current.appVersion || APP_VERSION,
+      }));
     }
     return config || null;
   }, []);
