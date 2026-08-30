@@ -176,7 +176,7 @@ async function run() {
     const config = await readConfig(normalPort);
     assert.equal(config.enabled, false);
     assert.equal(config.activationSource, 'off');
-    assert.equal(config.appVersion, '1.0.25');
+    assert.equal(config.appVersion, '1.0.26');
     assert.match(config.appCommit || '', /^[0-9a-f]{7,64}$/i);
     assert.equal((await fs.readdir(config.outputDirectory).catch(() => [])).length, 0, 'o modo normal não cria artefatos');
     const settings = await openSettingsAndRead(normalPort);
@@ -216,7 +216,7 @@ async function run() {
     const config = await readConfig(receiverPort);
     assert.equal(config.enabled, true);
     assert.equal(config.activationSource, 'cli');
-    assert.equal(config.appVersion, '1.0.25');
+    assert.equal(config.appVersion, '1.0.26');
     assert.match(config.appCommit || '', /^[0-9a-f]{7,64}$/i);
     const settings = await openSettingsAndRead(receiverPort);
     assert.match(settings, /Ativado/);
