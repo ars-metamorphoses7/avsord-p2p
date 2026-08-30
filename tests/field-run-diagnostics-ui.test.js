@@ -5,6 +5,7 @@ import { fieldDiagnosticsStatus, shouldShowFieldDiagnosticsIndicator } from '../
 test('field diagnostics UI exposes distinct off, on, and environment-forced states', () => {
   assert.equal(fieldDiagnosticsStatus({ enabled: false, activationSource: 'off' }), 'Desativado');
   assert.equal(fieldDiagnosticsStatus({ enabled: true, activationSource: 'cli' }), 'Ativado');
+  assert.equal(fieldDiagnosticsStatus({ enabled: true, activationSource: 'preference' }), 'Ativado');
   assert.equal(fieldDiagnosticsStatus({ enabled: true, activationSource: 'environment' }), 'Ativado — forçado pelo ambiente');
 });
 

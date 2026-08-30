@@ -186,6 +186,47 @@ async function run() {
     await wait(500);
   }
 
+  const preferenceAppData = path.join(smokeRoot, 'preference-appdata');
+  await fs.mkdir(preferenceAppData, { recursive: true });
+  const preferenceFile = path.join(preferenceAppData, 'field-diagnostics.json');
+  await fs.writeFile(preferenceFile, JSON.stringify({ enabled: true }), 'utf8');
+  const preferencePort = 22_004;
+  const preferenceLaunch = startPackagedJump({
+    debugPort: preferencePort,
+    appDataDirectory: preferenceAppData,
+    signalPort: 23_004,
+  });
+  try {
+    await waitForReady(preferencePort);
+    const preferenceConfig = await readConfig(preferencePort);
+    assert.equal(preferenceConfig.enabled, true);
+    assert.equal(preferenceConfig.activationSource, 'preference');
+    const preferenceSettings = await openSettingsAndRead(preferencePort);
+    assert.match(preferenceSettings, /Ativado/);
+  } finally {
+    preferenceLaunch.kill();
+    await wait(500);
+  }
+
+  await fs.writeFile(preferenceFile, JSON.stringify({ enabled: false }), 'utf8');
+  const disabledPreferencePort = 22_005;
+  const disabledPreferenceLaunch = startPackagedJump({
+    debugPort: disabledPreferencePort,
+    appDataDirectory: preferenceAppData,
+    signalPort: 23_005,
+  });
+  try {
+    await waitForReady(disabledPreferencePort);
+    const disabledPreferenceConfig = await readConfig(disabledPreferencePort);
+    assert.equal(disabledPreferenceConfig.enabled, false);
+    assert.equal(disabledPreferenceConfig.activationSource, 'off');
+    const disabledPreferenceSettings = await openSettingsAndRead(disabledPreferencePort);
+    assert.match(disabledPreferenceSettings, /Desativado/);
+  } finally {
+    disabledPreferenceLaunch.kill();
+    await wait(500);
+  }
+
   const roomId = `packaged-field-smoke-${Date.now()}`;
   const senderPort = 22_002;
   const receiverPort = 22_003;

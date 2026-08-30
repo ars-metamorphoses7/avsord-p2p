@@ -10,7 +10,9 @@ const { setupDesktopMedia } = require('./desktop-media.cjs');
 const { applyWindowsScreenCapturePolicy } = require('./media-runtime-config.cjs');
 const {
   normalizeDiagnosticsEnvironment,
+  fieldDiagnosticsPreferencePath,
   openFieldDiagnosticsDirectory,
+  readFieldDiagnosticsPreference,
   readBuildMetadata,
   requestFieldDiagnosticsRelaunch,
   resolveDiagnosticsBuildInfo,
@@ -23,17 +25,18 @@ let desktopMedia;
 let roomSessionStore;
 let signalingPort = Number(process.env.PORT || 8787);
 let pendingDeepLink = process.argv.find((argument) => argument.startsWith('jump://')) || '';
-const streamDiagnosticsActivation = resolveStreamDiagnosticsActivation();
-normalizeDiagnosticsEnvironment(streamDiagnosticsActivation);
-const streamDiagnosticsEnabled = streamDiagnosticsActivation.enabled;
 let diagnosticsWriteSequence = 0;
 let buildMetadataPromise;
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 // Kept for deterministic packaged smoke tests. It changes only Electron's
 // private user-data root and never enables diagnostics by itself.
 const requestedUserDataDirectory = String(process.env.JUMP_USER_DATA_DIR || '').trim();
 if (requestedUserDataDirectory) app.setPath('userData', requestedUserDataDirectory);
+
+let streamDiagnosticsActivation;
+let streamDiagnosticsEnabled = false;
+let streamDiagnosticsPreferenceFile;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 // A fullscreen game makes the call window invisible. Chromium normally lowers
 // an invisible renderer's priority, which can starve desktop capture even when
@@ -231,6 +234,16 @@ function streamDiagnosticsOutputDirectory() {
   return path.join(app.getPath('userData'), 'diagnostics', 'screen-share');
 }
 
+async function initializeStreamDiagnosticsActivation() {
+  streamDiagnosticsPreferenceFile = fieldDiagnosticsPreferencePath(app.getPath('userData'));
+  const persistedPreference = await readFieldDiagnosticsPreference(streamDiagnosticsPreferenceFile);
+  streamDiagnosticsActivation = resolveStreamDiagnosticsActivation({
+    persistedPreference,
+  });
+  normalizeDiagnosticsEnvironment(streamDiagnosticsActivation);
+  streamDiagnosticsEnabled = streamDiagnosticsActivation.enabled;
+}
+
 async function writeStreamDiagnosticsArtifact(artifact) {
   if (!streamDiagnosticsEnabled) return { enabled: false, written: false };
   if (!artifact || artifact.schemaVersion !== 1 || !artifact.runId
@@ -303,6 +316,9 @@ function setupMediaDiagnostics() {
     app,
     action,
     activation: streamDiagnosticsActivation,
+    environment: process.env,
+    platform: process.platform,
+    preferencePath: streamDiagnosticsPreferenceFile,
   }));
   ipcMain.handle('stream-diagnostics:open-directory', () => openFieldDiagnosticsDirectory({
     outputDirectory,
@@ -387,6 +403,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    await initializeStreamDiagnosticsActivation();
     setupRoomSessionPersistence();
     setupUpdater();
     setupWindowControls();
