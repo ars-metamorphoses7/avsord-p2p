@@ -385,6 +385,72 @@ test('counter resets do not produce negative telemetry and snapshots remain seri
   assert.equal(current.reports.outbound.codecId, 'codec-out');
 });
 
+test('diagnostics run boundaries establish fresh video and screen-audio baselines', () => {
+  const runOneVideoStart = createScreenShareTelemetrySnapshot(fixture({
+    timestamp: 1_000,
+    freezeCount: 0,
+    totalFreezesDuration: 0,
+  }), null, { runId: 'run-one', previousRunId: null });
+  const runOneVideoEnd = createScreenShareTelemetrySnapshot(fixture({
+    timestamp: 2_500,
+    freezeCount: 12,
+    totalFreezesDuration: 0.4,
+  }), runOneVideoStart, { runId: 'run-one', previousRunId: 'run-one' });
+  assert.equal(runOneVideoEnd.derived.freezeCount, 12);
+  assert.equal(runOneVideoEnd.derived.freezeDurationMs, 400);
+
+  const runTwoVideoStart = createScreenShareTelemetrySnapshot(fixture({
+    timestamp: 4_000,
+    freezeCount: 12,
+    totalFreezesDuration: 0.4,
+  }), runOneVideoEnd, { runId: 'run-two', previousRunId: 'run-one' });
+  assert.equal(runTwoVideoStart.sequence, 0);
+  assert.equal(runTwoVideoStart.derived.freezeCount, null);
+  assert.equal(runTwoVideoStart.derived.freezeDurationMs, null);
+
+  const runTwoVideoEnd = createScreenShareTelemetrySnapshot(fixture({
+    timestamp: 5_500,
+    freezeCount: 19,
+    totalFreezesDuration: 0.7,
+  }), runTwoVideoStart, { runId: 'run-two', previousRunId: 'run-two' });
+  assert.equal(runTwoVideoEnd.derived.freezeCount, 7);
+  assert.ok(Math.abs(runTwoVideoEnd.derived.freezeDurationMs - 300) < 1e-9);
+
+  const audioOptions = {
+    direction: 'inbound',
+    trackIdentifier: 'screen-audio-received-track',
+  };
+  const runOneAudioStart = createScreenShareAudioTelemetrySnapshot(audioFixture({
+    timestamp: 1_000,
+    screenConcealedSamples: 0,
+    screenConcealmentEvents: 0,
+  }), null, { ...audioOptions, runId: 'run-one', previousRunId: null });
+  const runOneAudioEnd = createScreenShareAudioTelemetrySnapshot(audioFixture({
+    timestamp: 2_500,
+    screenConcealedSamples: 12,
+    screenConcealmentEvents: 2,
+  }), runOneAudioStart, { ...audioOptions, runId: 'run-one', previousRunId: 'run-one' });
+  assert.equal(runOneAudioEnd.derived.concealedSamplesDelta, 12);
+  assert.equal(runOneAudioEnd.derived.concealmentEventsDelta, 2);
+
+  const runTwoAudioStart = createScreenShareAudioTelemetrySnapshot(audioFixture({
+    timestamp: 4_000,
+    screenConcealedSamples: 12,
+    screenConcealmentEvents: 2,
+  }), runOneAudioEnd, { ...audioOptions, runId: 'run-two', previousRunId: 'run-one' });
+  assert.equal(runTwoAudioStart.sequence, 0);
+  assert.equal(runTwoAudioStart.derived.concealedSamplesDelta, null);
+  assert.equal(runTwoAudioStart.derived.concealmentEventsDelta, null);
+
+  const runTwoAudioEnd = createScreenShareAudioTelemetrySnapshot(audioFixture({
+    timestamp: 5_500,
+    screenConcealedSamples: 19,
+    screenConcealmentEvents: 3,
+  }), runTwoAudioStart, { ...audioOptions, runId: 'run-two', previousRunId: 'run-two' });
+  assert.equal(runTwoAudioEnd.derived.concealedSamplesDelta, 7);
+  assert.equal(runTwoAudioEnd.derived.concealmentEventsDelta, 1);
+});
+
 test('audio resolver keeps microphone and screen audio outbound/inbound paths separate', () => {
   const stats = audioFixture();
   assert.equal(resolveScreenShareAudioReports(stats, {

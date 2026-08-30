@@ -85,31 +85,34 @@ function safeAudioTrackSettings(track) {
   }
 }
 
-function createAudioTelemetryPath(reports, previous, track, direction, timestampMs) {
+function createAudioTelemetryPath(reports, previous, track, direction, timestampMs, runId, previousRunId) {
   if (!track) return null;
   return createScreenShareAudioTelemetrySnapshot(reports, previous, {
     direction,
     trackIdentifier: track.id || null,
     trackSettings: safeAudioTrackSettings(track),
     timestampMs,
+    runId,
+    previousRunId,
   });
 }
 
-function createAudioTelemetrySet(reports, slot, previous, direction, timestampMs) {
+function createAudioTelemetrySet(reports, slot, previous, direction, timestampMs, runId) {
   const outbound = direction === 'outbound';
+  const previousRunId = outbound ? slot.audioSenderTelemetryRunId : slot.audioReceiverTelemetryRunId;
   return {
     microphoneOutbound: outbound
-      ? createAudioTelemetryPath(reports, previous?.microphoneOutbound, slot.audioSender?.track, 'outbound', timestampMs)
+      ? createAudioTelemetryPath(reports, previous?.microphoneOutbound, slot.audioSender?.track, 'outbound', timestampMs, runId, previousRunId)
       : null,
     microphoneInbound: outbound
       ? null
-      : createAudioTelemetryPath(reports, previous?.microphoneInbound, slot.audioTransceiver?.receiver?.track, 'inbound', timestampMs),
+      : createAudioTelemetryPath(reports, previous?.microphoneInbound, slot.audioTransceiver?.receiver?.track, 'inbound', timestampMs, runId, previousRunId),
     screenAudioOutbound: outbound
-      ? createAudioTelemetryPath(reports, previous?.screenAudioOutbound, slot.screenAudioSender?.track, 'outbound', timestampMs)
+      ? createAudioTelemetryPath(reports, previous?.screenAudioOutbound, slot.screenAudioSender?.track, 'outbound', timestampMs, runId, previousRunId)
       : null,
     screenAudioInbound: outbound
       ? null
-      : createAudioTelemetryPath(reports, previous?.screenAudioInbound, slot.screenAudioTransceiver?.receiver?.track, 'inbound', timestampMs),
+      : createAudioTelemetryPath(reports, previous?.screenAudioInbound, slot.screenAudioTransceiver?.receiver?.track, 'inbound', timestampMs, runId, previousRunId),
   };
 }
 
@@ -381,6 +384,7 @@ export function usePeerMesh({
         const activePeerCount = slots.length;
         const trackSettings = screenTrack.getSettings?.() || {};
         const diagnosticsEnabled = isScreenShareDiagnosticsEnabled();
+        const senderRunId = screenShareRunRef.current?.runId || null;
         const samples = (await Promise.all(slots.map(async (slot) => {
           try {
             const reports = await slot.pc.getStats(diagnosticsEnabled ? undefined : screenTrack);
@@ -388,6 +392,8 @@ export function usePeerMesh({
             const telemetry = createScreenShareTelemetrySnapshot(reports, slot.videoTelemetry || null, {
               trackIdentifier: screenTrack.id,
               timestampMs,
+              runId: senderRunId,
+              previousRunId: slot.videoTelemetryRunId,
             });
             const audioTelemetry = diagnosticsEnabled
               ? createAudioTelemetrySet(
@@ -396,6 +402,7 @@ export function usePeerMesh({
                 slot.audioSenderTelemetry || null,
                 'outbound',
                 timestampMs,
+                senderRunId,
               )
               : null;
             const diagnostics = {
@@ -448,7 +455,10 @@ export function usePeerMesh({
             if (!sender || liveTrack !== screenTrack || sender.track !== screenTrack
                 || slot.screenWatching === false || slot.pc.connectionState === 'closed') return false;
 
-            if (audioTelemetry) slot.audioSenderTelemetry = audioTelemetry;
+            if (audioTelemetry) {
+              slot.audioSenderTelemetry = audioTelemetry;
+              slot.audioSenderTelemetryRunId = senderRunId;
+            }
 
             if (softwareH264 && !String(slot.videoCodecPolicyKey).startsWith('runtime-software:')) {
               preferVideoCodecs(slot.videoTransceiver, videoProfileRef.current, {
@@ -458,6 +468,7 @@ export function usePeerMesh({
               });
               slot.videoCodecPolicyKey = `runtime-software:${videoProfileRef.current}:vp8`;
               slot.videoTelemetry = null;
+              slot.videoTelemetryRunId = senderRunId;
               slot.videoDiagnostics = null;
               slot.videoAdaptation = {
                 ...initialCaptureAdaptation(videoProfileRef.current),
@@ -468,6 +479,7 @@ export function usePeerMesh({
             }
 
             slot.videoTelemetry = telemetry;
+            slot.videoTelemetryRunId = senderRunId;
             slot.videoDiagnostics = diagnostics;
             if (telemetryEnabled) {
               slot.videoTelemetryHistory ||= [];
@@ -574,12 +586,18 @@ export function usePeerMesh({
       await Promise.all([...peerConnectionsRef.current.values()].map(async (slot) => {
         if (!slot?.pc || slot.pc.connectionState === 'closed') return;
         try {
+          const receiverRunId = slot.remoteMediaState?.sharing
+            ? slot.remoteMediaState.screenShareRunId || null
+            : null;
           const reports = await slot.pc.getStats();
           const telemetry = createScreenShareTelemetrySnapshot(reports, slot.inboundVideoTelemetry || null, {
             timestampMs: performance.timeOrigin + performance.now(),
+            runId: receiverRunId,
+            previousRunId: slot.inboundVideoTelemetryRunId,
           });
           if (!telemetry.ids.inbound) return;
           slot.inboundVideoTelemetry = telemetry;
+          slot.inboundVideoTelemetryRunId = receiverRunId;
           const audioTelemetry = isScreenShareDiagnosticsEnabled()
             ? createAudioTelemetrySet(
               reports,
@@ -587,9 +605,13 @@ export function usePeerMesh({
               slot.audioReceiverTelemetry || null,
               'inbound',
               telemetry.timestampMs,
+              receiverRunId,
             )
             : null;
-          if (audioTelemetry) slot.audioReceiverTelemetry = audioTelemetry;
+          if (audioTelemetry) {
+            slot.audioReceiverTelemetry = audioTelemetry;
+            slot.audioReceiverTelemetryRunId = receiverRunId;
+          }
           const playbackProfile = slot.remotePlaybackProfile || 'performance';
           slot.playbackAdaptation = evaluatePlaybackBufferAdaptation(
             slot.playbackAdaptation,

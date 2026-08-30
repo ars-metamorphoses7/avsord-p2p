@@ -299,6 +299,32 @@ test('sender and receiver sample builders expose the field-run metrics', () => {
   assert.equal(receiver.audio.screenAudioInbound, null);
 });
 
+test('receiver diagnostics expose run-local freeze deltas and retain raw counters', () => {
+  const firstTelemetry = telemetry();
+  firstTelemetry.inbound.freezeCount = 12;
+  firstTelemetry.derived.freezeCount = null;
+  const first = createScreenShareReceiverSample({ telemetry: firstTelemetry });
+  assert.equal(first.webrtc.freezeCount, 0);
+  assert.equal(first.raw.telemetry.inbound.freezeCount, 12);
+
+  const secondTelemetry = telemetry({
+    timestampMs: 3_000,
+    inbound: { ...telemetry().inbound, freezeCount: 19 },
+    derived: { ...telemetry().derived, freezeCount: 7 },
+  });
+  const second = createScreenShareReceiverSample({ telemetry: secondTelemetry });
+  const session = createScreenShareDiagnosticsSession({
+    enabled: true,
+    runId: 'freeze-delta-run',
+    role: 'receiver',
+  });
+  session.recordSample({ elapsedMs: 0, ...first });
+  session.recordSample({ elapsedMs: 1_500, ...second });
+  const finished = session.finish('test');
+  assert.equal(second.webrtc.freezeCount, 7);
+  assert.equal(finished.summary.receiver.freezeCountTotal, 7);
+});
+
 test('audio samples remain path-specific and summaries expose field-run distributions', () => {
   const microphoneOutbound = createScreenShareAudioSample({
     telemetry: {

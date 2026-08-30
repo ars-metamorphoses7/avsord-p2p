@@ -248,6 +248,8 @@ function summarizeReceiver(artifact) {
   const jitterActual = summarizeMetric(sampleMetric(samples, ['jitter', 'actualAverageMs']));
   const jitterTarget = summarizeMetric(sampleMetric(samples, ['jitter', 'targetAverageMs']));
   const jitterMinimum = summarizeMetric(sampleMetric(samples, ['jitter', 'minimumAverageMs']));
+  const freezeCountDeltas = sampleMetric(samples, ['webrtc', 'freezeCount']);
+  const freezeDurationDeltas = sampleMetric(samples, ['webrtc', 'freezeDurationMs']);
   return {
     sampleCount: samples.length,
     receiveFps: receive,
@@ -258,7 +260,9 @@ function summarizeReceiver(artifact) {
     captureToCompositorP95,
     postReceiveP95,
     decodeTimeMs: decodeTime,
-    freezes: summarizeMetric(sampleMetric(samples, ['webrtc', 'freezeCount'])),
+    freezes: summarizeMetric(freezeCountDeltas),
+    freezeCountTotal: sumFinite(freezeCountDeltas),
+    freezeDurationMsTotal: sumFinite(freezeDurationDeltas),
     packetLossRatio: loss,
     roundTripTimeMs: rtt,
     jitter: {
@@ -493,7 +497,10 @@ export function createScreenShareReceiverSample({
       framesDecoded: telemetry.inbound?.framesDecoded ?? null,
       framesRendered: telemetry.inbound?.framesRendered ?? null,
       framesDropped: telemetry.inbound?.framesDropped ?? null,
-      freezeCount: telemetry.inbound?.freezeCount ?? null,
+      // The raw browser counter remains available under raw.telemetry. The
+      // public diagnostics field is a run-local delta so a reused
+      // RTCPeerConnection cannot make a new run inherit old freezes.
+      freezeCount: telemetry.derived?.freezeCount ?? 0,
       freezeDurationMs: telemetry.derived?.freezeDurationMs ?? null,
       nackCount: telemetry.derived?.inboundNackCount ?? null,
       pliCount: telemetry.derived?.inboundPliCount ?? null,

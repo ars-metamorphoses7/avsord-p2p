@@ -208,6 +208,11 @@ function counterDelta(current, previous) {
   return Number.isFinite(delta) && delta >= 0 ? delta : null;
 }
 
+function previousSnapshotForRun(previous, options = {}) {
+  const runId = options.runId;
+  return runId && options.previousRunId !== runId ? null : previous;
+}
+
 function elapsedSeconds(current, previous) {
   if (current?.timestampMs === null || current?.timestampMs === undefined
       || previous?.timestampMs === null || previous?.timestampMs === undefined) return null;
@@ -323,7 +328,8 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
   const resolved = resolveScreenShareReports(stats, options);
   const timestampMs = latestTimestamp(resolved, options.timestampMs);
   const counters = buildCounters(resolved, timestampMs);
-  const previousCounters = previous?.counters || {};
+  const previousForRun = previousSnapshotForRun(previous, options);
+  const previousCounters = previousForRun?.counters || {};
 
   const captureFpsDelta = perSecond(counters.captureFrames, previousCounters.captureFrames);
   const encodeFpsDelta = perSecond(counters.framesEncoded, previousCounters.framesEncoded);
@@ -497,7 +503,7 @@ export function createScreenShareTelemetrySnapshot(stats, previous = null, optio
 
   return {
     version: TELEMETRY_VERSION,
-    sequence: previous && Number.isInteger(previous.sequence) ? previous.sequence + 1 : 0,
+    sequence: previousForRun && Number.isInteger(previousForRun.sequence) ? previousForRun.sequence + 1 : 0,
     timestampMs,
     ids: {
       mediaSource: resolved.mediaSource?.id ?? null,
@@ -768,7 +774,8 @@ export function createScreenShareAudioTelemetrySnapshot(stats, previous = null, 
   const resolved = resolveScreenShareAudioReports(stats, options);
   const timestampMs = latestTimestamp(resolved, options.timestampMs);
   const counters = buildAudioCounters(resolved, timestampMs);
-  const previousCounters = previous?.counters || {};
+  const previousForRun = previousSnapshotForRun(previous, options);
+  const previousCounters = previousForRun?.counters || {};
   const target = resolved.direction === 'inbound' ? resolved.inbound : resolved.outbound;
   const jitterSeconds = reportNumber(target, 'jitter') ?? reportNumber(resolved.remoteInbound, 'jitter');
   const lostCounter = resolved.direction === 'inbound'
@@ -849,7 +856,7 @@ export function createScreenShareAudioTelemetrySnapshot(stats, previous = null, 
     ?? reportNumber(resolved.candidatePair, 'currentRoundTripTime');
   return {
     version: TELEMETRY_VERSION,
-    sequence: previous && Number.isInteger(previous.sequence) ? previous.sequence + 1 : 0,
+    sequence: previousForRun && Number.isInteger(previousForRun.sequence) ? previousForRun.sequence + 1 : 0,
     timestampMs,
     direction: resolved.direction,
     kind: 'audio',

@@ -106,6 +106,7 @@ export function useScreenSfu({
   const producerCodecPolicyRef = useRef(null);
   const producerDiagnosticsRef = useRef(null);
   const producerTelemetryRef = useRef(null);
+  const producerTelemetryRunIdRef = useRef(null);
   const producerAdaptationRef = useRef(null);
   const producerDiagnosticsSessionRef = useRef(null);
   const producerLastBitrateIncreaseAtRef = useRef(0);
@@ -301,6 +302,7 @@ export function useScreenSfu({
     producerDiagnosticsSessionRef.current = null;
     producerDiagnosticsRef.current = null;
     producerTelemetryRef.current = null;
+    producerTelemetryRunIdRef.current = null;
     producerAdaptationRef.current = null;
     if (producer && notify) {
       await request('close-producer', { producerId: producer.id }).catch(() => {});
@@ -442,12 +444,19 @@ export function useScreenSfu({
         }
 
         const now = performance.timeOrigin + performance.now();
+        const run = screenShareRunRef.current;
         const telemetry = createScreenShareTelemetrySnapshot(
           reports,
           producerTelemetryRef.current,
-          { trackIdentifier: liveTrack.id, timestampMs: now },
+          {
+            trackIdentifier: liveTrack.id,
+            timestampMs: now,
+            runId: run?.runId || null,
+            previousRunId: producerTelemetryRunIdRef.current,
+          },
         );
         producerTelemetryRef.current = telemetry;
+        producerTelemetryRunIdRef.current = run?.runId || null;
         const trackSettings = liveTrack.getSettings?.() || {};
         const adaptationDiagnostics = {
           availableOutgoingBitrate: telemetry.network.availableOutgoingBitrate ?? 0,
@@ -509,7 +518,6 @@ export function useScreenSfu({
           }
           producerAdaptationRef.current = next;
         }
-        const run = screenShareRunRef.current;
         if (isScreenShareDiagnosticsEnabled() && run?.runId) {
           if (producerDiagnosticsSessionRef.current?.runId !== run.runId) {
             if (producerDiagnosticsSessionRef.current) {
@@ -572,15 +580,20 @@ export function useScreenSfu({
           if (typeof entry.consumer?.getStats !== 'function' || entry.consumer.closed) return;
           try {
             const reports = await entry.consumer.getStats();
+            const slot = peerConnectionsRef.current.get(entry.peerId);
+            const runId = slot?.remoteMediaState?.screenShareRunId || entry.runId || null;
             const telemetry = createScreenShareTelemetrySnapshot(
               reports,
               entry.telemetry || null,
-              { timestampMs: performance.timeOrigin + performance.now() },
+              {
+                timestampMs: performance.timeOrigin + performance.now(),
+                runId,
+                previousRunId: entry.telemetryRunId,
+              },
             );
             if (!telemetry.ids.inbound) return;
             entry.telemetry = telemetry;
-            const slot = peerConnectionsRef.current.get(entry.peerId);
-            const runId = entry.runId || slot?.remoteMediaState?.screenShareRunId || '';
+            entry.telemetryRunId = runId;
             if (!runId) return;
             const run = {
               runId,
@@ -654,6 +667,7 @@ export function useScreenSfu({
     producerCodecPolicyRef.current = null;
     producerDiagnosticsRef.current = null;
     producerTelemetryRef.current = null;
+    producerTelemetryRunIdRef.current = null;
     producerAdaptationRef.current = null;
     producerLastBitrateIncreaseAtRef.current = 0;
     runtimeCodecOverridesRef.current.clear();
