@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { evaluateScreenPlayback, playbackDiagnostics, setReceiverPlaybackBuffer } from '../media/screenPlaybackPolicy.js';
 import {
   SCREEN_SHARE_ADAPT_INTERVAL_MS,
   SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS,
   adaptVideoSender,
   evaluateCaptureAdaptation,
   initialCaptureAdaptation,
-  isSoftwareH264Encoder,
+  observeSoftwareH264Fallback,
   screenShareCodecOrder,
   screenShareEncodingBitrate,
   screenShareProfile,
+  selectScreenShareSfuCodec,
 } from '../media/screenShareProfiles.js';
 import { createScreenShareTelemetrySnapshot } from '../media/screenShareTelemetry.js';
 import {
@@ -149,6 +151,7 @@ export function useScreenSfu({
     const activeTrackId = slot.remoteBundle.videoStream?.getVideoTracks?.()[0]?.id;
     if (consumer && activeTrackId && activeTrackId !== consumer.track?.id) return;
     slot.remoteBundle.videoStream = slot.p2pVideoStream || null;
+    slot.remoteBundle.screenShareDiagnosticsSession = null;
     slot.screenSfuConsumerId = '';
     if (mountedRef.current) {
       setRemoteStreams((current) => ({
@@ -185,6 +188,7 @@ export function useScreenSfu({
     };
     slot.remoteBundle.stream = incoming;
     slot.remoteBundle.videoStream = stream;
+    slot.remoteBundle.screenShareDiagnosticsSession = null;
     slot.screenSfuConsumerId = consumer.id;
     if (mountedRef.current) {
       setRemoteStreams((current) => ({
@@ -267,6 +271,9 @@ export function useScreenSfu({
         peerId: options.peerId || peerId,
         runId: options.screenShareRunId || options.appData?.screenShareRunId || null,
       };
+      entry.playbackAdaptation = evaluateScreenPlayback(null,
+        peerConnectionsRef.current.get(entry.peerId)?.remotePlaybackProfile || 'performance');
+      setReceiverPlaybackBuffer(consumer.rtpReceiver, entry.playbackAdaptation.targetMs);
       consumersRef.current.set(producerId, entry);
       consumer.on('transportclose', () => closeConsumer(producerId));
       consumer.on('trackended', () => closeConsumer(producerId));
@@ -354,9 +361,7 @@ export function useScreenSfu({
     const initialFrameRate = profile.adaptationFrameRates[initialAdaptation.temporalLevel]
       || profile.frameRate;
     const initialBitrate = screenShareEncodingBitrate(profile.id, 1, initialScale);
-    const codec = deviceRef.current.sendRtpCapabilities.codecs.find((entry) => (
-      entry.mimeType?.toLowerCase() === preferredMime
-    ));
+    const codec = selectScreenShareSfuCodec(deviceRef.current.sendRtpCapabilities.codecs, preferredMime);
     const producer = await transport.produce({
       track,
       stopTracks: false,
@@ -433,7 +438,9 @@ export function useScreenSfu({
         producerDiagnosticsRef.current = diagnostics;
         const liveTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
         if (!liveTrack || liveTrack !== producer.track) return;
-        if (isSoftwareH264Encoder(diagnostics)
+        producer.softwareFallbackObservation = observeSoftwareH264Fallback(producer.softwareFallbackObservation,
+          { ...diagnostics, framesEncoded: outbound.framesEncoded }, liveTrack.id);
+        if (producer.softwareFallbackObservation.confirmed
             && runtimeCodecOverridesRef.current.get(liveTrack.id) !== 'video/VP8') {
           runtimeCodecOverridesRef.current.set(liveTrack.id, 'video/VP8');
           await stopPublishing();
@@ -571,7 +578,6 @@ export function useScreenSfu({
   }, [isSharing, screenStreamRef, stopPublishing, syncPublishing]);
 
   useEffect(() => {
-    if (!isScreenShareDiagnosticsEnabled()) return undefined;
     let running = false;
     const sampleConsumers = async () => {
       if (running) return;
@@ -595,6 +601,11 @@ export function useScreenSfu({
             if (!telemetry.ids.inbound) return;
             entry.telemetry = telemetry;
             entry.telemetryRunId = runId;
+            entry.playbackAdaptation = evaluateScreenPlayback(entry.playbackAdaptation,
+              slot?.remotePlaybackProfile || 'performance',
+              playbackDiagnostics(telemetry, `${runId || ''}:${telemetry.ids.inbound}`));
+            setReceiverPlaybackBuffer(entry.consumer.rtpReceiver, entry.playbackAdaptation.targetMs);
+            if (!isScreenShareDiagnosticsEnabled()) return;
             if (!runId) return;
             const run = {
               runId,
@@ -626,7 +637,9 @@ export function useScreenSfu({
               telemetry,
               peerId: localPeerIdRef.current,
               sourcePeerId: entry.peerId,
-              receiver: { producerId },
+              adaptation: entry.playbackAdaptation,
+              receiver: { producerId, configuredTargetMs: entry.consumer.rtpReceiver?.jitterBufferTarget ?? null,
+                playbackTargetMs: entry.playbackAdaptation.targetMs },
             }));
           } catch {
             // Optional mediasoup stats must never affect the active consumer.
@@ -644,6 +657,7 @@ export function useScreenSfu({
   const setConsumerWatching = useCallback(async (peerId, watching) => {
     const entry = [...consumersRef.current.values()].find((candidate) => candidate.peerId === peerId);
     if (!entry) return false;
+    entry.playbackAdaptation = null;
     entry.consumer.pause?.();
     if (watching) entry.consumer.resume?.();
     await request(watching ? 'resume-consumer' : 'pause-consumer', {

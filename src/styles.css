@@ -4790,7 +4790,11 @@ body.is-resizing-call-chat, body.is-resizing-call-chat * { cursor: col-resize !i
 .app-settings-actions button,
 .field-diagnostics-actions button { min-height: 24px; padding: 4px 9px; color: #000; background: var(--win-face); font: 700 10px/1 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; }
 .app-settings-titlebar button { display: inline-grid; place-items: center; width: 20px; min-width: 20px; padding: 0 0 2px; font: 700 14px/1 Arial, sans-serif; }
-.app-settings-body { padding: 12px; }
+.app-settings-body { padding: 12px; max-height: calc(100dvh - 130px); overflow-y: auto; }
+.screen-playback-settings { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px groove var(--win-light); }
+.screen-playback-settings h3 { margin: 0; color: #000080; font-size: 12px; }
+.screen-playback-settings label, .screen-playback-settings p { margin: 0; font-size: 11px; line-height: 1.4; }
+.screen-playback-settings select { width: 100%; min-height: 30px; color: #000; background: #fff; font: inherit; }
 .app-update-settings { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding-bottom: 11px; border-bottom: 1px groove var(--win-light); }
 .app-update-settings h3 { margin: 0; color: #000080; font: 700 10px/1.1 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; text-transform: uppercase; }
 .app-update-settings p { margin: 4px 0 0; color: #444; font: 400 9px/1.25 "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif; }

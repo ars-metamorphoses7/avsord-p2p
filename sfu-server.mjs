@@ -41,6 +41,19 @@ function mediaCodecs() {
       parameters: {
         'packetization-mode': 1,
         'level-asymmetry-allowed': 1,
+        // Keep Baseline available alongside Constrained Baseline. The latter
+        // alone can exclude the hardware implementation negotiated by mesh.
+        'profile-level-id': '42001f',
+        'x-google-start-bitrate': 1_000,
+      },
+    },
+    {
+      kind: 'video',
+      mimeType: 'video/H264',
+      clockRate: 90_000,
+      parameters: {
+        'packetization-mode': 1,
+        'level-asymmetry-allowed': 1,
         'profile-level-id': '42e01f',
         'x-google-start-bitrate': 1_000,
       },
