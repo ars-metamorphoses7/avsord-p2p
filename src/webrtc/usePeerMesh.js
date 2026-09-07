@@ -1,17 +1,16 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { evaluateScreenPlayback, playbackDiagnostics, readScreenPlaybackPolicy, setReceiverPlaybackBuffer } from '../media/screenPlaybackPolicy.js';
 import {
   SCREEN_SHARE_ADAPT_INTERVAL_MS,
   SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS,
   adaptVideoSender,
   configureVideoSender,
-  evaluatePlaybackBufferAdaptation,
   evaluateCaptureAdaptation,
-  initialPlaybackBufferAdaptation,
   initialCaptureAdaptation,
   isSoftwareH264Encoder,
+  observeSoftwareH264Fallback,
   preferVideoCodecs,
   screenShareProfile,
-  screenSharePlaybackBuffer,
 } from '../media/screenShareProfiles.js';
 import {
   createScreenShareAudioTelemetrySnapshot,
@@ -278,29 +277,18 @@ async function setSenderActive(sender, active) {
   }
 }
 
-function setReceiverPlaybackBuffer(receiver, targetMs) {
-  if (!receiver || !('jitterBufferTarget' in receiver)) return false;
-  try {
-    const nextTarget = Math.max(0, Number(targetMs) || 0);
-    if (Math.abs((Number(receiver.jitterBufferTarget) || 0) - nextTarget) < 1) return true;
-    receiver.jitterBufferTarget = nextTarget;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function applySlotPlaybackProfile(slot, profileId) {
   if (!slot) return false;
   const nextProfile = screenShareProfile(profileId).id;
-  if (slot.remotePlaybackProfile !== nextProfile) {
-    slot.playbackAdaptation = initialPlaybackBufferAdaptation(nextProfile);
+  if (slot.playbackAdaptation?.profileId !== nextProfile
+      || slot.playbackAdaptation?.policy !== readScreenPlaybackPolicy()) {
+    slot.playbackAdaptation = evaluateScreenPlayback(null, nextProfile);
   }
   slot.remotePlaybackProfile = nextProfile;
-  const targetMs = slot.playbackAdaptation?.targetMs
-    ?? screenSharePlaybackBuffer(slot.remotePlaybackProfile);
+  const targetMs = slot.playbackAdaptation.targetMs;
   const videoApplied = setReceiverPlaybackBuffer(slot.videoTransceiver?.receiver, targetMs);
-  const audioApplied = setReceiverPlaybackBuffer(slot.screenAudioTransceiver?.receiver, targetMs);
+  const audioApplied = setReceiverPlaybackBuffer(slot.screenAudioTransceiver?.receiver,
+    slot.playbackAdaptation.policy === 'legacy' ? targetMs : null);
   return videoApplied || audioApplied;
 }
 
@@ -448,7 +436,14 @@ export function usePeerMesh({
               slot.audioSenderTelemetryRunId = senderRunId;
             }
 
-            if (softwareH264 && !String(slot.videoCodecPolicyKey).startsWith('runtime-software:')) {
+            slot.softwareFallbackObservation = observeSoftwareH264Fallback(slot.softwareFallbackObservation, {
+              codec: telemetry.codec,
+              encoderImplementation: telemetry.outbound.encoderImplementation,
+              powerEfficientEncoder: telemetry.outbound.powerEfficientEncoder,
+              framesEncoded: telemetry.outbound.framesEncoded,
+            }, slot.videoSender?.track?.id);
+            if (softwareH264 && slot.softwareFallbackObservation.confirmed
+                && !String(slot.videoCodecPolicyKey).startsWith('runtime-software:')) {
               preferVideoCodecs(slot.videoTransceiver, videoProfileRef.current, {
                 hardwareVideoEncoding: false,
                 videoEncode: 'disabled_software',
@@ -602,24 +597,20 @@ export function usePeerMesh({
             slot.audioReceiverTelemetryRunId = receiverRunId;
           }
           const playbackProfile = slot.remotePlaybackProfile || 'performance';
-          slot.playbackAdaptation = evaluatePlaybackBufferAdaptation(
+          slot.playbackAdaptation = evaluateScreenPlayback(
             slot.playbackAdaptation,
             playbackProfile,
-            {
-              jitterMs: telemetry.derived.inboundJitterMs,
-              freezeCount: telemetry.inbound.freezeCount,
-              framesDropped: telemetry.inbound.framesDropped,
-            },
+            playbackDiagnostics(telemetry, `${receiverRunId || ''}:${telemetry.ids.inbound}`),
           );
           setReceiverPlaybackBuffer(
             slot.videoTransceiver?.receiver,
-            slot.playbackAdaptation.targetMs,
+            slot.screenSfuConsumerId || !slot.remoteMediaState?.sharing ? null : slot.playbackAdaptation.targetMs,
           );
           setReceiverPlaybackBuffer(
             slot.screenAudioTransceiver?.receiver,
-            slot.playbackAdaptation.targetMs,
+            slot.playbackAdaptation.policy === 'legacy' ? slot.playbackAdaptation.targetMs : null,
           );
-          if (slot.remoteMediaState?.sharing && slot.remoteMediaState.screenShareRunId) {
+          if (!slot.screenSfuConsumerId && slot.remoteMediaState?.sharing && slot.remoteMediaState.screenShareRunId) {
             const receiverStartedAtMs = Date.now();
             const receiverMonotonicStartMs = performance.now();
             const senderAnnouncedStartedAtMs = slot.remoteMediaState.screenShareRunStartedAtMs || null;

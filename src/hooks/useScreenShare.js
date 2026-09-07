@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createDesktopAudioBridge } from '../media/desktopAudio.js';
 import {
   evenScreenCaptureConstraints,
@@ -47,6 +47,8 @@ export function useScreenShare({
   const [includeAudio, setIncludeAudio] = useState(false);
   const [syncAudio, setSyncAudio] = useState(true);
   const [mediaCapabilities, setMediaCapabilities] = useState(null);
+  const startPendingRef = useRef(false);
+  const captureGenerationRef = useRef(0);
 
   const cancelPicker = useCallback(() => {
     setPickerOpen(false);
@@ -62,6 +64,7 @@ export function useScreenShare({
   }, [replacePeerTrack, screenAudioSessionRef]);
 
   const stopScreenShare = useCallback(() => {
+    captureGenerationRef.current += 1;
     const wasSharing = Boolean(screenStreamRef.current);
     const stoppedRun = screenShareRunRef.current;
     const telemetry = streamTelemetryStore();
@@ -79,6 +82,7 @@ export function useScreenShare({
   }, [announceCallState, cameraStreamRef, cancelPicker, onShareStopped, replacePeerTrack, screenAudioSessionRef, screenShareRunRef, screenStreamRef, setIsSharing, stopAudioSession]);
 
   const startScreenShare = useCallback(async ({ videoSource: selectedVideo = null, audioSource: selectedAudio = null, includeAudio: withAudio = false, profileId: selectedProfile = profileId } = {}) => {
+    if (startPendingRef.current || screenStreamRef.current) return false;
     const desktop = globalThis.jumpDesktop;
     const desktopCapture = Boolean(selectedVideo?.id && desktop?.isDesktop);
     if (desktopCapture && !navigator.mediaDevices?.getUserMedia) {
@@ -90,6 +94,11 @@ export function useScreenShare({
       return false;
     }
 
+    startPendingRef.current = true;
+    const generation = ++captureGenerationRef.current;
+    const ensureCurrent = () => {
+      if (captureGenerationRef.current !== generation) throw new DOMException('Captura cancelada.', 'AbortError');
+    };
     cancelPicker();
     setPermissionError('');
     let videoStream = null;
@@ -101,6 +110,7 @@ export function useScreenShare({
       videoStream = desktopCapture
         ? await navigator.mediaDevices.getUserMedia({ audio: false, video: screenCaptureConstraints(profile.id, selectedVideo.id) })
         : await navigator.mediaDevices.getDisplayMedia({ video: screenCaptureConstraints(profile.id), audio: false });
+      ensureCurrent();
       const videoTrack = videoStream.getVideoTracks()[0];
       if (!videoTrack) throw new Error('Nenhuma faixa de vídeo foi criada.');
       videoTrack.contentHint = profile.contentHint;
@@ -127,6 +137,7 @@ export function useScreenShare({
           constraintError = [constraintError, `even-dimensions: ${dimensionNormalization.error}`].filter(Boolean).join('; ');
         }
       }
+      ensureCurrent();
       if (isScreenShareDiagnosticsEnabled()) {
         runContext = createScreenShareRunContext({
           profileId: profile.id,
@@ -170,6 +181,7 @@ export function useScreenShare({
       }
       setProfileId(profile.id);
       await setVideoEncodingProfile(profile.id, mediaCapabilities);
+      ensureCurrent();
 
       let outboundShareStream = videoStream;
 
@@ -183,6 +195,7 @@ export function useScreenShare({
           type: selectedAudio.type,
           systemAudio: selectedAudio.type === 'screen',
         });
+        ensureCurrent();
         const desktopAudioTrack = audioBridge.stream.getAudioTracks()[0];
         outboundShareStream = new MediaStream([videoTrack, desktopAudioTrack]);
         screenAudioSessionRef.current = {
@@ -194,11 +207,13 @@ export function useScreenShare({
           },
         };
         if (!(await replacePeerTrack('screenAudioSender', desktopAudioTrack, outboundShareStream))) throw new Error('Não foi possível enviar o áudio compartilhado aos participantes.');
+        ensureCurrent();
       }
 
       screenStreamRef.current = videoStream;
       videoAttachAttempted = true;
       if (!(await replacePeerTrack('videoSender', videoTrack, outboundShareStream))) throw new Error('Não foi possível enviar a tela aos participantes.');
+      ensureCurrent();
       videoTrack.onended = () => {
         if (screenStreamRef.current === videoStream) stopScreenShare();
       };
@@ -229,10 +244,16 @@ export function useScreenShare({
       }
       if (error?.name !== 'AbortError') setPermissionError(error?.message || 'Não foi possível iniciar o compartilhamento de tela.');
       return false;
+    } finally {
+      startPendingRef.current = false;
     }
   }, [announceCallState, cameraStreamRef, cancelPicker, mediaCapabilities, onShareStarted, profileId, replacePeerTrack, screenAudioSessionRef, screenShareRunRef, screenStreamRef, setIsSharing, setPermissionError, setProfileId, setVideoEncodingProfile, stopScreenShare]);
 
   const toggleScreenShare = useCallback(async () => {
+    if (startPendingRef.current) {
+      stopScreenShare();
+      return;
+    }
     if (screenStreamRef.current) {
       stopScreenShare();
       return;
@@ -302,6 +323,7 @@ export function useScreenShare({
   }, [videoSource]);
 
   useEffect(() => () => {
+    captureGenerationRef.current += 1;
     const session = screenAudioSessionRef.current;
     screenAudioSessionRef.current = null;
     void session?.stop();

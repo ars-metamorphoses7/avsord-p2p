@@ -477,7 +477,7 @@ export function createScreenShareReceiverSample({
       decoderImplementation: telemetry.inbound?.decoderImplementation ?? null,
       powerEfficientDecoder: telemetry.inbound?.powerEfficientDecoder ?? null,
     },
-    receiver: { peerId, sourcePeerId, ...receiver },
+    receiver: { peerId, sourcePeerId, playbackPolicy: adaptation?.policy ?? null, ...receiver },
     jitter: {
       actualAverageMs: telemetry.derived?.averageJitterBufferDelayMs ?? null,
       targetAverageMs: telemetry.derived?.averageJitterBufferTargetDelayMs ?? null,
@@ -541,7 +541,10 @@ function finalizeRenderWindow(state) {
     durationMs,
     frameCount: state.frameCount,
     presentedFrames: state.lastPresentedFrames,
-    presentedFps: durationMs > 0 ? (state.frameCount * 1000) / durationMs : null,
+    presentedFps: durationMs > 0 ? ((state.firstPresentedFrames !== null && state.lastPresentedFrames !== null
+      && state.lastPresentedFrames >= state.firstPresentedFrames
+      ? state.lastPresentedFrames - state.firstPresentedFrames : state.frameCount - 1) * 1000) / durationMs : null,
+    callbackFps: durationMs > 0 ? ((state.frameCount - 1) * 1000) / durationMs : null,
     width: state.width,
     height: state.height,
     validCounts: {
@@ -553,6 +556,7 @@ function finalizeRenderWindow(state) {
       processingDurationMs: state.processing.length,
     },
     frameIntervalMs: summarizeMetric(state.intervals),
+    displayIntervalMs: summarizeMetric(state.displayIntervals),
     captureToCompositorMs: summarizeMetric(state.captureToCompositor),
     networkMs: summarizeMetric(state.network),
     postReceiveMs: summarizeMetric(state.postReceive),
@@ -659,9 +663,11 @@ export function createScreenShareDiagnosticsSession({
           lastElapsedMs: elapsedMs,
           frameCount: 0,
           lastPresentedFrames: finiteOrNull(frame.presentedFrames),
+          firstPresentedFrames: finiteOrNull(frame.presentedFrames),
           width: finiteOrNull(frame.width),
           height: finiteOrNull(frame.height),
           intervals: [],
+          displayIntervals: [],
           captureToCompositor: [],
           network: [],
           postReceive: [],
@@ -676,6 +682,7 @@ export function createScreenShareDiagnosticsSession({
       renderWindow.width = finiteOrNull(frame.width) ?? renderWindow.width;
       renderWindow.height = finiteOrNull(frame.height) ?? renderWindow.height;
       boundedPush(renderWindow.intervals, frame.intervalMs, MAX_SCREEN_SHARE_DIAGNOSTIC_WINDOW_VALUES);
+      boundedPush(renderWindow.displayIntervals, frame.displayIntervalMs, MAX_SCREEN_SHARE_DIAGNOSTIC_WINDOW_VALUES);
       boundedPush(renderWindow.captureToCompositor, frame.captureToCompositorMs, MAX_SCREEN_SHARE_DIAGNOSTIC_WINDOW_VALUES);
       boundedPush(renderWindow.network, frame.networkMs, MAX_SCREEN_SHARE_DIAGNOSTIC_WINDOW_VALUES);
       boundedPush(renderWindow.postReceive, frame.postReceiveMs, MAX_SCREEN_SHARE_DIAGNOSTIC_WINDOW_VALUES);

@@ -118,7 +118,7 @@ async function run() {
   const config = await sender.webContents.executeJavaScript('globalThis.jumpDesktop.getStreamDiagnosticsConfig()');
   const expectedOutputDirectory = path.join(userData, 'diagnostics', 'screen-share');
   if (!config.enabled || config.outputDirectory !== expectedOutputDirectory
-      || config.activationSource !== 'environment' || config.appVersion !== '1.0.27'
+      || config.activationSource !== 'environment' || config.appVersion !== require('../package.json').version
       || config.appCommit !== 'diagnostics-integration-test'
       || !config.environment?.electronVersion || !config.environment?.display) {
     throw new Error(`A bridge de diagnóstico não retornou o manifesto de ambiente esperado: ${JSON.stringify(config)}`);
@@ -133,7 +133,7 @@ async function run() {
     const dialog = document.querySelector('.app-settings-dialog');
     return dialog?.textContent.includes('Field Run Diagnostics')
       && dialog.textContent.includes('Ativado — forçado pelo ambiente')
-      && dialog.textContent.includes('1.0.27')
+      && dialog.textContent.includes(${JSON.stringify(require('../package.json').version)})
       && Boolean(dialog.querySelector('button[disabled]'));
   })()`), 'configurações de Field Run Diagnostics');
   await click(sender, 'button[aria-label="Fechar configurações"]');
@@ -169,6 +169,27 @@ async function run() {
     "document.readyState === 'complete' && Boolean(document.querySelector('.leave-button')) && document.querySelectorAll('.call-stream-card video').length > 0",
   ), 'renderer do receiver vivo com vídeo remoto');
   await wait(3_500);
+
+  await click(receiver, 'button[aria-label="Configurações"]');
+  for (const policy of ['auto', 'legacy', 'responsive']) {
+    await receiver.webContents.executeJavaScript(`(() => {
+      const select = document.querySelector('#screen-playback-policy');
+      select.value = ${JSON.stringify(policy)};
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(() => receiver.webContents.executeJavaScript(`(() => {
+      const slots = [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].filter(slot => slot.remoteMediaState?.sharing);
+      return document.querySelector('#screen-playback-policy')?.value === ${JSON.stringify(policy)}
+        && slots.length > 0 && slots.every(slot => slot.playbackAdaptation?.policy === ${JSON.stringify(policy)}
+        && slot.videoTransceiver.receiver.jitterBufferTarget === slot.playbackAdaptation.targetMs);
+    })()`), `política ${policy} aplicada durante a transmissão`);
+  }
+  if (process.env.JUMP_UI_SCREENSHOT) {
+    await receiver.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    const screenshot = await receiver.webContents.capturePage();
+    await fsp.writeFile(path.resolve(process.env.JUMP_UI_SCREENSHOT), screenshot.toPNG());
+  }
+  await click(receiver, 'button[aria-label="Fechar configurações"]');
 
   await click(sender, 'button[aria-label="Parar compartilhamento"]');
   await waitFor(() => readArtifacts().length >= 2, 'artefatos sender/receiver gravados', 20_000);
@@ -222,6 +243,31 @@ async function run() {
     runId: runIds[0],
     sampleCounts: artifacts.map((artifact) => ({ role: artifact.role, participantId: artifact.participantId, samples: artifact.samples.length })),
   };
+  // Cancel while the capture permission/device promise is still outstanding.
+  // A late result must be stopped, never attached to the room after cancellation.
+  await sender.webContents.executeJavaScript(`(() => {
+    const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = () => new Promise(resolve => {
+      globalThis.__resolveCancelledCapture = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640; canvas.height = 360;
+        const stream = canvas.captureStream(30);
+        globalThis.__cancelledCaptureTrack = stream.getVideoTracks()[0];
+        navigator.mediaDevices.getUserMedia = original;
+        resolve(stream);
+      };
+    });
+  })()`);
+  await click(sender, 'button[aria-label="Compartilhar tela"]');
+  await waitFor(() => sender.webContents.executeJavaScript("Boolean(document.querySelector('.screen-share-source'))"), 'picker para cancelamento');
+  await click(sender, '.screen-share-source');
+  await click(sender, '.screen-share-actions .dialog-primary');
+  await waitFor(() => sender.webContents.executeJavaScript('Boolean(globalThis.__resolveCancelledCapture)'), 'captura pendente');
+  await click(sender, 'button[aria-label="Compartilhar tela"]');
+  await sender.webContents.executeJavaScript('globalThis.__resolveCancelledCapture()');
+  await waitFor(() => sender.webContents.executeJavaScript(`globalThis.__cancelledCaptureTrack?.readyState === 'ended'
+    && !document.querySelector('button[aria-label="Parar compartilhamento"]')`), 'captura cancelada descartada');
+  output.pendingCaptureCancellation = true;
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 
@@ -230,7 +276,7 @@ async function cleanup() {
     if (window && !window.isDestroyed()) window.close();
   }
   await wait(250);
-  if (app.isReady()) app.quit();
+  if (app.isReady()) app.exit(process.exitCode || 0);
   await fsp.rm(userData, { recursive: true, force: true }).catch(() => {});
 }
 
@@ -238,5 +284,6 @@ run()
   .catch((error) => {
     process.stderr.write(`${error?.stack || error}\n`);
     process.exitCode = 1;
+    app.exit(1);
   })
   .finally(() => cleanup());

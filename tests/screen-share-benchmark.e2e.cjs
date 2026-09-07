@@ -160,6 +160,8 @@ const config = {
   stdout: process.env.JUMP_BENCH_STDOUT === '1',
 };
 config.sfuEnabled = booleanEnv('JUMP_BENCH_SFU', true);
+config.playbackPolicy = process.env.JUMP_BENCH_PLAYBACK_POLICY || 'responsive';
+if (!['responsive', 'auto', 'legacy'].includes(config.playbackPolicy)) throw new Error('Política de reprodução inválida.');
 config.expectSfu = config.sfuEnabled && config.viewers >= 3;
 
 const networkEmulationState = {
@@ -588,6 +590,7 @@ async function createParticipant(role, index) {
   participant.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(true));
   windows.push(participant);
   await participant.loadURL(`http://127.0.0.1:${port}/?room=${encodeURIComponent(room)}&meshDebug=1`);
+  await participant.webContents.executeJavaScript(`localStorage.setItem('jump-screen-playback-policy', ${JSON.stringify(config.playbackPolicy)})`);
   if (receiverVisible) {
     participant.showInactive();
     if (isolatedOffscreenReceiver) {
@@ -851,8 +854,8 @@ const INSTALL_STATS_SAMPLER = String.raw`(() => {
         : slot.videoCodecPolicyKey || null,
       videoMutationCounts: slot.videoMutationCounts ? { ...slot.videoMutationCounts } : null,
       lastVideoMutation: slot.lastVideoMutation ? { ...slot.lastVideoMutation } : null,
-      jitterBufferTarget: slot.videoTransceiver?.receiver && 'jitterBufferTarget' in slot.videoTransceiver.receiver
-        ? slot.videoTransceiver.receiver.jitterBufferTarget
+      jitterBufferTarget: (sfuEndpoint?.rtpReceiver || slot.videoTransceiver?.receiver)?.jitterBufferTarget !== undefined
+        ? (sfuEndpoint?.rtpReceiver || slot.videoTransceiver?.receiver).jitterBufferTarget
         : null,
       topology: {
         sfuViewerCount: sfuState?.sfuViewersRef.current?.size || 0,
@@ -1311,6 +1314,13 @@ async function startShare(sender, receiver, profile, captureSource) {
       && [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()]
         .filter((slot) => slot.screenViaSfu === true).length === ${config.viewers}
     ))()`), 'handoff de todos os espectadores para o SFU', 30_000);
+    await waitFor(() => receiver.webContents.executeJavaScript(`(() => {
+      const entries = [...globalThis.__jumpScreenSfu.consumersRef.current.values()];
+      return entries.length > 0 && entries.every(entry =>
+        entry.playbackAdaptation?.policy === ${JSON.stringify(config.playbackPolicy)}
+        && (!('jitterBufferTarget' in entry.consumer.rtpReceiver)
+          || entry.consumer.rtpReceiver.jitterBufferTarget === entry.playbackAdaptation.targetMs));
+    })()`), 'política de reprodução aplicada no consumer SFU', 15_000);
   }
 }
 

@@ -50,6 +50,7 @@ import { useScreenShare } from './hooks/useScreenShare.js';
 import { playTransmissionSound } from './media/callSounds.js';
 import { flushScreenShareDiagnosticsSession } from './media/screenShareDiagnostics.js';
 import { normalizeScreenShareProfileId } from './media/screenShareProfiles.js';
+import { readScreenPlaybackPolicy, saveScreenPlaybackPolicy, SCREEN_PLAYBACK_OPTIONS } from './media/screenPlaybackPolicy.js';
 import { usePeerMesh } from './webrtc/usePeerMesh.js';
 import { useScreenSfu } from './webrtc/useScreenSfu.js';
 
@@ -1044,6 +1045,7 @@ function App() {
   const [profileStatus, setProfileStatus] = useState(() => normalizePresenceStatus(localStorage.getItem(PROFILE_STATUS_KEY) || 'online'));
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
+  const [screenPlaybackPolicy, setScreenPlaybackPolicy] = useState(readScreenPlaybackPolicy);
   const [roomDraft, setRoomDraft] = useState('');
   const [roomPasswordDraft, setRoomPasswordDraft] = useState('');
   const [showRoomCreator, setShowRoomCreator] = useState(false);
@@ -3583,6 +3585,17 @@ function App() {
               <section className="app-update-settings" aria-labelledby="app-update-settings-title">
                 <div><h3 id="app-update-settings-title">Atualizações</h3><p>Verifique e instale a versão oficial mais recente do JUMP.</p></div>
                 <button type="button" className="dialog-secondary" disabled={isDevelopmentDesktopBuild || updateBusy} onClick={() => { setAppSettingsOpen(false); void handleUpdate(); }}>Verificar atualização</button>
+              </section>
+              <section className="field-diagnostics-settings screen-playback-settings" aria-labelledby="screen-playback-title">
+                <h3 id="screen-playback-title">Reprodução de transmissões</h3>
+                <label htmlFor="screen-playback-policy">Equilíbrio entre resposta e estabilidade</label>
+                <select id="screen-playback-policy" value={screenPlaybackPolicy} onChange={event => {
+                  const policy = event.target.value;
+                  if (saveScreenPlaybackPolicy(policy)) setScreenPlaybackPolicy(policy);
+                }}>
+                  {SCREEN_PLAYBACK_OPTIONS.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+                </select>
+                <p>{SCREEN_PLAYBACK_OPTIONS.find(option => option.id === screenPlaybackPolicy)?.description} A mudança se aplica à transmissão recebida sem reiniciar.</p>
               </section>
               <section className="field-diagnostics-settings" aria-labelledby="field-diagnostics-title">
                 <div className="field-diagnostics-heading">

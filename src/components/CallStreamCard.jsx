@@ -20,11 +20,30 @@ export function MediaElement({ stream, muted = false, volume = 1, sinkId = '', c
     if (!mediaRef.current || !stream) return undefined;
     const media = mediaRef.current;
     media.srcObject = stream;
-    media.muted = Boolean(muted);
-    media.volume = muted ? 0 : Math.max(0, Math.min(1, Number(volume) || 0));
-    if (sinkId && typeof media.setSinkId === 'function') media.setSinkId(sinkId).catch(() => {});
     const play = () => media.play?.().catch(() => {});
     media.addEventListener('loadedmetadata', play);
+    play();
+    return () => {
+      media.removeEventListener('loadedmetadata', play);
+      media.srcObject = null;
+    };
+  }, [stream, hasVideo]);
+
+  useEffect(() => {
+    const media = mediaRef.current;
+    if (!media) return;
+    media.muted = Boolean(muted);
+    media.volume = muted ? 0 : Math.max(0, Math.min(1, Number(volume) || 0));
+  }, [stream, hasVideo, muted, volume]);
+
+  useEffect(() => {
+    const media = mediaRef.current;
+    if (media && typeof media.setSinkId === 'function') media.setSinkId(sinkId || '').catch(() => {});
+  }, [stream, hasVideo, sinkId]);
+
+  useEffect(() => {
+    const media = mediaRef.current;
+    if (!media || !stream) return undefined;
     const store = hasVideo ? telemetryStore() : null;
     const stopVideoFrameCollector = hasVideo ? startVideoFrameCollector({
       media,
@@ -32,12 +51,10 @@ export function MediaElement({ stream, muted = false, volume = 1, sinkId = '', c
       store,
       diagnosticsSession,
     }) : undefined;
-    play();
     return () => {
       stopVideoFrameCollector?.();
-      media.removeEventListener('loadedmetadata', play);
     };
-  }, [stream, hasVideo, muted, sinkId, volume, diagnosticsSession]);
+  }, [stream, hasVideo, diagnosticsSession]);
 
   if (!stream) return null;
   const props = {
@@ -74,6 +91,8 @@ export function CallStreamCard({
   voiceVolume = 1,
 }) {
   const showPausedShare = !isSelf && isSharing && !isWatching;
+  const [localPreviewEnabled, setLocalPreviewEnabled] = useState(true);
+  const showPausedPreview = isSelf && isSharing && !localPreviewEnabled;
   const [streamZoom, setStreamZoom] = useState({ scale: MIN_STREAM_ZOOM, originX: 50, originY: 50 });
 
   useEffect(() => {
@@ -108,7 +127,7 @@ export function CallStreamCard({
         onWheel={changeStreamZoom}
         title={isFocused && isSharing ? 'use a roda do mouse para aplicar zoom · clique duas vezes para restaurar' : 'clique duas vezes para maximizar/restaurar'}
       >
-        {hasVideo && !showPausedShare ? (
+        {hasVideo && !showPausedShare && !showPausedPreview ? (
           <div
             className="call-stream-media-frame"
             style={{
@@ -118,6 +137,12 @@ export function CallStreamCard({
             }}
           >
             <MediaElement stream={videoStream} muted sinkId={sinkId} className="call-stream-media" showVideo diagnosticsSession={diagnosticsSession} />
+          </div>
+        ) : showPausedPreview ? (
+          <div className="call-stream-paused">
+            {avatar}
+            <strong>Sua tela continua sendo transmitida</strong>
+            <button type="button" onClick={event => { event.stopPropagation(); setLocalPreviewEnabled(true); }}><Play size={14} /> mostrar prévia</button>
           </div>
         ) : showPausedShare ? (
           <div className="call-stream-paused">
@@ -129,6 +154,11 @@ export function CallStreamCard({
 
         {!isSelf && isSharing && isWatching && (
           <button type="button" className="call-stream-watch-toggle" onClick={(event) => { event.stopPropagation(); onWatchingChange?.(false); }} title="Parar de receber vídeo e áudio desta transmissão"><EyeOff size={13} /> parar de assistir</button>
+        )}
+        {isSelf && isSharing && localPreviewEnabled && (
+          <button type="button" className="call-stream-watch-toggle" onClick={event => {
+            event.stopPropagation(); setLocalPreviewEnabled(false);
+          }} title="Ocultar a prévia neste computador para reduzir trabalho de reprodução. A transmissão continua."><EyeOff size={13} /> ocultar prévia</button>
         )}
 
         {!isSelf && microphoneStream && (

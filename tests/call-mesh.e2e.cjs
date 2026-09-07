@@ -250,11 +250,12 @@ async function run() {
     await waitFor(() => Promise.all(windows.slice(1).map((window) => window.webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()]
       .filter((slot) => slot.remoteMediaState?.sharing)
       .every((slot) => {
-        const expected = { performance: 140, quality: 180 }[slot.remoteMediaState.sharingProfile];
+        const expected = slot.playbackAdaptation?.targetMs;
         return slot.remotePlaybackProfile === slot.remoteMediaState.sharingProfile
+          && slot.playbackAdaptation?.policy === 'responsive' && expected >= 50 && expected <= 240
           && (!('jitterBufferTarget' in slot.videoTransceiver.receiver) || slot.videoTransceiver.receiver.jitterBufferTarget === expected)
-          && (!('jitterBufferTarget' in slot.screenAudioTransceiver.receiver) || slot.screenAudioTransceiver.receiver.jitterBufferTarget === expected);
-      }))()`))).then((values) => values.every(Boolean)), 'buffer de reprodução fixo e sincronizado', 20_000);
+          && (!('jitterBufferTarget' in slot.screenAudioTransceiver.receiver) || slot.screenAudioTransceiver.receiver.jitterBufferTarget === null);
+      }))()`))).then((values) => values.every(Boolean)), 'vídeo adaptativo e áudio com buffer do sistema', 20_000);
   } catch (error) {
     const playbackDiagnostics = await Promise.all(windows.slice(1).map((window) => window.webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].map((slot) => ({
       sharing: slot.remoteMediaState?.sharing,

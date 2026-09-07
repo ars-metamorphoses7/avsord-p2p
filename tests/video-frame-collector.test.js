@@ -89,3 +89,15 @@ test('legacy telemetry and diagnostics both receive the same render frame', () =
   stop();
   assert.equal(media.cancelCount, 1);
 });
+
+test('display cadence is distinct from delayed JavaScript callbacks', () => {
+  const media = fakeMedia();
+  const frames = [];
+  const stop = startVideoFrameCollector({ media, streamId: 'cadence',
+    diagnosticsSession: { recordRenderFrame: frame => frames.push(frame) } });
+  media.flush(100, { ...frameMetadata, expectedDisplayTime: 100 });
+  media.flush(150, { ...frameMetadata, expectedDisplayTime: 116.7, presentedFrames: 2 });
+  assert.equal(frames[1].intervalMs, 50);
+  assert.ok(Math.abs(frames[1].displayIntervalMs - 16.7) < 0.01);
+  stop();
+});

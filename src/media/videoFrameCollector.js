@@ -30,6 +30,10 @@ export function startVideoFrameCollector({ media, streamId, store = null, diagno
       timestampMs: performance.timeOrigin + now,
       intervalMs: previous ? now - previous.callbackNow : null,
       callbackNow: now,
+      expectedDisplayTime,
+      callbackIntervalMs: previous ? now - previous.callbackNow : null,
+      displayIntervalMs: previous?.expectedDisplayTime != null && expectedDisplayTime !== null
+        && expectedDisplayTime >= previous.expectedDisplayTime ? expectedDisplayTime - previous.expectedDisplayTime : null,
       presentedFrames: finiteMetric(metadata.presentedFrames),
       width: finiteMetric(metadata.width),
       height: finiteMetric(metadata.height),
@@ -54,6 +58,7 @@ export function startVideoFrameCollector({ media, streamId, store = null, diagno
       width: sample.width,
       height: sample.height,
       intervalMs: sample.intervalMs,
+      displayIntervalMs: sample.displayIntervalMs,
       captureToCompositorMs: sample.captureToCompositorMs,
       networkMs: sample.networkMs,
       postReceiveMs: sample.postReceiveMs,

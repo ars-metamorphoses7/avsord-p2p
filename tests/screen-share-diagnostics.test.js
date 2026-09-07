@@ -241,6 +241,16 @@ test('render callbacks aggregate valid metrics instead of retaining every frame'
   assert.equal(finished.render.windows[1].frameCount, 1);
 });
 
+test('render FPS counts presented frames between endpoints, not callback count including both endpoints', () => {
+  const session = createScreenShareDiagnosticsSession({ enabled: true, runId: 'cadence', role: 'receiver' });
+  session.recordRenderFrame({ elapsedMs: 0, streamId: 'one', presentedFrames: 100 });
+  session.recordRenderFrame({ elapsedMs: 100, streamId: 'one', presentedFrames: 106, displayIntervalMs: 16.7 });
+  const window = session.finish().render.windows[0];
+  assert.equal(window.presentedFps, 60);
+  assert.equal(window.callbackFps, 10);
+  assert.equal(window.displayIntervalMs.p50, 16.7);
+});
+
 test('sample and render buffers remain bounded and flush exactly once', async () => {
   const writes = [];
   const previousBridge = globalThis.jumpDesktop;

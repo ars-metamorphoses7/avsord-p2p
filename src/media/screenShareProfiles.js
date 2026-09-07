@@ -2,7 +2,7 @@ export const SCREEN_SHARE_PROFILES = {
   performance: {
     id: 'performance',
     label: 'desempenho',
-    description: 'até 720p/60 · adapta GPU, CPU e rede',
+    description: 'até 720p/60 · movimento e resposta rápida',
     width: 1280,
     height: 720,
     frameRate: 60,
@@ -48,13 +48,13 @@ export const SCREEN_SHARE_PROFILES = {
   quality: {
     id: 'quality',
     label: 'qualidade',
-    description: 'até 1080p/30 · adapta GPU, CPU e rede',
+    description: 'até 1080p/30 · nitidez e detalhe',
     width: 1920,
     height: 1080,
     frameRate: 30,
     maxBitrate: 8_000_000,
     degradationPreference: 'maintain-resolution',
-    contentHint: 'motion',
+    contentHint: 'detail',
     codecOrder: ['video/H264', 'video/VP9', 'video/VP8'],
     adaptationScales: [1, 1.2, 1.5],
     adaptationFrameRates: [30, 20, 15],
@@ -205,6 +205,25 @@ export function screenShareEncodingBitrate(profileId, peerCount = 1, scale = 1) 
     profile.minimumAdaptiveBitrate,
     Math.round(profile.maxBitrate / meshFactor / (spatialScale ** 2)),
   );
+}
+
+// A ceiling is not a minimum bitrate requirement. Use observed demand only
+// when frames are actually being delivered and the encoder is not reporting
+// bandwidth limitation. The nominal budget remains the conservative fallback
+// for missing stats or a saturated stream. Never infer quality from low bitrate
+// alone: keep a spatial floor and restore the conservative demand under stress.
+export function screenShareContentDemand(profileId, peerCount, scale, diagnostics = {}, currentScale = scale) {
+  const nominal = screenShareEncodingBitrate(profileId, peerCount, scale);
+  const sent = diagnostics.sendBitrateBps;
+  const capture = diagnostics.captureFps;
+  const encoded = diagnostics.framesPerSecond;
+  if (![sent, capture, encoded].every(value => value !== null && value !== undefined
+      && Number.isFinite(Number(value)) && Number(value) >= 0)) return nominal;
+  const expected = Math.min(Number(capture), Number(diagnostics.targetFrameRate) || screenShareProfile(profileId).frameRate);
+  if (expected <= 0 || Number(encoded) < expected * 0.92
+      || diagnostics.qualityLimitationReason === 'bandwidth') return nominal;
+  const projected = Number(sent) * 1.25 * ((currentScale / scale) ** 2);
+  return Math.min(nominal, Math.max(nominal * 0.5, projected));
 }
 
 /**
@@ -628,10 +647,11 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const observingStartup = sampleCount <= profile.startupSamples;
   const limitation = diagnostics.qualityLimitationReason || 'none';
   const availableOutgoingBitrate = Number(diagnostics.availableOutgoingBitrate) || 0;
-  const requiredBitrate = screenShareEncodingBitrate(
+  const requiredBitrate = screenShareContentDemand(
     profile.id,
     diagnostics.peerCount,
     profile.adaptationScales[current.level] || 1,
+    { ...diagnostics, targetFrameRate },
   );
   // Compare the estimate with the actual demand of this operating point, not
   // with maxBitrate (which is itself capped to the previous estimate). This
@@ -691,10 +711,12 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   const recoveryFrameRate = temporalLevel > 0
     ? profile.adaptationFrameRates[temporalLevel - 1]
     : targetFrameRate;
-  const recoveryRequiredBitrate = screenShareEncodingBitrate(
+  const recoveryRequiredBitrate = screenShareContentDemand(
     profile.id,
     diagnostics.peerCount,
     recoveryScale,
+    { ...diagnostics, targetFrameRate },
+    profile.adaptationScales[current.level] || 1,
   );
   // Require extra capacity before restoring a richer operating point. Merely
   // fitting the current low level is not evidence that the next one will fit;
@@ -1078,9 +1100,13 @@ export function evaluateCaptureAdaptation(previous, profileId, diagnostics = {})
   } else if (actionableNetworkPressure) {
     // Once the capacity deficit survives the startup/ramp-up window, reduce
     // the encoded pixel rate instead of squeezing the same 720p/1080p stream
-    // into an ever smaller bitrate. Spatial detail is reduced first; cadence
-    // becomes the last-resort safety valve at the bottom spatial level.
-    if (level < profile.adaptationScales.length - 1) {
+    // into an ever smaller bitrate. Detail mode spends cadence first under
+    // moderate pressure; severe deficits still require fewer pixels promptly.
+    if (profile.id === 'quality' && nextTemporalLevel < profile.adaptationFrameRates.length - 1
+        && !hardTransportPressure && networkHeadroomRatio !== null && networkHeadroomRatio >= 0.5) {
+      nextTemporalLevel += 1;
+      reason = 'network-temporal-downshift';
+    } else if (level < profile.adaptationScales.length - 1) {
       level += 1;
       reason = 'network-spatial-downshift';
     } else if (nextTemporalLevel < profile.adaptationFrameRates.length - 1) {
@@ -1309,6 +1335,21 @@ export function isSoftwareH264Encoder({
   return /h264/i.test(String(mimeType || ''))
     && (powerEfficientEncoder === false
       || /openh264|ffmpeg|software/i.test(String(encoderImplementation || '')));
+}
+
+export function selectScreenShareSfuCodec(codecs = [], preferredMime = '') {
+  const mime = preferredMime.toLowerCase();
+  const candidates = codecs.filter(codec => codec.mimeType?.toLowerCase() === mime);
+  return candidates.find(codec => mime === 'video/h264'
+    && /^4200[0-9a-f]{2}$/i.test(String(codec.parameters?.['profile-level-id']))) || candidates[0];
+}
+
+export function observeSoftwareH264Fallback(previous, diagnostics = {}, trackId = '') {
+  const software = Number(diagnostics.framesEncoded) > 0 && isSoftwareH264Encoder(diagnostics);
+  const samples = software ? (previous?.trackId === trackId ? previous.samples || 0 : 0) + 1 : 0;
+  // Initial reports can describe a temporary encoder during negotiation or
+  // handoff. Do not permanently switch the track to VP8 on one report.
+  return { trackId, samples, confirmed: samples >= 3 };
 }
 
 export function preferVideoCodecs(transceiver, profileId, capabilities = {}) {
