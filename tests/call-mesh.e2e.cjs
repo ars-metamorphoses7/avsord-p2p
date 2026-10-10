@@ -206,19 +206,8 @@ async function run() {
   await click(windows[0], 'button[aria-label="Compartilhar tela"]');
   await waitFor(() => count(windows[0], '.screen-share-source'), 'seletor de tela do Electron', 20_000);
   if (await count(windows[0], '.screen-share-tabs button') !== 2) throw new Error('O seletor não exibiu as abas de vídeo e áudio.');
-  if (await count(windows[0], '.screen-share-quality button') !== 2) throw new Error('O seletor não exibiu somente desempenho e qualidade.');
-  await windows[0].webContents.executeJavaScript(`(() => {
-    const buttons = [...document.querySelectorAll('.screen-share-quality button')];
-    const quality = buttons.find((button) => button.textContent.includes('qualidade'));
-    quality?.click();
-  })()`);
-  await waitFor(() => windows[0].webContents.executeJavaScript("document.querySelector('.screen-share-quality button.is-selected')?.textContent.includes('qualidade')"), 'modo qualidade selecionável');
-  await windows[0].webContents.executeJavaScript(`(() => {
-    const buttons = [...document.querySelectorAll('.screen-share-quality button')];
-    const performance = buttons.find((button) => button.textContent.includes('desempenho'));
-    performance?.click();
-  })()`);
-  await waitFor(() => windows[0].webContents.executeJavaScript("document.querySelector('.screen-share-quality button.is-selected')?.textContent.includes('desempenho')"), 'modo desempenho selecionável');
+  if (await count(windows[0], '.screen-share-quality button') !== 1) throw new Error('O seletor não exibiu somente o modo automático.');
+  await waitFor(() => windows[0].webContents.executeJavaScript("document.querySelector('.screen-share-quality button.is-selected')?.textContent.includes('automático')"), 'modo automático selecionado');
   if (await count(windows[0], '.screen-share-audio-options input[type="checkbox"]') !== 2) throw new Error('O seletor não exibiu os controles de áudio e vínculo automático.');
   if (process.env.JUMP_UI_SCREENSHOT) {
     await captureDebug(windows[0], 'picker');
@@ -269,12 +258,10 @@ async function run() {
     throw error;
   }
   await waitFor(() => windows[0].webContents.executeJavaScript(`(() => [...globalThis.__jumpPeerMesh.peerConnectionsRef.current.values()].every((slot) => (
-    slot.videoAdaptation?.profileId === 'performance'
-    && [60, 30, 20, 15].includes(slot.videoAdaptation?.targetFps)
-    && slot.videoAdaptation?.targetFps === slot.videoAdaptation?.frameRate
+    [60, 30].includes(slot.videoAdaptation?.frameRate)
     && Number(slot.videoAdaptation?.sampleCount) > 0
-    && Number(slot.videoAdaptation?.effectiveWidth) <= 1280
-  )))()`), 'controlador automático de desempenho ativo', 20_000);
+    && Number(slot.videoSender?.getParameters?.().encodings?.[0]?.maxBitrate) > 0
+  )))()`), 'controlador automático ativo', 20_000);
 
   await windows[0].webContents.executeJavaScript(`(async () => {
     const input = document.querySelector('.hidden-file-input');

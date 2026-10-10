@@ -96,7 +96,7 @@ test('reused connections recompute policy from the local capabilities', () => {
     .map((capabilities) => meshCodecPolicyForLocalCapabilities(capabilities));
   assert.deepEqual(policyHistory, [
     'hardware-or-unknown',
-    'software-only:performance:vp8',
+    'software-only:auto:vp8',
     'hardware-or-unknown',
   ]);
 });

@@ -44,8 +44,8 @@ export function evaluateScreenPlayback(previous, profileId, diagnostics = {}, po
   if (policy === 'auto') {
     return { profileId: profile.id, policy, streamKey, targetMs: null, reason: 'runtime-default' };
   }
-  const base = profile.id === 'performance' ? 50 : 80;
-  const maximum = profile.id === 'performance' ? 180 : 240;
+  const base = 50;
+  const maximum = 180;
   const jitterMs = metric(diagnostics.jitterMs);
   const lossRatio = metric(diagnostics.packetLossRatio);
   const freezeCount = metric(diagnostics.freezeCount);
