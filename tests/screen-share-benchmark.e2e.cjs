@@ -96,12 +96,12 @@ function booleanEnv(name, fallback = false) {
   return ['1', 'true', 'on', 'yes'].includes(String(raw).trim().toLowerCase());
 }
 
-const requestedProfiles = String(process.env.JUMP_BENCH_PROFILES || 'performance,quality')
+const requestedProfiles = String(process.env.JUMP_BENCH_PROFILES || 'auto')
   .split(',')
   .map((value) => value.trim().toLowerCase())
   .filter(Boolean);
-const profiles = [...new Set(requestedProfiles)].filter((profile) => ['performance', 'quality'].includes(profile));
-if (!profiles.length) throw new Error('JUMP_BENCH_PROFILES precisa conter performance e/ou quality.');
+const profiles = [...new Set(requestedProfiles)].filter((profile) => ['auto'].includes(profile));
+if (!profiles.length) throw new Error('JUMP_BENCH_PROFILES precisa conter auto.');
 const captureType = String(process.env.JUMP_BENCH_CAPTURE_TYPE || 'window').trim().toLowerCase();
 if (!['window', 'screen'].includes(captureType)) {
   throw new Error('JUMP_BENCH_CAPTURE_TYPE precisa ser window ou screen.');
@@ -1281,7 +1281,7 @@ async function startShare(sender, receiver, profile, captureSource) {
       && card.querySelector('small')?.textContent.trim() === ${JSON.stringify(sourceKind)}
   )))()`), `fonte descoberta ${captureSource.id} no seletor`);
   const configured = await sender.webContents.executeJavaScript(`(() => {
-    const profileName = ${JSON.stringify(profile === 'performance' ? 'desempenho' : 'qualidade')};
+    const profileName = 'automático';
     const profileButton = [...document.querySelectorAll('.screen-share-quality button')]
       .find((button) => button.textContent.toLowerCase().includes(profileName));
     const sourceCard = [...document.querySelectorAll('.screen-share-source')]
@@ -1876,8 +1876,7 @@ function valueAt(object, pathExpression) {
 }
 
 const PROFILE_EXPECTATIONS = {
-  performance: { maxWidth: 1280, maxHeight: 720, targetFps: 60 },
-  quality: { maxWidth: 1920, maxHeight: 1080, targetFps: 30 },
+  auto: { maxWidth: 1920, maxHeight: 1080, targetFps: 60 },
 };
 
 function evaluateRunValidity(profile, summary, sourceEnd) {

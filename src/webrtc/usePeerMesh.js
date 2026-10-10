@@ -2,11 +2,10 @@ import { useCallback, useEffect, useRef } from 'react';
 import { evaluateScreenPlayback, playbackDiagnostics, readScreenPlaybackPolicy, setReceiverPlaybackBuffer } from '../media/screenPlaybackPolicy.js';
 import {
   SCREEN_SHARE_ADAPT_INTERVAL_MS,
-  SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS,
-  adaptVideoSender,
+  applyStreamSender,
   configureVideoSender,
-  evaluateCaptureAdaptation,
-  initialCaptureAdaptation,
+  evaluateStream,
+  initialStreamState,
   isSoftwareH264Encoder,
   observeSoftwareH264Fallback,
   preferVideoCodecs,
@@ -453,10 +452,7 @@ export function usePeerMesh({
               slot.videoTelemetry = null;
               slot.videoTelemetryRunId = senderRunId;
               slot.videoDiagnostics = null;
-              slot.videoAdaptation = {
-                ...initialCaptureAdaptation(videoProfileRef.current),
-                trackId: screenTrack.id,
-              };
+              slot.videoAdaptation = { ...initialStreamState(), trackId: screenTrack.id };
               slot.requestNegotiation?.();
               return true;
             }
@@ -470,13 +466,10 @@ export function usePeerMesh({
               if (slot.videoTelemetryHistory.length > 240) slot.videoTelemetryHistory.shift();
             }
             const current = slot.videoAdaptation?.trackId === screenTrack.id
-              && slot.videoAdaptation?.profileId === videoProfileRef.current
               ? slot.videoAdaptation
-              : { ...initialCaptureAdaptation(videoProfileRef.current), trackId: screenTrack.id };
-            // Transport-only samples can still tune bitrate, but only an actual
-            // FPS observation advances the spatial controller and its trials.
+              : { ...initialStreamState(), trackId: screenTrack.id };
             const nextAdaptation = hasFpsSample
-              ? evaluateCaptureAdaptation(current, videoProfileRef.current, diagnostics)
+              ? evaluateStream(current, { ...diagnostics, framesEncoded: telemetry.outbound.framesEncoded })
               : current;
             nextAdaptation.trackId = screenTrack.id;
             slot.videoAdaptation = nextAdaptation;
@@ -494,34 +487,19 @@ export function usePeerMesh({
               });
               if (events.length > 1_000) events.shift();
             }
-            const adaptationResult = await mutateVideoSender(slot, 'adapt', sender, () => adaptVideoSender(
+            const adaptationResult = await mutateVideoSender(slot, 'adapt', sender, () => applyStreamSender(
               sender,
-              videoProfileRef.current,
-              activePeerCount,
+              nextAdaptation,
               {
-                ...diagnostics,
-                allowBitrateIncrease: !slot.lastVideoBitrateIncreaseAtMs
-                  || Date.now() - slot.lastVideoBitrateIncreaseAtMs
-                    >= SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS,
-                adaptationScale: nextAdaptation.scale,
-                targetFrameRate: nextAdaptation.frameRate,
-                networkPressure: nextAdaptation.networkPressure,
-                transportPressure: nextAdaptation.transportPressure,
-                startupBitrateGuardActive: nextAdaptation.startupBitrateGuardActive,
-                startupExplorationActive: nextAdaptation.startupExplorationActive,
-                recoveryProbeActive: nextAdaptation.recoveryProbeActive,
-                recoveryProbeMaxBitrate: nextAdaptation.recoveryProbeMaxBitrate,
+                peerCount: activePeerCount,
+                sourceWidth: diagnostics.sourceWidth ?? diagnostics.trackWidth,
+                sourceHeight: diagnostics.sourceHeight ?? diagnostics.trackHeight,
               },
             ), {
               profileId: videoProfileRef.current,
               adaptationReason: nextAdaptation.reason,
               adaptationLevel: nextAdaptation.level,
               temporalLevel: nextAdaptation.temporalLevel,
-              recoveryProbeActive: nextAdaptation.recoveryProbeActive,
-              recoveryProbeSamples: nextAdaptation.recoveryProbeSamples,
-              recoveryProbeCooldownSamples: nextAdaptation.recoveryProbeCooldownSamples,
-              recoveryProbeMaxBitrate: nextAdaptation.recoveryProbeMaxBitrate,
-              recoveryProbeReason: nextAdaptation.recoveryProbeReason,
             });
             const diagnosticsSession = ensureDiagnosticsSession(slot, 'senderDiagnosticsSession', {
               run: screenShareRunRef.current,
@@ -596,7 +574,7 @@ export function usePeerMesh({
             slot.audioReceiverTelemetry = audioTelemetry;
             slot.audioReceiverTelemetryRunId = receiverRunId;
           }
-          const playbackProfile = slot.remotePlaybackProfile || 'performance';
+          const playbackProfile = slot.remotePlaybackProfile || 'auto';
           slot.playbackAdaptation = evaluateScreenPlayback(
             slot.playbackAdaptation,
             playbackProfile,
@@ -806,7 +784,7 @@ export function usePeerMesh({
         slot.videoCodecPolicyKey = nextCodecPolicyKey;
         slot.videoCodecRenegotiationPending = true;
       }
-      slot.videoAdaptation = initialCaptureAdaptation(normalizedProfileId);
+      slot.videoAdaptation = initialStreamState();
       slot.videoTelemetry = null;
       slot.videoDiagnostics = null;
       if (!sender.track) return true;
@@ -833,9 +811,7 @@ export function usePeerMesh({
       slot.videoTelemetry = null;
       slot.videoDiagnostics = null;
       const activeTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
-      slot.videoAdaptation = activeTrack
-        ? { ...initialCaptureAdaptation(videoProfileRef.current), trackId: activeTrack.id }
-        : initialCaptureAdaptation(videoProfileRef.current);
+      slot.videoAdaptation = { ...initialStreamState(), trackId: activeTrack?.id };
     }
     slot.screenWatching = nextWatching;
     const activeScreenTrack = screenStreamRef.current?.getVideoTracks?.()[0];

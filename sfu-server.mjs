@@ -26,13 +26,18 @@ function preferredNetworkAddress() {
   return candidates[0]?.address || '127.0.0.1';
 }
 
+// Initial GCC estimate for the producer's uplink. 1 Mb/s made every SFU
+// stream start blurry for several seconds; GCC still backs off on a weaker
+// link. Must stay identical for every codec/producer (FMTP collisions).
+const START_BITRATE_KBPS = 3_000;
+
 function mediaCodecs() {
   return [
     {
       kind: 'video',
       mimeType: 'video/VP8',
       clockRate: 90_000,
-      parameters: { 'x-google-start-bitrate': 1_000 },
+      parameters: { 'x-google-start-bitrate': START_BITRATE_KBPS },
     },
     {
       kind: 'video',
@@ -44,7 +49,7 @@ function mediaCodecs() {
         // Keep Baseline available alongside Constrained Baseline. The latter
         // alone can exclude the hardware implementation negotiated by mesh.
         'profile-level-id': '42001f',
-        'x-google-start-bitrate': 1_000,
+        'x-google-start-bitrate': START_BITRATE_KBPS,
       },
     },
     {
@@ -55,14 +60,14 @@ function mediaCodecs() {
         'packetization-mode': 1,
         'level-asymmetry-allowed': 1,
         'profile-level-id': '42e01f',
-        'x-google-start-bitrate': 1_000,
+        'x-google-start-bitrate': START_BITRATE_KBPS,
       },
     },
     {
       kind: 'video',
       mimeType: 'video/VP9',
       clockRate: 90_000,
-      parameters: { 'profile-id': 0, 'x-google-start-bitrate': 1_000 },
+      parameters: { 'profile-id': 0, 'x-google-start-bitrate': START_BITRATE_KBPS },
     },
   ];
 }
@@ -151,9 +156,11 @@ export function createScreenSfu({ send, broadcast, roomForSocket }) {
       enableUdp: true,
       enableTcp: true,
       preferUdp: true,
+      // mediasoup starts each viewer's downlink estimate at 600 kb/s.
+      initialAvailableOutgoingBitrate: 4_000_000,
       appData: { direction },
     });
-    if (direction === 'send') await transport.setMaxIncomingBitrate(12_000_000);
+    if (direction === 'send') await transport.setMaxIncomingBitrate(16_000_000);
     return transport;
   }
 

@@ -2,14 +2,13 @@ import { useCallback, useEffect, useRef } from 'react';
 import { evaluateScreenPlayback, playbackDiagnostics, setReceiverPlaybackBuffer } from '../media/screenPlaybackPolicy.js';
 import {
   SCREEN_SHARE_ADAPT_INTERVAL_MS,
-  SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS,
-  adaptVideoSender,
-  evaluateCaptureAdaptation,
-  initialCaptureAdaptation,
+  applyStreamSender,
+  evaluateStream,
+  initialStreamState,
   observeSoftwareH264Fallback,
   screenShareCodecOrder,
-  screenShareEncodingBitrate,
   screenShareProfile,
+  streamEncodingParameters,
   selectScreenShareSfuCodec,
 } from '../media/screenShareProfiles.js';
 import { createScreenShareTelemetrySnapshot } from '../media/screenShareTelemetry.js';
@@ -111,7 +110,7 @@ export function useScreenSfu({
   const producerTelemetryRunIdRef = useRef(null);
   const producerAdaptationRef = useRef(null);
   const producerDiagnosticsSessionRef = useRef(null);
-  const producerLastBitrateIncreaseAtRef = useRef(0);
+
   const runtimeCodecOverridesRef = useRef(new Map());
   const consumersRef = useRef(new Map());
   const sfuViewersRef = useRef(new Set());
@@ -272,7 +271,7 @@ export function useScreenSfu({
         runId: options.screenShareRunId || options.appData?.screenShareRunId || null,
       };
       entry.playbackAdaptation = evaluateScreenPlayback(null,
-        peerConnectionsRef.current.get(entry.peerId)?.remotePlaybackProfile || 'performance');
+        peerConnectionsRef.current.get(entry.peerId)?.remotePlaybackProfile || 'auto');
       setReceiverPlaybackBuffer(consumer.rtpReceiver, entry.playbackAdaptation.targetMs);
       consumersRef.current.set(producerId, entry);
       consumer.on('transportclose', () => closeConsumer(producerId));
@@ -346,32 +345,20 @@ export function useScreenSfu({
     const softwareOnly = Boolean(runtimePreferredMime)
       || mediaCapabilities.hardwareVideoEncoding === false
       || String(mediaCapabilities.videoEncode || '').toLowerCase() === 'disabled_software';
-    const initialAdaptation = initialCaptureAdaptation(profile.id);
-    if (softwareOnly) {
-      initialAdaptation.level = profile.softwareSafeStart.level;
-      initialAdaptation.temporalLevel = profile.softwareSafeStart.temporalLevel;
-      initialAdaptation.frameRate = profile.adaptationFrameRates[initialAdaptation.temporalLevel];
-      initialAdaptation.scale = profile.adaptationScales[initialAdaptation.level];
-      initialAdaptation.cooldownSamples = 2;
-      initialAdaptation.reason = 'software-encoder-safe-start';
-      initialAdaptation.softwareEncoder = true;
-    }
+    const initialAdaptation = initialStreamState({ softwareEncoder: softwareOnly });
     initialAdaptation.trackId = track.id;
-    const initialScale = profile.adaptationScales[initialAdaptation.level] || 1;
-    const initialFrameRate = profile.adaptationFrameRates[initialAdaptation.temporalLevel]
-      || profile.frameRate;
-    const initialBitrate = screenShareEncodingBitrate(profile.id, 1, initialScale);
+    const trackSettings = track.getSettings?.() || {};
+    const initialEncoding = streamEncodingParameters(initialAdaptation, {
+      sourceWidth: trackSettings.width,
+      sourceHeight: trackSettings.height,
+    });
+    initialAdaptation.scale = initialEncoding.scaleResolutionDownBy;
     const codec = selectScreenShareSfuCodec(deviceRef.current.sendRtpCapabilities.codecs, preferredMime);
     const producer = await transport.produce({
       track,
       stopTracks: false,
       codec,
-      encodings: [{
-        maxBitrate: initialBitrate,
-        maxFramerate: initialFrameRate,
-        scaleResolutionDownBy: initialScale,
-        scalabilityMode: 'L1T1',
-      }],
+      encodings: [{ ...initialEncoding, scalabilityMode: 'L1T1' }],
       // Keep codec FMTP stable across successive producers on the same
       // mediasoup send transport. Per-profile x-google-start-bitrate values
       // reuse the same payload type and Chromium rejects the next BUNDLE offer
@@ -494,38 +481,17 @@ export function useScreenSfu({
           || adaptationDiagnostics.framesPerSecond !== null;
         const current = producerAdaptationRef.current?.trackId === liveTrack.id
           ? producerAdaptationRef.current
-          : { ...initialCaptureAdaptation(videoProfileRef.current), trackId: liveTrack.id };
+          : { ...initialStreamState(), trackId: liveTrack.id };
         const next = hasFpsSample
-          ? evaluateCaptureAdaptation(current, videoProfileRef.current, adaptationDiagnostics)
+          ? evaluateStream(current, { ...adaptationDiagnostics, framesEncoded: telemetry.outbound.framesEncoded })
           : current;
         next.trackId = liveTrack.id;
-        const profile = screenShareProfile(videoProfileRef.current);
-        const previousParameters = producer.rtpSender?.getParameters?.() || {};
-        const previousEncoding = previousParameters.encodings?.[0] || {};
-        const structuralChange = Math.abs(
-          (Number(previousEncoding.scaleResolutionDownBy) || 1) - (Number(next.scale) || 1),
-        ) >= 0.01 || Number(previousEncoding.maxFramerate) !== Number(next.frameRate);
-        const allowBitrateIncrease = structuralChange
-          || now - producerLastBitrateIncreaseAtRef.current >= SCREEN_SHARE_BITRATE_INCREASE_INTERVAL_MS;
-        const applied = await adaptVideoSender(producer.rtpSender, profile.id, 1, {
-          ...adaptationDiagnostics,
-          adaptationScale: next.scale,
-          targetFrameRate: next.frameRate,
-          allowBitrateIncrease,
-          networkPressure: next.networkPressure,
-          transportPressure: next.transportPressure,
-          startupBitrateGuardActive: next.startupBitrateGuardActive,
-          startupExplorationActive: next.startupExplorationActive,
-          recoveryProbeActive: next.recoveryProbeActive,
-          recoveryProbeMaxBitrate: next.recoveryProbeMaxBitrate,
+        const applied = await applyStreamSender(producer.rtpSender, next, {
+          peerCount: 1,
+          sourceWidth: adaptationDiagnostics.sourceWidth ?? adaptationDiagnostics.trackWidth,
+          sourceHeight: adaptationDiagnostics.sourceHeight ?? adaptationDiagnostics.trackHeight,
         });
-        if (applied) {
-          const nextBitrate = Number(producer.rtpSender?.getParameters?.().encodings?.[0]?.maxBitrate) || 0;
-          if (nextBitrate > (Number(previousEncoding.maxBitrate) || 0)) {
-            producerLastBitrateIncreaseAtRef.current = now;
-          }
-          producerAdaptationRef.current = next;
-        }
+        if (applied) producerAdaptationRef.current = next;
         if (isScreenShareDiagnosticsEnabled() && run?.runId) {
           if (producerDiagnosticsSessionRef.current?.runId !== run.runId) {
             if (producerDiagnosticsSessionRef.current) {
@@ -602,7 +568,7 @@ export function useScreenSfu({
             entry.telemetry = telemetry;
             entry.telemetryRunId = runId;
             entry.playbackAdaptation = evaluateScreenPlayback(entry.playbackAdaptation,
-              slot?.remotePlaybackProfile || 'performance',
+              slot?.remotePlaybackProfile || 'auto',
               playbackDiagnostics(telemetry, `${runId || ''}:${telemetry.ids.inbound}`));
             setReceiverPlaybackBuffer(entry.consumer.rtpReceiver, entry.playbackAdaptation.targetMs);
             if (!isScreenShareDiagnosticsEnabled()) return;
@@ -684,7 +650,7 @@ export function useScreenSfu({
     producerTelemetryRef.current = null;
     producerTelemetryRunIdRef.current = null;
     producerAdaptationRef.current = null;
-    producerLastBitrateIncreaseAtRef.current = 0;
+
     runtimeCodecOverridesRef.current.clear();
   }, [closeConsumer, request, stopPublishing]);
 

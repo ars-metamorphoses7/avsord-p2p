@@ -76,6 +76,7 @@ export function useScreenShare({
     const fallbackTrack = cameraStreamRef.current?.getVideoTracks()[0] || null;
     void replacePeerTrack('videoSender', fallbackTrack);
     setIsSharing(false);
+    if (wasSharing) void globalThis.jumpDesktop?.setStreamPriority?.(false)?.catch?.(() => {});
     announceCallState({ sharing: false, sharingAudio: false, sharingProfile: '' });
     screenShareRunRef.current = null;
     if (wasSharing) onShareStopped?.(stoppedRun);
@@ -218,6 +219,7 @@ export function useScreenShare({
         if (screenStreamRef.current === videoStream) stopScreenShare();
       };
       setIsSharing(true);
+      void globalThis.jumpDesktop?.setStreamPriority?.(true)?.catch?.(() => {});
       announceCallState({
         sharing: true,
         sharingAudio: withAudio,

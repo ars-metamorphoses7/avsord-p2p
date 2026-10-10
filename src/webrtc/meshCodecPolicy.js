@@ -1,4 +1,4 @@
-export function meshCodecPolicyForLocalCapabilities(capabilities = {}, profileId = 'performance') {
+export function meshCodecPolicyForLocalCapabilities(capabilities = {}, profileId = 'auto') {
   const softwareOnly = capabilities.hardwareVideoEncoding === false
     || String(capabilities.videoEncode || '').toLowerCase() === 'disabled_software';
   return softwareOnly
