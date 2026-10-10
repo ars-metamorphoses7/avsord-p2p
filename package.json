@@ -83,6 +83,7 @@
     "test:field-smoke": "node tests/field-run-packaged-smoke.cjs",
     "test:stream-benchmark": "npm run build && electron tests/screen-share-benchmark.e2e.cjs",
     "test:desktop-audio": "node --test tests/desktop-audio-native.test.cjs",
+    "jump": "npm run build && electron .",
     "desktop": "electron .",
     "desktop:dir": "npm run build && electron-builder --dir",
     "desktop:build:win": "npm run build && electron-builder --win nsis",
