@@ -6,6 +6,7 @@ import {
   screenShareProfile,
 } from '../media/screenShareProfiles.js';
 import { createScreenShareRunContext, isScreenShareDiagnosticsEnabled } from '../media/screenShareDiagnostics.js';
+import { canUseNativeCapture, startNativeScreenCapture } from '../media/nativeScreenCapture.js';
 
 function streamTelemetryStore() {
   if (!new URLSearchParams(window.location.search).has('streamTelemetry')) return null;
@@ -108,10 +109,23 @@ export function useScreenShare({
     let runContext = null;
     try {
       const profile = screenShareProfile(selectedProfile);
-      videoStream = desktopCapture
+      // Windows: the native capturer keeps the game's frame rate where
+      // Chromium's halves it under GPU load. Any failure falls back silently.
+      let captureBackend = 'chromium';
+      if (desktopCapture && canUseNativeCapture(desktop, selectedVideo)) {
+        try {
+          videoStream = await startNativeScreenCapture(desktop, selectedVideo);
+          captureBackend = 'nativa';
+        } catch (error) {
+          captureBackend = `chromium (${error?.message || 'falha na nativa'})`;
+        }
+        ensureCurrent();
+      }
+      videoStream ||= desktopCapture
         ? await navigator.mediaDevices.getUserMedia({ audio: false, video: screenCaptureConstraints(profile.id, selectedVideo.id) })
         : await navigator.mediaDevices.getDisplayMedia({ video: screenCaptureConstraints(profile.id), audio: false });
       ensureCurrent();
+      void desktop?.appendStreamLog?.([`captura ${captureBackend} ${String(selectedVideo?.id || 'navegador').split(':')[0]}`])?.catch?.(() => {});
       const videoTrack = videoStream.getVideoTracks()[0];
       if (!videoTrack) throw new Error('Nenhuma faixa de vídeo foi criada.');
       videoTrack.contentHint = profile.contentHint;

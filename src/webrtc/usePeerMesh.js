@@ -27,6 +27,7 @@ import {
 import {
   meshCodecPolicyForLocalCapabilities,
 } from './meshCodecPolicy.js';
+import { signaledCandidate } from './icePolicy.js';
 
 const ICE_RESTART_DELAY_MS = 4_000;
 const ICE_RESTART_RETRY_MS = 10_000;
@@ -946,7 +947,7 @@ export function usePeerMesh({
     };
 
     pc.onicecandidate = (event) => {
-      if (event.candidate) sendSignal({ type: 'signal', target: peerId, data: { type: 'candidate', candidate: event.candidate } });
+      if (event.candidate) sendSignal({ type: 'signal', target: peerId, data: { type: 'candidate', candidate: signaledCandidate(event.candidate) } });
     };
     pc.ontrack = (event) => {
       publishRemoteTrack(slot, peerId, event, remoteStreamsRef, setRemoteStreams, mountedRef);
