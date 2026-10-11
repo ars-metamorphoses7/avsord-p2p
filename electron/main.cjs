@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, screen, session, shell } = require('electron');
+const { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, screen, session, sharedTexture, shell } = require('electron');
 const os = require('node:os');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -10,6 +10,7 @@ const { setupDesktopMedia } = require('./desktop-media.cjs');
 const { applyWindowsScreenCapturePolicy } = require('./media-runtime-config.cjs');
 const { setupStreamPriority } = require('./stream-priority.cjs');
 const { setupStreamLog } = require('./stream-log.cjs');
+const { setupNativeCapture } = require('./native-capture.cjs');
 const {
   normalizeDiagnosticsEnvironment,
   fieldDiagnosticsPreferencePath,
@@ -414,6 +415,7 @@ if (!hasSingleInstanceLock) {
     desktopMedia = setupDesktopMedia({ desktopCapturer, ipcMain, session });
     setupStreamPriority({ app, ipcMain });
     setupStreamLog({ app, ipcMain });
+    setupNativeCapture({ app, ipcMain, sharedTexture, screen });
     await createWindow();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

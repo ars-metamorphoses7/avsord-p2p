@@ -47,7 +47,10 @@ function launch(file, args, env, label) {
   child.output = '';
   children.push(child);
   // Drain both pipes: an unread pipe fills up and blocks the child process.
-  const keep = (chunk) => { child.output = (child.output + chunk).slice(-4000); };
+  const keep = (chunk) => {
+    child.output = (child.output + chunk).slice(-4000);
+    for (const line of String(chunk).split('\n')) if (/\[(stream-priority|native-capture)\]/.test(line)) log(`${label}: ${line.trim()}`);
+  };
   if (label !== 'game') child.stdout.on('data', keep);
   child.stderr.on('data', keep);
   child.on('exit', (code) => { if (!shuttingDown) log(`${label} saiu (código ${code}): ${child.output.slice(-600)}`); });
@@ -117,7 +120,7 @@ const clickText = (page, selector, text) => page.evaluate(`(() => {
 
 const SNAPSHOT = `globalThis.__probeSnap = async () => {
   const pick = (stat, keys) => Object.fromEntries(keys.filter((key) => stat[key] !== undefined).map((key) => [key, stat[key]]));
-  const OUT = ['framesEncoded', 'totalEncodeTime', 'qpSum', 'bytesSent', 'frameWidth', 'frameHeight', 'qualityLimitationDurations', 'encoderImplementation', 'powerEfficientEncoder', 'nackCount', 'pliCount', 'retransmittedBytesSent', 'targetBitrate', 'hugeFramesSent'];
+  const OUT = ['framesEncoded', 'totalEncodeTime', 'qpSum', 'bytesSent', 'frameWidth', 'frameHeight', 'qualityLimitationDurations', 'encoderImplementation', 'powerEfficientEncoder', 'nackCount', 'pliCount', 'retransmittedBytesSent', 'targetBitrate', 'hugeFramesSent', 'keyFramesEncoded'];
   const IN = ['framesDecoded', 'framesDropped', 'totalDecodeTime', 'freezeCount', 'totalFreezesDuration', 'totalInterFrameDelay', 'totalSquaredInterFrameDelay', 'jitterBufferDelay', 'jitterBufferEmittedCount', 'packetsLost', 'packetsReceived', 'frameWidth', 'frameHeight', 'nackCount', 'pliCount', 'keyFramesDecoded', 'decoderImplementation', 'bytesReceived', 'pauseCount', 'totalPausesDuration'];
   const peers = [];
   const collect = async (label, statsSource) => {
@@ -323,13 +326,17 @@ async function main() {
     const first = await Promise.all(instances.map((instance) => instance.page.evaluate('globalThis.__probeSnap()')));
     const timeline = [];
     if (process.env.PROBE_TIMELINE && phase !== 'idle') {
+      // PROBE_TIMELINE=1 samples every 2 s; a value >= 100 is the step in ms.
+      const step = Number(process.env.PROBE_TIMELINE) >= 100 ? Number(process.env.PROBE_TIMELINE) : 2_000;
+      const firstOutbound = (snap) => snap.peers.find((peer) => peer.outbound.some((entry) => entry.framesEncoded))?.outbound[0];
       let previous = first[0];
-      for (let elapsed = 0; elapsed < measureMs; elapsed += 2_000) {
-        await wait(2_000);
+      for (let elapsed = 0; elapsed < measureMs; elapsed += step) {
+        await wait(step);
         const current = await sender.page.evaluate('globalThis.__probeSnap()');
         const row = senderSummary(previous, current)[0];
-        const out = current.peers.find((peer) => peer.outbound.some((entry) => entry.framesEncoded))?.outbound[0];
-        if (row) timeline.push(`+${((current.t - first[0].t) / 1000).toFixed(0)}s ${fixed(row.mbps)}Mb/s alvo ${fixed((out?.targetBitrate || 0) / 1e6)} est ${fixed(row.estimateMbps)} QP ${fixed(row.qp)} ${fixed(row.encodeFps)}fps`);
+        const out = firstOutbound(current);
+        const keyframes = (out?.keyFramesEncoded ?? 0) - (firstOutbound(previous)?.keyFramesEncoded ?? 0);
+        if (row) timeline.push(`+${((current.t - first[0].t) / 1000).toFixed(1)}s ${fixed(row.mbps)}Mb/s alvo ${fixed((out?.targetBitrate || 0) / 1e6)} est ${fixed(row.estimateMbps)} QP ${fixed(row.qp)} ${fixed(row.encodeFps)}fps${keyframes ? ` KEY${keyframes}` : ''}`);
         previous = current;
       }
     } else await wait(measureMs);
