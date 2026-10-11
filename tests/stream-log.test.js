@@ -12,10 +12,13 @@ function report(entries) {
 
 const sender = (frames, encodeSeconds, qpSum, bytes, sourceFrames, cpuSeconds = 0) => report([
   { type: 'codec', id: 'c1', mimeType: 'video/H264', sdpFmtpLine: 'packetization-mode=1;profile-level-id=640020' },
-  { type: 'outbound-rtp', kind: 'video', codecId: 'c1', framesEncoded: frames, totalEncodeTime: encodeSeconds, qpSum, bytesSent: bytes, frameWidth: 1920, frameHeight: 1080, qualityLimitationDurations: { none: 10, cpu: cpuSeconds }, encoderImplementation: 'NVIDIA', pliCount: 0, nackCount: 2 },
+  { type: 'outbound-rtp', kind: 'video', codecId: 'c1', framesEncoded: frames, keyFramesEncoded: frames ? 1 : 0, totalEncodeTime: encodeSeconds, qpSum, bytesSent: bytes, frameWidth: 1920, frameHeight: 1080, qualityLimitationDurations: { none: 10, cpu: cpuSeconds }, encoderImplementation: 'NVIDIA', pliCount: 0, nackCount: 2 },
   { type: 'media-source', kind: 'video', frames: sourceFrames },
   { type: 'remote-inbound-rtp', kind: 'video', packetsLost: 1 },
-  { type: 'candidate-pair', nominated: true, state: 'succeeded', availableOutgoingBitrate: 18e6, currentRoundTripTime: 0.031 },
+  { type: 'transport', selectedCandidatePairId: 'p1' },
+  { type: 'local-candidate', id: 'l1', candidateType: 'host', address: '26.244.128.12' },
+  { type: 'remote-candidate', id: 'r1', candidateType: 'srflx', address: '177.10.20.30' },
+  { type: 'candidate-pair', id: 'p1', localCandidateId: 'l1', remoteCandidateId: 'r1', availableOutgoingBitrate: 18e6, currentRoundTripTime: 0.031 },
 ]);
 
 test('sender line reports capture/encode rate, QP, bitrate, codec profile and CPU limitation', () => {
@@ -23,7 +26,7 @@ test('sender line reports capture/encode rate, QP, bitrate, codec profile and CP
   const after = streamLogSnapshot(sender(600, 4.2, 12_000, 15_000_000, 590, 2), 10_000);
   const [line] = streamLogLines('p2p:abc', before, after);
   assert.match(line, /^envio p2p:abc 1920x1080 captura=59 encode=60fps 7ms qp=20 12Mb\/s est=18Mb\/s rtt=31ms/);
-  assert.match(line, /limitado=cpu:2s H264\/6400 NVIDIA$/);
+  assert.match(line, /keyframes=1 limitado=cpu:2s rota=host:radmin-srflx:internet H264\/6400 NVIDIA$/);
 });
 
 test('viewer line reports smoothness: fps, interval jitter, freezes, buffer and loss', () => {

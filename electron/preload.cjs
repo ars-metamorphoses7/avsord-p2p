@@ -1,4 +1,24 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, sharedTexture } = require('electron');
+
+// Native screen capture frames arrive here as imported GPU textures (see
+// electron/native-capture.cjs). VideoFrames cannot cross the context bridge,
+// so the page hands this isolated world a MessagePort and every frame is
+// transferred through it to the page's MediaStreamTrackGenerator.
+let nativeCapturePort = null;
+const nativeCaptureSupported = process.platform === 'win32' && typeof sharedTexture?.setSharedTextureReceiver === 'function';
+if (nativeCaptureSupported) {
+  sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture }) => {
+    const frame = importedSharedTexture.getVideoFrame();
+    importedSharedTexture.release();
+    if (nativeCapturePort) nativeCapturePort.postMessage(frame, [frame]);
+    else frame.close();
+  });
+  window.addEventListener('message', (event) => {
+    if (event.source !== window || event.data !== 'jump-native-capture-port' || !event.ports[0]) return;
+    nativeCapturePort?.close();
+    nativeCapturePort = event.ports[0];
+  });
+}
 
 contextBridge.exposeInMainWorld('jumpDesktop', {
   isDesktop: true,
@@ -14,6 +34,14 @@ contextBridge.exposeInMainWorld('jumpDesktop', {
   getMediaCapabilities: () => ipcRenderer.invoke('media:capabilities'),
   setStreamPriority: (active) => ipcRenderer.invoke('stream:priority', Boolean(active)),
   appendStreamLog: (lines) => ipcRenderer.invoke('stream-log:append', lines),
+  nativeCaptureSupported,
+  startNativeCapture: (options) => ipcRenderer.invoke('native-capture:start', options),
+  stopNativeCapture: () => ipcRenderer.invoke('native-capture:stop'),
+  onNativeCaptureEnded: (callback) => {
+    const listener = (_event, reason) => callback(reason);
+    ipcRenderer.on('native-capture:ended', listener);
+    return () => ipcRenderer.removeListener('native-capture:ended', listener);
+  },
   getStreamDiagnosticsConfig: () => ipcRenderer.invoke('stream-diagnostics:config'),
   relaunchStreamDiagnostics: (action) => ipcRenderer.invoke('stream-diagnostics:relaunch', action),
   openStreamDiagnosticsDirectory: () => ipcRenderer.invoke('stream-diagnostics:open-directory'),

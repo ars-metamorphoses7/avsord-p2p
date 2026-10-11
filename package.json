@@ -47,6 +47,12 @@
     ],
     "win": {
       "icon": "src/assets/win98/jump-app-icon.png",
+      "extraResources": [
+        {
+          "from": "native/bin/jump-capture.exe",
+          "to": "jump-capture.exe"
+        }
+      ],
       "target": [
         "nsis"
       ]
@@ -74,20 +80,21 @@
     "generate:build-metadata": "node scripts/generate-build-metadata.cjs",
     "validate:release-version": "node scripts/validate-release-version.cjs",
     "build": "npm run generate:build-metadata && vite build",
+    "build:native": "node scripts/build-native-capture.cjs",
     "test:call": "npm run build && electron tests/call-mesh.e2e.cjs",
     "test:diagnostics": "npm run build && electron tests/screen-share-diagnostics.e2e.cjs",
     "test:update": "node --test tests/update-controller.test.cjs",
     "test:persistence": "node --test tests/rooms-persistence.test.cjs tests/room-session-store.test.cjs",
-    "test:media": "node --test tests/screen-share-profiles.test.js tests/screen-playback-policy.test.js tests/screen-share-telemetry.test.js tests/screen-share-diagnostics.test.js tests/video-frame-collector.test.js tests/field-run-diagnostics.test.cjs tests/field-run-diagnostics-ui.test.js tests/image-quality.test.cjs tests/call-sounds.test.js tests/sfu-server.test.js tests/mesh-codec-policy.test.js tests/media-runtime-config.test.cjs tests/stream-priority.test.cjs tests/stream-log.test.js",
+    "test:media": "node --test tests/screen-share-profiles.test.js tests/screen-playback-policy.test.js tests/screen-share-telemetry.test.js tests/screen-share-diagnostics.test.js tests/video-frame-collector.test.js tests/field-run-diagnostics.test.cjs tests/field-run-diagnostics-ui.test.js tests/image-quality.test.cjs tests/call-sounds.test.js tests/sfu-server.test.js tests/mesh-codec-policy.test.js tests/media-runtime-config.test.cjs tests/stream-priority.test.cjs tests/stream-log.test.js tests/native-capture.test.cjs tests/ice-policy.test.js",
     "probe:game": "node tests/game-impact-probe.cjs",
     "test:gpu": "electron tests/gpu-capabilities.e2e.cjs",
     "test:field-smoke": "node tests/field-run-packaged-smoke.cjs",
     "test:stream-benchmark": "npm run build && electron tests/screen-share-benchmark.e2e.cjs",
     "test:desktop-audio": "node --test tests/desktop-audio-native.test.cjs",
-    "jump": "npm run build && electron .",
+    "jump": "npm run build && npm run build:native && electron .",
     "desktop": "electron .",
     "desktop:dir": "npm run build && electron-builder --dir",
-    "desktop:build:win": "npm run build && electron-builder --win nsis",
+    "desktop:build:win": "npm run build && npm run build:native && electron-builder --win nsis",
     "desktop:build:linux": "npm run build && electron-builder --linux AppImage deb",
     "desktop:build": "npm run desktop:build:win",
     "start": "node server.mjs",

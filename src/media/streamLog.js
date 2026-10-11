@@ -3,9 +3,11 @@
 // friend actually see" after a real session without enabling the heavy field
 // diagnostics: viewer FPS, freezes and frame-interval jitter next to the
 // sender's capture/encode rate, QP, bitrate, estimate and codec.
+import { classifyCandidateAddress } from '../webrtc/icePolicy.js';
+
 export const STREAM_LOG_INTERVAL_MS = 10_000;
 
-const OUTBOUND_KEYS = ['framesEncoded', 'totalEncodeTime', 'qpSum', 'bytesSent', 'frameWidth', 'frameHeight', 'qualityLimitationDurations', 'encoderImplementation', 'pliCount', 'nackCount', 'retransmittedBytesSent'];
+const OUTBOUND_KEYS = ['keyFramesEncoded', 'framesEncoded', 'totalEncodeTime', 'qpSum', 'bytesSent', 'frameWidth', 'frameHeight', 'qualityLimitationDurations', 'encoderImplementation', 'pliCount', 'nackCount', 'retransmittedBytesSent'];
 const INBOUND_KEYS = ['framesDecoded', 'framesDropped', 'totalDecodeTime', 'freezeCount', 'totalFreezesDuration', 'totalInterFrameDelay', 'totalSquaredInterFrameDelay', 'jitterBufferDelay', 'jitterBufferEmittedCount', 'packetsLost', 'packetsReceived', 'bytesReceived', 'frameWidth', 'frameHeight', 'keyFramesDecoded', 'pliCount', 'decoderImplementation'];
 
 function pick(stat, keys) {
@@ -16,11 +18,13 @@ function pick(stat, keys) {
 
 /** Reduces an RTCStatsReport to the counters the log needs. */
 export function streamLogSnapshot(report, timestampMs) {
-  const snapshot = { t: timestampMs, outbound: [], inbound: [], sourceFrames: null, estimate: null, rtt: null, remoteLost: null };
+  const snapshot = { t: timestampMs, outbound: [], inbound: [], sourceFrames: null, estimate: null, rtt: null, remoteLost: null, route: '' };
   const codecs = new Map();
+  const candidates = new Map();
   let selectedPair = '';
   report.forEach((stat) => {
     if (stat.type === 'transport' && stat.selectedCandidatePairId) selectedPair = stat.selectedCandidatePairId;
+    if (stat.type === 'local-candidate' || stat.type === 'remote-candidate') candidates.set(stat.id, stat);
     if (stat.type === 'codec') codecs.set(stat.id, String(stat.mimeType || '').replace(/^video\//, '') + (/profile-level-id=(\w{4})/.exec(stat.sdpFmtpLine || '')?.[1] ? `/${/profile-level-id=(\w{4})/.exec(stat.sdpFmtpLine)[1]}` : ''));
   });
   report.forEach((stat) => {
@@ -32,6 +36,14 @@ export function streamLogSnapshot(report, timestampMs) {
     else if (stat.type === 'candidate-pair' && (selectedPair ? stat.id === selectedPair : stat.nominated && stat.state === 'succeeded')) {
       snapshot.estimate = Number(stat.availableOutgoingBitrate) || null;
       snapshot.rtt = Number.isFinite(stat.currentRoundTripTime) ? stat.currentRoundTripTime : null;
+      // Which network carries the media, e.g. "srflx:internet-srflx:internet"
+      // or "host:radmin-host:radmin" for a call through the Radmin VPN.
+      const ends = [candidates.get(stat.localCandidateId), candidates.get(stat.remoteCandidateId)];
+      snapshot.route = ends.some(Boolean) ? ends.map((candidate) => {
+        if (!candidate) return '?';
+        const network = candidate.candidateType === 'relay' ? 'turn' : classifyCandidateAddress(candidate.address || candidate.ip);
+        return `${candidate.candidateType || '?'}:${network || '?'}`;
+      }).join('-') : '';
     }
   });
   return snapshot;
@@ -62,8 +74,8 @@ export function streamLogLines(label, previous, current) {
       ? (current.sourceFrames - previous.sourceFrames) / seconds : null;
     lines.push(`envio ${label} ${out.frameWidth}x${out.frameHeight} captura=${round(capture)} encode=${round(frames / seconds)}fps ${round(diff(before, out, 'totalEncodeTime') / frames * 1000)}ms`
       + ` qp=${round(diff(before, out, 'qpSum') / frames)} ${round(diff(before, out, 'bytesSent') * 8 / seconds / 1e6, 2)}Mb/s est=${round(current.estimate / 1e6, 1)}Mb/s`
-      + ` rtt=${round(current.rtt * 1000, 0)}ms perdidos=${round(diff(previous, current, 'remoteLost'), 0)} pli=${round(diff(before, out, 'pliCount'), 0)} nack=${round(diff(before, out, 'nackCount'), 0)}`
-      + `${limits.length ? ` limitado=${limits[0][0]}:${round(limits[0][1])}s` : ''} ${out.codec} ${out.encoderImplementation || ''}`.trimEnd());
+      + ` rtt=${round(current.rtt * 1000, 0)}ms perdidos=${round(diff(previous, current, 'remoteLost'), 0)} pli=${round(diff(before, out, 'pliCount'), 0)} nack=${round(diff(before, out, 'nackCount'), 0)} keyframes=${round(diff(before, out, 'keyFramesEncoded'), 0)}`
+      + `${limits.length ? ` limitado=${limits[0][0]}:${round(limits[0][1])}s` : ''}${current.route ? ` rota=${current.route}` : ''} ${out.codec} ${out.encoderImplementation || ''}`.trimEnd());
   });
   current.inbound.forEach((inbound, index) => {
     const before = previous.inbound[index];
@@ -76,7 +88,7 @@ export function streamLogLines(label, previous, current) {
       + ` travadas=${round(diff(before, inbound, 'freezeCount'), 0)}(${round(diff(before, inbound, 'totalFreezesDuration') * 1000, 0)}ms) descartados=${round(diff(before, inbound, 'framesDropped'), 0)}`
       + ` decode=${round(diff(before, inbound, 'totalDecodeTime') / frames * 1000)}ms buffer=${round(emitted ? diff(before, inbound, 'jitterBufferDelay') / emitted * 1000 : null, 0)}ms`
       + ` ${round(diff(before, inbound, 'bytesReceived') * 8 / seconds / 1e6, 2)}Mb/s perdidos=${round(diff(before, inbound, 'packetsLost'), 0)} keyframes=${round(diff(before, inbound, 'keyFramesDecoded'), 0)}`
-      + ` rtt=${round(current.rtt * 1000, 0)}ms ${inbound.codec} ${inbound.decoderImplementation || ''}`.trimEnd());
+      + ` pli=${round(diff(before, inbound, 'pliCount'), 0)} rtt=${round(current.rtt * 1000, 0)}ms${current.route ? ` rota=${current.route}` : ''} ${inbound.codec} ${inbound.decoderImplementation || ''}`.trimEnd());
   });
   return lines;
 }

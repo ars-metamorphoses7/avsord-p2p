@@ -9,7 +9,9 @@ app.commandLine.appendSwitch('disable-frame-rate-limit');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.setPath('userData', path.join(app.getPath('temp'), `jump-game-load-${process.pid}`));
 
-const load = Math.max(1, Math.min(400, Number(process.env.GAME_LOAD) || 60));
+const load = Math.max(1, Math.min(4000, Number(process.env.GAME_LOAD) || 60));
+const depth = process.env.GAME_DEPTH ?? '2';
+const scene = process.env.GAME_SCENE || 'game';
 
 app.whenReady().then(async () => {
   const window = new BrowserWindow({
@@ -20,7 +22,7 @@ app.whenReady().then(async () => {
     webPreferences: { backgroundThrottling: false, contextIsolation: true },
   });
   window.setAlwaysOnTop(true, 'screen-saver');
-  await window.loadFile(path.join(__dirname, 'index.html'), { query: { load: String(load) } });
+  await window.loadFile(path.join(__dirname, 'index.html'), { query: { load: String(load), depth, scene } });
   setInterval(async () => {
     try {
       const stats = await window.webContents.executeJavaScript('globalThis.__game.take()');
