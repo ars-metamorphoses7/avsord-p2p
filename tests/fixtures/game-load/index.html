@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>JUMP game load</title>
+<style>html, body { margin: 0; height: 100%; overflow: hidden; background: #000; } canvas { display: block; width: 100vw; height: 100vh; }</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const load = Number(new URLSearchParams(location.search).get('load')) || 60;
+const canvas = document.getElementById('c');
+canvas.width = screen.width * devicePixelRatio;
+canvas.height = screen.height * devicePixelRatio;
+const gl = canvas.getContext('webgl2', { antialias: false, desynchronized: true, powerPreference: 'high-performance' });
+const compile = (type, source) => {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+  return shader;
+};
+const program = gl.createProgram();
+gl.attachShader(program, compile(gl.VERTEX_SHADER, `#version 300 es
+in vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }`));
+// Moving, high-detail scene: lots of per-pixel work plus full-frame motion so
+// the captured image stresses the encoder the way a game does.
+gl.attachShader(program, compile(gl.FRAGMENT_SHADER, `#version 300 es
+precision highp float;
+uniform vec2 res; uniform float t; uniform int iters;
+out vec4 color;
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+// Smooth value noise: fine, game-like texture (terrain, foliage) that pans at
+// sub-pixel speed, so the encoder has real detail to keep.
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+void main() {
+  vec2 pan = gl_FragCoord.xy + vec2(t * 173.3, t * 61.7);
+  float detail = noise(pan / 2.5) * 0.55 + noise(pan / 9.0) * 0.3 + noise(pan / 41.0) * 0.15;
+  vec2 uv = (gl_FragCoord.xy - 0.5 * res) / res.y;
+  uv += vec2(sin(t * 0.7), cos(t * 0.5)) * 0.35;
+  vec3 c = vec3(0.0);
+  vec2 z = uv * 2.2;
+  for (int i = 0; i < 4000; i++) {
+    if (i >= iters) break;
+    float fi = float(i);
+    z = vec2(sin(z.y * 1.31 + t + fi * 0.07), cos(z.x * 1.17 - t * 0.8)) + uv * 0.9;
+    c += 0.5 + 0.5 * cos(vec3(0.0, 2.0, 4.0) + fi * 0.11 + dot(z, z) + t);
+  }
+  c /= float(iters);
+  float grid = step(0.96, fract((uv.x + t * 0.4) * 24.0)) + step(0.96, fract((uv.y - t * 0.3) * 24.0));
+  color = vec4(mix(c, vec3(0.25, 0.45, 0.2) * (0.5 + detail), 0.55) + grid * 0.25, 1.0);
+}`));
+gl.linkProgram(program);
+gl.useProgram(program);
+const buffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const position = gl.getAttribLocation(program, 'p');
+gl.enableVertexAttribArray(position);
+gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+const resolution = gl.getUniformLocation(program, 'res');
+const time = gl.getUniformLocation(program, 't');
+const iterations = gl.getUniformLocation(program, 'iters');
+gl.viewport(0, 0, canvas.width, canvas.height);
+
+// Chromium caps requestAnimationFrame at the compositor rate, so frames are
+// driven by a task loop instead. gl.finish() makes each frame wait for the GPU,
+// so the frame rate is the GPU throughput left over for the "game", which is
+// exactly what other GPU work (capture, encode, compositing) steals from.
+let intervals = [];
+let last = 0;
+const channel = new MessageChannel();
+const frame = () => {
+  const now = performance.now();
+  if (last) intervals.push(now - last);
+  last = now;
+  gl.uniform2f(resolution, canvas.width, canvas.height);
+  gl.uniform1f(time, now / 1000);
+  gl.uniform1i(iterations, load);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.finish();
+  channel.port2.postMessage(0);
+};
+channel.port1.onmessage = frame;
+frame();
+
+globalThis.__game = {
+  take() {
+    const values = intervals;
+    intervals = [];
+    if (!values.length) return { frames: 0, fps: 0, p99Ms: null, maxMs: null };
+    const sorted = [...values].sort((a, b) => a - b);
+    const total = values.reduce((sum, value) => sum + value, 0);
+    return {
+      frames: values.length,
+      fps: values.length * 1000 / total,
+      p99Ms: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))],
+      maxMs: sorted.at(-1),
+    };
+  },
+};
+</script>
+</body>
+</html>
