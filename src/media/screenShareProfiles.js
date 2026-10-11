@@ -29,8 +29,8 @@ export const SCREEN_SHARE_ADAPT_INTERVAL_MS = 1_500;
  * looks worse than the next one down.
  */
 export const STREAM_LEVELS = [
-  { height: 1080, maxBitrate: 12_000_000, floorBitrate: 4_500_000 },
-  { height: 720, maxBitrate: 7_000_000, floorBitrate: 2_200_000 },
+  { height: 1080, maxBitrate: 20_000_000, floorBitrate: 4_500_000 },
+  { height: 720, maxBitrate: 10_000_000, floorBitrate: 2_200_000 },
   { height: 540, maxBitrate: 4_000_000, floorBitrate: 0 },
 ];
 export const STREAM_FRAME_RATES = [60, 30];
@@ -431,6 +431,21 @@ export function observeSoftwareH264Fallback(previous, diagnostics = {}, trackId 
   return { trackId, samples, confirmed: samples >= 3 };
 }
 
+/**
+ * Rank of an H.264 variant: High, then Main, then Constrained Baseline.
+ * Chromium lists Baseline first, but the hardware encoders also offer High,
+ * whose CABAC and 8x8 transform keep noticeably more detail in game content
+ * at the same bitrate. Every Chromium decoder (D3D11, VA-API, FFmpeg) decodes
+ * High, and negotiation still falls back to Baseline for a peer without it.
+ */
+export function h264ProfileRank(codec) {
+  const fmtp = String(codec?.sdpFmtpLine || '');
+  const profile = /profile-level-id=([0-9a-f]{6})/i.exec(fmtp)?.[1]?.toLowerCase() || '';
+  const packetization = /packetization-mode=1/.test(fmtp) ? 0 : 1;
+  const base = profile.startsWith('64') ? 0 : profile.startsWith('4d') ? 2 : profile.startsWith('42e0') ? 4 : 6;
+  return base + packetization;
+}
+
 export function preferVideoCodecs(transceiver, profileId, capabilities = {}) {
   if (!transceiver?.setCodecPreferences || !globalThis.RTCRtpSender?.getCapabilities) return;
   const codecs = globalThis.RTCRtpSender.getCapabilities('video')?.codecs || [];
@@ -439,7 +454,8 @@ export function preferVideoCodecs(transceiver, profileId, capabilities = {}) {
   const sorted = [...codecs].sort((left, right) => {
     const leftRank = order.get(left.mimeType?.toLowerCase()) ?? 99;
     const rightRank = order.get(right.mimeType?.toLowerCase()) ?? 99;
-    return leftRank - rightRank;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    return /h264/i.test(left.mimeType) ? h264ProfileRank(left) - h264ProfileRank(right) : 0;
   });
   if (sorted.length) transceiver.setCodecPreferences(sorted);
   return codecOrder;

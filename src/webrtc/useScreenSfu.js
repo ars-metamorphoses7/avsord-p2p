@@ -12,6 +12,7 @@ import {
   selectScreenShareSfuCodec,
 } from '../media/screenShareProfiles.js';
 import { createScreenShareTelemetrySnapshot } from '../media/screenShareTelemetry.js';
+import { startStreamLog } from '../media/streamLog.js';
 import {
   createScreenShareDiagnosticsSession,
   createScreenShareReceiverSample,
@@ -701,6 +702,19 @@ export function useScreenSfu({
       sfuViewersRef,
     };
     return () => { delete globalThis.__jumpScreenSfu; };
+  }, []);
+
+  useEffect(() => {
+    const append = globalThis.jumpDesktop?.appendStreamLog;
+    if (typeof append !== 'function') return undefined;
+    return startStreamLog({
+      getSources: () => [
+        ...(producerRef.current && !producerRef.current.closed ? [{ label: 'sfu:envio', source: producerRef.current }] : []),
+        ...[...consumersRef.current.entries()].filter(([, entry]) => entry?.consumer && !entry.consumer.closed)
+          .map(([id, entry]) => ({ label: `sfu:${String(id).slice(0, 8)}`, source: entry.consumer })),
+      ],
+      write: (lines) => append(lines),
+    });
   }, []);
 
   useEffect(() => {

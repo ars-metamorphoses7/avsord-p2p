@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('jumpDesktop', {
   getDesktopSources: () => ipcRenderer.invoke('desktop:sources'),
   getMediaCapabilities: () => ipcRenderer.invoke('media:capabilities'),
   setStreamPriority: (active) => ipcRenderer.invoke('stream:priority', Boolean(active)),
+  appendStreamLog: (lines) => ipcRenderer.invoke('stream-log:append', lines),
   getStreamDiagnosticsConfig: () => ipcRenderer.invoke('stream-diagnostics:config'),
   relaunchStreamDiagnostics: (action) => ipcRenderer.invoke('stream-diagnostics:relaunch', action),
   openStreamDiagnosticsDirectory: () => ipcRenderer.invoke('stream-diagnostics:open-directory'),
