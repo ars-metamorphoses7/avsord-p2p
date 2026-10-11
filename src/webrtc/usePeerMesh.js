@@ -15,6 +15,7 @@ import {
   createScreenShareAudioTelemetrySnapshot,
   createScreenShareTelemetrySnapshot,
 } from '../media/screenShareTelemetry.js';
+import { startStreamLog } from '../media/streamLog.js';
 import {
   createScreenShareDiagnosticsSession,
   createScreenShareAudioSample,
@@ -342,6 +343,17 @@ export function usePeerMesh({
     globalThis.__jumpPeerMesh = { peerConnectionsRef, remoteStreamsRef };
     return () => { delete globalThis.__jumpPeerMesh; };
   }, [peerConnectionsRef, remoteStreamsRef]);
+
+  useEffect(() => {
+    const append = globalThis.jumpDesktop?.appendStreamLog;
+    if (typeof append !== 'function') return undefined;
+    return startStreamLog({
+      getSources: () => [...peerConnectionsRef.current.values()]
+        .filter((slot) => slot?.pc && slot.pc.connectionState !== 'closed')
+        .map((slot) => ({ label: `p2p:${String(slot.peerId || '').slice(0, 8)}`, source: slot.pc })),
+      write: (lines) => append(lines),
+    });
+  }, [peerConnectionsRef]);
 
   useEffect(() => {
     let running = false;

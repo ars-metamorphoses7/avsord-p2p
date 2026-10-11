@@ -8,6 +8,7 @@ import {
   evenScreenCaptureConstraints,
   evaluatePlaybackBufferAdaptation,
   evaluateStream,
+  h264ProfileRank,
   initialPlaybackBufferAdaptation,
   initialStreamState,
   isSoftwareH264Encoder,
@@ -178,7 +179,7 @@ test('sender gets a fixed 1080p60 ceiling that never follows the estimate', asyn
   assert.equal(await applyStreamSender(sender, state, { peerCount: 2 }), true);
   assert.deepEqual(
     [sender.parameters.encodings[0].maxBitrate, sender.parameters.encodings[0].maxFramerate, sender.parameters.encodings[0].scaleResolutionDownBy],
-    [12_000_000, 60, 1],
+    [20_000_000, 60, 1],
   );
   assert.equal(sender.parameters.degradationPreference, 'maintain-resolution');
   await applyStreamSender(sender, evaluateStream(state, { ...HEALTHY, availableOutgoingBitrate: 2_000_000 }), { peerCount: 2 });
@@ -189,7 +190,7 @@ test('lower levels scale the real source and keep even dimensions', async () => 
   const sender = fakeSender();
   await applyStreamSender(sender, { ...initialStreamState(), level: 1 }, { sourceWidth: 1920, sourceHeight: 1080 });
   assert.equal(Math.round(1080 / sender.parameters.encodings[0].scaleResolutionDownBy), 720);
-  assert.equal(sender.parameters.encodings[0].maxBitrate, 7_000_000);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 10_000_000);
 
   const ultrawide = streamEncodingParameters({ level: 2, temporalLevel: 1 }, { sourceWidth: 1920, sourceHeight: 804 });
   const height = Math.round(804 / ultrawide.scaleResolutionDownBy);
@@ -199,8 +200,8 @@ test('lower levels scale the real source and keep even dimensions', async () => 
 });
 
 test('large meshes share the uplink ceiling', () => {
-  assert.equal(streamEncodingParameters(initialStreamState(), {}, 2).maxBitrate, 12_000_000);
-  assert.equal(streamEncodingParameters(initialStreamState(), {}, 3).maxBitrate, 9_000_000);
+  assert.equal(streamEncodingParameters(initialStreamState(), {}, 2).maxBitrate, 20_000_000);
+  assert.equal(streamEncodingParameters(initialStreamState(), {}, 3).maxBitrate, 15_000_000);
 });
 
 test('configuring a reused sender clears an old adaptive screen scale', async () => {
@@ -289,4 +290,16 @@ test('compatibility receiver buffer grows on jitter/freezes and decays slowly', 
   }
   assert.equal(state.targetMs, 345);
   assert.equal(state.reason, 'stable-decay');
+});
+
+test('H.264 High is preferred over Main and Baseline, packetization-mode 1 first', () => {
+  const codec = (fmtp) => ({ mimeType: 'video/H264', sdpFmtpLine: fmtp });
+  const ordered = [
+    codec('level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f'),
+    codec('level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=640020'),
+    codec('level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f'),
+    codec('level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640020'),
+    codec('level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f'),
+  ].sort((a, b) => h264ProfileRank(a) - h264ProfileRank(b)).map((entry) => /packetization-mode=(\d);profile-level-id=(\w+)/.exec(entry.sdpFmtpLine).slice(1).join(':'));
+  assert.deepEqual(ordered, ['1:640020', '0:640020', '1:4d001f', '1:42e01f', '1:42001f']);
 });

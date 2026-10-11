@@ -9,6 +9,7 @@ const { createUpdateController } = require('./update-controller.cjs');
 const { setupDesktopMedia } = require('./desktop-media.cjs');
 const { applyWindowsScreenCapturePolicy } = require('./media-runtime-config.cjs');
 const { setupStreamPriority } = require('./stream-priority.cjs');
+const { setupStreamLog } = require('./stream-log.cjs');
 const {
   normalizeDiagnosticsEnvironment,
   fieldDiagnosticsPreferencePath,
@@ -412,6 +413,7 @@ if (!hasSingleInstanceLock) {
     setupMediaDiagnostics();
     desktopMedia = setupDesktopMedia({ desktopCapturer, ipcMain, session });
     setupStreamPriority({ app, ipcMain });
+    setupStreamLog({ app, ipcMain });
     await createWindow();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
