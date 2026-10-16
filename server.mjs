@@ -6,7 +6,7 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { createScreenSfu } from './sfu-server.mjs';
-import { musicCommand } from './music-room.mjs';
+import { fetchYoutubeTitle, musicCommand, musicTitle } from './music-room.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const distRoot = join(root, 'dist');
@@ -301,8 +301,17 @@ wss.on('connection', (socket, request) => {
       const room = rooms.get(socket.roomId);
       if (!room || message.roomId !== room.id) return;
       try {
-        room.music = musicCommand(room.music, message);
+        const previous = room.music;
+        room.music = musicCommand(room.music, { ...message, by: socket.name });
         broadcast(room, { type: 'music-state', roomId: room.id, music: room.music, serverNow: Date.now() });
+        const added = message.action === 'add' && room.music !== previous ? room.music.queue.at(-1) : null;
+        if (added) void fetchYoutubeTitle(added.id).then((title) => {
+          if (!title || !room.music || rooms.get(room.id) !== room) return;
+          const titled = musicTitle(room.music, added.key, title);
+          if (titled === room.music) return;
+          room.music = titled;
+          broadcast(room, { type: 'music-state', roomId: room.id, music: room.music, serverNow: Date.now() });
+        });
       } catch (error) { send(socket, { type: 'music-error', roomId: room.id, message: error.message }); }
       return;
     }

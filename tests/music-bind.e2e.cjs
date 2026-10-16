@@ -35,7 +35,16 @@ app.whenReady().then(async () => {
   await run(a, `(() => { const input = document.querySelector('#music-url'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'https://youtu.be/M7lc1UVf-VE'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await wait(100);
   await run(a, "document.querySelector('.music-bot form').requestSubmit()");
-  await until(() => run(b, "document.querySelector('.music-bot').textContent.includes('atual: M7lc1UVf-VE')"));
+  await until(() => run(b, "document.querySelector('.music-bot').textContent.includes('1 vídeo(s) na fila')"));
+  await until(() => run(b, "document.querySelector('.music-bot').dataset.playerState === '1'"));
+  await until(() => run(a, "document.querySelector('.music-bot').dataset.playerState === '1'"));
+  // A second participant can add to the same queue.
+  await run(b, `(() => { const input = document.querySelector('#music-url'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'https://youtu.be/jNQXAC9IVRw'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await wait(100);
+  await run(b, "document.querySelector('.music-bot form').requestSubmit()");
+  await until(() => run(a, "document.querySelector('.music-bot').textContent.includes('2 vídeo(s) na fila') && document.querySelector('.music-queue').textContent.length > 0"));
+  assert(await run(a, "!document.querySelector('.music-warning')"), 'both clients have the Jukebox');
+  console.log('Queue on A:', await run(a, "document.querySelector('.music-bot p').textContent + ' | ' + document.querySelector('.music-queue').textContent"));
   await run(b, "[...document.querySelectorAll('.music-bot button')].find(b => b.textContent === 'Pausar').click()");
   await until(() => run(a, "document.querySelector('.music-titlebar').textContent.includes('Pausado')"));
   await run(a, "window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM', ctrlKey: true, shiftKey: true, bubbles: true }))");

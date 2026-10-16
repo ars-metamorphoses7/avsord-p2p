@@ -14,13 +14,15 @@ function loadYouTube() {
   return apiPromise;
 }
 
-export function MusicBot({ music, deafened, send, error }) {
+export function MusicBot({ music, deafened, send, error, withoutJukebox = [] }) {
   const [url, setUrl] = useState('');
   const [volume, setVolume] = useState(() => Number(localStorage.getItem('jump-music-volume') ?? 50));
   const [playerError, setPlayerError] = useState('');
   const [retry, setRetry] = useState(0);
   const host = useRef(null);
   const player = useRef(null);
+  const [playerState, setPlayerState] = useState(-1);
+  const syncNow = useRef(() => {});
   const latest = useRef({ music, deafened, volume, send });
   latest.current = { music, deafened, volume, send };
   const track = music?.queue?.[0];
@@ -47,6 +49,7 @@ export function MusicBot({ music, deafened, send, error }) {
       } else if (Math.abs(p.getCurrentTime() - position) > 3) p.seekTo(position, true);
       if (state.playing) p.playVideo(); else p.pauseVideo();
     };
+    syncNow.current = synchronize;
     loadYouTube().then(YT => {
       if (disposed) return;
       const element = document.createElement('div');
@@ -60,21 +63,25 @@ export function MusicBot({ music, deafened, send, error }) {
           onError: event => setPlayerError(`YouTube indisponível para este vídeo (erro ${event.data}). Você pode pular para o próximo.`),
           onStateChange: event => {
             if (event.data === 0 && loadedKey === latest.current.music?.queue?.[0]?.key) latest.current.send({ action: 'ended', key: loadedKey });
+            setPlayerState(event.data);
             if (event.data === 1) setPlayerError('');
           },
         },
       });
     }).catch(reason => { if (!disposed) setPlayerError(reason.message); });
     const timer = setInterval(synchronize, 2000);
-    return () => { disposed = true; clearInterval(timer); player.current?.destroy(); player.current = null; };
+    return () => { disposed = true; syncNow.current = () => {}; clearInterval(timer); player.current?.destroy(); player.current = null; };
   }, [Boolean(track), retry]);
+  // Apply pause/skip/seek from anyone in the room right away instead of
+  // waiting for the 2 s drift check.
+  useEffect(() => { syncNow.current(); }, [music?.revision, music?.receivedAt]);
   useEffect(() => {
     const p = player.current;
     if (typeof p?.setVolume !== 'function') return;
     p.setVolume(volume);
     if (deafened) p.mute(); else p.unMute();
   }, [volume, deafened]);
-  return <section className="music-bot" aria-label="JUMP Jukebox">
+  return <section className="music-bot" aria-label="JUMP Jukebox" data-player-state={playerState}>
     <div className="music-titlebar"><strong>♫ JUMP Jukebox — YouTube</strong><span>{track ? (music.playing ? 'Reproduzindo' : 'Pausado') : 'Pronto'}</span></div>
     <div className="music-body">
       {track && <div className="music-player" ref={host} />}
@@ -89,9 +96,10 @@ export function MusicBot({ music, deafened, send, error }) {
           <button disabled={!track} onClick={() => send({ action: 'stop' })}>Limpar fila</button>
           <label>Volume local <input aria-label="Volume da música" type="range" min="0" max="100" value={volume} onChange={event => { const value = Number(event.target.value); setVolume(value); localStorage.setItem('jump-music-volume', String(value)); }} /></label>
         </div>
-        <p>{track ? `${music.queue.length} vídeo(s) na fila · atual: ${track.id}` : 'Cole um link para ouvir com a chamada. Sem conta ou chave de API.'}</p>
-        {music?.queue?.length > 1 && <ol className="music-queue">{music.queue.slice(1).map(item => <li key={item.key}>{item.id}</li>)}</ol>}
+        <p>{track ? `${music.queue.length} vídeo(s) na fila · atual: ${track.title || track.id}${track.by ? ` (por ${track.by})` : ''}` : 'Cole um link para ouvir com a chamada. Sem conta ou chave de API.'}</p>
+        {music?.queue?.length > 1 && <ol className="music-queue">{music.queue.slice(1).map(item => <li key={item.key}>{item.title || item.id}{item.by ? ` — ${item.by}` : ''}</li>)}</ol>}
         <small>Controles compartilhados. O volume é só seu; desativar áudio também silencia a música. Se necessário, clique no play do vídeo.</small>
+        {withoutJukebox.length > 0 && <p role="status" className="music-warning">{withoutJukebox.join(', ')} {withoutJukebox.length > 1 ? 'estão' : 'está'} com uma versão do JUMP sem o Jukebox e não {withoutJukebox.length > 1 ? 'vão' : 'vai'} ouvir. Atualize o JUMP {withoutJukebox.length > 1 ? 'deles' : 'dessa pessoa'}.</p>}
         {(error || playerError) && <p role="alert">{error || playerError} {playerError && <button onClick={() => setRetry(value => value + 1)}>Tentar novamente</button>}</p>}
       </div>
     </div>

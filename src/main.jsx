@@ -1624,6 +1624,8 @@ function App() {
       sharing: Boolean(screenStreamRef.current),
       sharingAudio: Boolean(screenAudioSessionRef.current),
       sharingProfile: screenStreamRef.current ? videoProfileRef.current : '',
+      // Lets the Jukebox tell who runs a JUMP without it (they hear nothing).
+      jukebox: true,
       ...screenShareRunCallState(screenStreamRef, screenShareRunRef),
       ...overrides,
     });
@@ -1808,6 +1810,7 @@ function App() {
         sharing: Boolean(screenStreamRef.current),
         sharingAudio: Boolean(screenAudioSessionRef.current),
         sharingProfile: screenStreamRef.current ? videoProfileRef.current : '',
+        jukebox: true,
         ...screenShareRunCallState(screenStreamRef, screenShareRunRef),
       });
       requestDirectSync();
@@ -1983,6 +1986,7 @@ function App() {
             camera: Boolean(payload.camera),
             sharing: Boolean(payload.sharing),
             sharingAudio: Boolean(payload.sharingAudio),
+            jukebox: payload.jukebox === true,
             screenShareRunId: nextMediaState.screenShareRunId,
             screenShareRunStartedAtMs: nextMediaState.screenShareRunStartedAtMs,
           },
@@ -3454,7 +3458,7 @@ function App() {
                     {inCall ? <button type="button" className="leave-button" onClick={leaveCall}><WinIcon name="phone" size={23} /> sair</button> : <button type="button" className="join-call-button" onClick={startCall}><WinIcon name="phone" size={23} /> entrar na chamada</button>}
                   </div>
                 </div>
-                {inCall && signalStatus === 'connected' && <MusicBot key={roomId} music={music?.roomId === roomId ? music : null} error={musicError} deafened={isDeafened} send={sendMusic} />}
+                {inCall && signalStatus === 'connected' && <MusicBot key={roomId} music={music?.roomId === roomId ? music : null} withoutJukebox={activeCallParticipants.filter((person) => !person.self && !remoteCallStates[person.peerId]?.jukebox).map((person) => person.name)} error={musicError} deafened={isDeafened} send={sendMusic} />}
                 {showDeviceSettings && (
                   <div className="device-settings-popover" role="dialog" aria-labelledby="device-settings-title">
                     <div className="device-settings-titlebar">

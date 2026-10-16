@@ -9,6 +9,26 @@ export function youtubeId(value) {
   } catch { return null; }
 }
 
+export function musicTitle(state, key, title) {
+  const index = state?.queue?.findIndex((item) => item.key === key) ?? -1;
+  const clean = String(title || '').replace(/s+/g, ' ').trim().slice(0, 120);
+  if (index < 0 || !clean) return state;
+  const queue = [...state.queue];
+  queue[index] = { ...queue[index], title: clean };
+  return { ...state, queue, revision: state.revision + 1 };
+}
+
+// Title lookup without an API key; the server does it so browsers need no CORS.
+export async function fetchYoutubeTitle(id, timeoutMs = 4000) {
+  try {
+    const response = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${id}`)}`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) return '';
+    return String((await response.json())?.title || '');
+  } catch {
+    return '';
+  }
+}
+
 export function musicCommand(state, command, now = Date.now()) {
   const current = state || { queue: [], playing: false, position: 0, updatedAt: now, revision: 0 };
   const next = { ...current, queue: [...current.queue], revision: current.revision + 1 };
@@ -16,7 +36,7 @@ export function musicCommand(state, command, now = Date.now()) {
     const id = youtubeId(command.url);
     if (!id) throw new Error('Cole um link válido de vídeo do YouTube.');
     if (next.queue.length >= 30) throw new Error('A fila está cheia (30 vídeos).');
-    next.queue.push({ id, key: `${now}-${next.revision}` });
+    next.queue.push({ id, key: `${now}-${next.revision}`, by: String(command.by || '').slice(0, 32), title: '' });
     if (next.queue.length === 1) { next.position = 0; next.updatedAt = now; next.playing = true; }
   } else if (command.action === 'pause' || command.action === 'play') {
     if (!next.queue.length) return current;

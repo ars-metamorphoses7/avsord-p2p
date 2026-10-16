@@ -4866,3 +4866,4 @@ body.is-resizing-call-chat, body.is-resizing-call-chat * { cursor: col-resize !i
 .room-transfer { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; font-size: 11px; }
 .workspace-head-copy { min-width: 0; }
 .workspace-head-copy .eyebrow { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.music-warning { padding: 3px 6px; color: #000; background: #ffffe1; border: 1px solid #000; font-size: 11px; }
