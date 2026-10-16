@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, screen, session, sharedTexture, shell } = require('electron');
+const { app, BrowserWindow, clipboard, desktopCapturer, globalShortcut, ipcMain, screen, session, sharedTexture, shell } = require('electron');
 const os = require('node:os');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -95,12 +95,19 @@ function setupClipboard() {
   });
 }
 
-function preferredNetworkAddress() {
+function networkAddresses() {
   const addresses = Object.entries(os.networkInterfaces()).flatMap(([name, entries]) => (entries || [])
     .filter((entry) => (entry.family === 'IPv4' || entry.family === 4) && !entry.internal)
-    .map((entry) => ({ name, address: entry.address })));
-  addresses.sort((a, b) => Number(/radmin|vpn/i.test(b.name)) - Number(/radmin|vpn/i.test(a.name)));
-  return addresses[0]?.address || '127.0.0.1';
+    .map((entry) => ({ name, address: entry.address, vpn: /radmin|vpn|zerotier|tailscale|hamachi/i.test(name) })));
+  addresses.sort((a, b) => Number(b.vpn) - Number(a.vpn));
+  return addresses;
+}
+
+// The host picks the address its invites carry; without a valid choice the
+// VPN adapter wins, since that is what friends reach over Radmin.
+function preferredNetworkAddress(preferred = '') {
+  const addresses = networkAddresses();
+  return addresses.find((entry) => entry.address === preferred)?.address || addresses[0]?.address || '127.0.0.1';
 }
 
 function parseDeepLink(value) {
@@ -134,11 +141,14 @@ function setupRoomSessionPersistence() {
   ipcMain.handle('room-session:remember', (_event, value) => roomSessionStore.remember(value));
   ipcMain.handle('room-session:forget', (_event, value) => roomSessionStore.forget(value));
   ipcMain.handle('room-session:list', () => roomSessionStore.listRecent());
+  ipcMain.handle('room-session:relocate', (_event, value) => roomSessionStore.relocate(value));
+  ipcMain.handle('room-session:forget-server', (_event, value) => roomSessionStore.forgetServer(value));
+  ipcMain.handle('network:addresses', () => ({ port: signalingPort, addresses: networkAddresses() }));
 }
 
 function setupUpdater() {
-  ipcMain.handle('invite:url', (_event, roomId, currentSignal = '') => {
-    const signal = normalizeSignalOrigin(currentSignal) || `http://${preferredNetworkAddress()}:${signalingPort}`;
+  ipcMain.handle('invite:url', (_event, roomId, currentSignal = '', preferredAddress = '') => {
+    const signal = normalizeSignalOrigin(currentSignal) || `http://${preferredNetworkAddress(String(preferredAddress || ''))}:${signalingPort}`;
     return `jump://join?signal=${encodeURIComponent(signal)}&room=${encodeURIComponent(normalizeRoomId(roomId))}`;
   });
 
@@ -406,6 +416,28 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    const callBinds = new Map();
+    const lastBindAt = new Map();
+    ipcMain.handle('bind:set', (event, action, value) => {
+      if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false };
+      if (!['mute', 'deafen'].includes(action)) return { ok: false };
+      if (typeof value !== 'string' || (value && !/^(?:(?:Control|Alt|Shift|Super)\+)*(?:[A-Z0-9]|F(?:[1-9]|1[0-9]|2[0-4]))$/.test(value))) return { ok: false };
+      const previous = callBinds.get(action);
+      if (previous) globalShortcut.unregister(previous);
+      callBinds.delete(action);
+      if (!value) return { ok: true };
+      if ([...callBinds.values()].includes(value)) return { ok: false };
+      try {
+        const ok = globalShortcut.register(value, () => {
+          if (Date.now() - (lastBindAt.get(action) || 0) < 350) return;
+          lastBindAt.set(action, Date.now());
+          mainWindow?.webContents.send('bind:fired', action);
+        });
+        if (ok) callBinds.set(action, value);
+        return { ok };
+      } catch { return { ok: false }; }
+    });
+    app.on('will-quit', () => globalShortcut.unregisterAll());
     await initializeStreamDiagnosticsActivation();
     setupRoomSessionPersistence();
     setupUpdater();
