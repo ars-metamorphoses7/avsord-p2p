@@ -45,6 +45,11 @@ import { CallStreamCard } from './components/CallStreamCard.jsx';
 import { PaneResizeHandle } from './components/PaneResizeHandle.jsx';
 import { ParticipantVolumePopover } from './components/ParticipantVolumePopover.jsx';
 import { ScreenShareDialog } from './components/ScreenShareDialog.jsx';
+import { MusicBot } from './components/MusicBot.jsx';
+import { ServersDialog } from './components/ServersDialog.jsx';
+import { useCallBinds } from './hooks/useCallBinds.js';
+import { bindLabel, CALL_BIND_ACTIONS } from './media/muteBind.js';
+import { INVITE_ADDRESS_KEY, serverAddressLabel } from './network/serverDirectory.js';
 import { fieldDiagnosticsStatus, shouldShowFieldDiagnosticsIndicator } from './fieldRunDiagnostics.js';
 import { useScreenShare } from './hooks/useScreenShare.js';
 import { playTransmissionSound } from './media/callSounds.js';
@@ -73,6 +78,7 @@ const ATTACHMENT_STORE_NAME = 'message-attachments';
 const MESSAGE_DB_VERSION = 3;
 const ROOM_PASSWORDS_KEY = 'jump-room-passwords';
 const CLIENT_ID_KEY = 'jump-client-id';
+const OWNER_KEY = 'jump-owner-key';
 const CONTACTS_KEY = 'jump-contacts';
 const UNREAD_COUNTS_KEY = 'jump-unread-counts';
 const PROFILE_STATUS_KEY = 'jump-profile-status';
@@ -101,6 +107,8 @@ const WIN_ICONS = {
   app: winAppIcon,
 };
 let messageDbPromise;
+// Identity of the signaling server this window is connected to (from hello).
+let connectedServer = null;
 
 function normalizeSignalOrigin(value) {
   const clean = String(value || '').trim();
@@ -124,7 +132,7 @@ function roomLocation(roomId = '', signalOrigin = SIGNAL_ORIGIN) {
 
 function rememberVisitedRoom(roomId, roomName) {
   if (!roomId) return;
-  globalThis.jumpDesktop?.rememberRoomSession?.({ roomId, roomName, signal: SIGNAL_ORIGIN })
+  globalThis.jumpDesktop?.rememberRoomSession?.({ roomId, roomName, signal: SIGNAL_ORIGIN, serverId: connectedServer?.id, serverName: connectedServer?.name })
     .then((result) => {
       if (Array.isArray(result?.recent)) window.dispatchEvent(new CustomEvent('jump:room-sessions-changed', { detail: result.recent }));
     })
@@ -228,6 +236,22 @@ function forgetRoomPassword(roomId) {
     localStorage.setItem(ROOM_PASSWORDS_KEY, JSON.stringify(passwords));
   } catch {
     // Ignore storage failures; the access dialog can still be used again.
+  }
+}
+
+// Secret proof of room ownership. Unlike the client id it is never shared
+// with other participants; the server only keeps its hash.
+function getOwnerKey() {
+  try {
+    const stored = localStorage.getItem(OWNER_KEY);
+    if (stored && stored.length >= 16) return stored;
+    const bytes = new Uint8Array(24);
+    globalThis.crypto.getRandomValues(bytes);
+    const generated = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem(OWNER_KEY, generated);
+    return generated;
+  } catch {
+    return '';
   }
 }
 
@@ -1059,6 +1083,8 @@ function App() {
   const [isSharing, setIsSharing] = useState(false);
   const [screenShareProfileId, setScreenShareProfileId] = useState(() => normalizeScreenShareProfileId(localStorage.getItem(SCREEN_SHARE_PROFILE_KEY)));
   const [inCall, setInCall] = useState(false);
+  const [music, setMusic] = useState(null);
+  const [musicError, setMusicError] = useState('');
   const [callDurationSeconds, setCallDurationSeconds] = useState(0);
   const [audioInputDevices, setAudioInputDevices] = useState([]);
   const [audioOutputDevices, setAudioOutputDevices] = useState([]);
@@ -1080,6 +1106,11 @@ function App() {
   const [callChatSplit, setCallChatSplit] = useState(() => Math.max(25, Math.min(75, Number(localStorage.getItem(CALL_CHAT_SPLIT_KEY)) || 50)));
   const [roomProtected, setRoomProtected] = useState(false);
   const [roomCreatedAt, setRoomCreatedAt] = useState(0);
+  const [currentServer, setCurrentServer] = useState(null);
+  const [isServerAdmin, setIsServerAdmin] = useState(false);
+  const [roomCanManage, setRoomCanManage] = useState(false);
+  const [roomOwnerName, setRoomOwnerName] = useState('');
+  const [serversDialog, setServersDialog] = useState(null);
   const [editingRoomName, setEditingRoomName] = useState(false);
   const [roomNameDraft, setRoomNameDraft] = useState('');
   const [roomInfoOpen, setRoomInfoOpen] = useState(false);
@@ -1118,6 +1149,7 @@ function App() {
   const unreadCountsRef = useRef(unreadCounts);
   const directConversationRef = useRef('');
   const clientIdRef = useRef(getClientId());
+  const ownerKeyRef = useRef(getOwnerKey());
   const peerIdRef = useRef('');
   const roomIdRef = useRef(DEFAULT_ROOM_ID);
   const roomNameRef = useRef(prettyRoomName(DEFAULT_ROOM_ID));
@@ -1256,7 +1288,9 @@ function App() {
     const room = roomIdRef.current || DEFAULT_ROOM_ID;
     let invite = '';
     try {
-      invite = await globalThis.jumpDesktop?.getInviteUrl?.(room, SIGNAL_ORIGIN);
+      let preferredAddress = '';
+      try { preferredAddress = localStorage.getItem(INVITE_ADDRESS_KEY) || ''; } catch { /* Default address. */ }
+      invite = await globalThis.jumpDesktop?.getInviteUrl?.(room, SIGNAL_ORIGIN, preferredAddress);
     } catch {
       invite = '';
     }
@@ -2076,9 +2110,34 @@ function App() {
   });
 
   const handleSignalMessage = useCallback(async (message) => {
+    if (message.type === 'music-state' && message.roomId === roomIdRef.current) {
+      setMusic(message.music ? { ...message.music, serverNow: message.serverNow, receivedAt: Date.now(), roomId: message.roomId } : null);
+      setMusicError('');
+      return;
+    }
+    if (message.type === 'music-error' && message.roomId === roomIdRef.current) { setMusicError(message.message); return; }
     if (handleScreenSfuSignal(message)) return;
     if (message.type === 'hello') {
       peerIdRef.current = message.peerId;
+      connectedServer = message.server?.id ? { id: message.server.id, name: message.server.name || '' } : null;
+      setCurrentServer(connectedServer);
+      setIsServerAdmin(Boolean(message.isAdmin));
+      return;
+    }
+    if (message.type === 'room-permissions') {
+      if (message.roomId !== roomIdRef.current) return;
+      setRoomCanManage(Boolean(message.canManage));
+      setRoomOwnerName(message.ownerName || '');
+      return;
+    }
+    if (message.type === 'room-forbidden') {
+      setPermissionError(message.message || 'Você não tem permissão para alterar esta sala.');
+      if (message.roomId === roomIdRef.current && message.name) {
+        roomNameRef.current = message.name;
+        setRoomName(message.name);
+        setRoomNameDraft(message.name);
+        setRooms((current) => current.map((room) => room.id === message.roomId ? { ...room, name: message.name } : room));
+      }
       return;
     }
     if (message.type === 'rooms-state') {
@@ -2093,6 +2152,8 @@ function App() {
       return;
     }
     if (message.type === 'room-state') {
+      setMusic(message.music ? { ...message.music, serverNow: message.serverNow, receivedAt: Date.now(), roomId: message.roomId } : null);
+      setMusicError('');
       const nextPeers = Array.isArray(message.peers) ? message.peers : [];
       const screenSfuReset = resetScreenSfu();
       // A signaling reconnect gives this client a new peer id. Rebuild every
@@ -2106,6 +2167,9 @@ function App() {
       setRoomNameDraft(roomNameRef.current);
       setRoomProtected(Boolean(message.protected));
       setRoomCreatedAt(Number(message.createdAt) || 0);
+      // Older hosts send no permissions and still let everyone manage rooms.
+      setRoomCanManage(message.canManage !== false);
+      setRoomOwnerName(message.ownerName || '');
       rememberVisitedRoom(message.roomId, roomNameRef.current);
       setPeers(nextPeers);
       nextPeers.forEach((peer) => rememberContact(peer, { connected: true, status: peer.status || 'online' }));
@@ -2256,7 +2320,7 @@ function App() {
         wsRef.current = socket;
         socket.onopen = () => {
           setSignalStatus('connected');
-          if (roomIdRef.current) sendSignal({ type: 'join', roomId: roomIdRef.current, roomName: roomNameRef.current, password: roomPasswordRef.current, name: displayNameRef.current, avatar: profileAvatarRef.current, status: profileStatusRef.current, clientId: clientIdRef.current });
+          if (roomIdRef.current) sendSignal({ type: 'join', roomId: roomIdRef.current, roomName: roomNameRef.current, password: roomPasswordRef.current, name: displayNameRef.current, avatar: profileAvatarRef.current, status: profileStatusRef.current, clientId: clientIdRef.current, ownerKey: ownerKeyRef.current });
         };
         socket.onmessage = (event) => {
           try { handleSignalMessage(JSON.parse(event.data)); } catch { /* Ignore malformed packets. */ }
@@ -2531,7 +2595,7 @@ function App() {
     setRoomCreatedAt(0);
     void loadRoomMessages(normalizedId);
     window.history.replaceState({}, '', roomLocation(normalizedId));
-    sendSignal({ type: 'join', roomId: normalizedId, roomName: normalizedName, password: normalizedPassword, name: displayNameRef.current, avatar: profileAvatarRef.current, status: profileStatusRef.current, clientId: clientIdRef.current });
+    sendSignal({ type: 'join', roomId: normalizedId, roomName: normalizedName, password: normalizedPassword, name: displayNameRef.current, avatar: profileAvatarRef.current, status: profileStatusRef.current, clientId: clientIdRef.current, ownerKey: ownerKeyRef.current });
     setMobileSidebarOpen(false);
   }, [closeAllPeers, closeDirectChat, leaveCall, loadRoomMessages, markUnreadAsRead, sendSignal]);
 
@@ -2550,6 +2614,14 @@ function App() {
     setIsDeafened(nextDeafened);
     announceCallState({ deafened: nextDeafened });
   }, [announceCallState]);
+
+  const callBinds = useCallBinds({ mute: toggleMute, deafen: toggleDeafen }, inCallRef);
+  useEffect(() => { if (!appSettingsOpen) callBinds.setRecording(''); }, [appSettingsOpen]);
+  const sendMusic = command => {
+    const sent = sendSignal({ type: 'music-command', roomId: roomIdRef.current, ...command });
+    if (!sent) setMusicError('Sem conexão com a sala. Aguarde reconectar.');
+    return sent;
+  };
 
   const handleAudioInputChange = useCallback(async (event) => {
     const nextId = event.target.value;
@@ -2924,6 +2996,18 @@ function App() {
     sendSignal({ type: 'delete-room', roomId: roomIdRef.current });
   }, [sendSignal]);
 
+  const transferRoom = useCallback((targetPeerId) => {
+    const target = peersRef.current.find((peer) => peer.peerId === targetPeerId);
+    if (!target || !roomIdRef.current) return;
+    if (!window.confirm(`Passar a posse da sala "${roomNameRef.current}" para ${target.name}? Você deixa de poder renomeá-la ou excluí-la.`)) return;
+    sendSignal({ type: 'transfer-room', roomId: roomIdRef.current, target: targetPeerId });
+  }, [sendSignal]);
+
+  const openServerSignal = useCallback((signal) => {
+    const lastRoom = recentRoomSessions.find((session) => session.signal === signal)?.roomId;
+    window.location.assign(roomLocation(lastRoom || 'jump-house', signal));
+  }, [recentRoomSessions]);
+
   useEffect(() => {
     if (!pendingRoomFallback) return;
     const nextRoom = pendingRoomFallback;
@@ -3172,8 +3256,9 @@ function App() {
           <img src={winAppIcon} alt="JUMP" className="workspace-head-icon" draggable="false" />
           <div className="workspace-head-copy">
             <h1>JUMP NETWORK</h1>
-            <p className="eyebrow"><span className="network-status-light" /> rede em tempo real</p>
+            <p className="eyebrow"><span className="network-status-light" /> {currentServer?.name || 'rede em tempo real'} · {serverAddressLabel(SIGNAL_ORIGIN)}</p>
           </div>
+          <button type="button" className="servers-open-button" title="Servidores" aria-label="Servidores" onClick={() => setServersDialog({})}><WinIcon name="globe" size={20} /></button>
         </div>
         <div className="search-box" role="search">
           <label htmlFor="sidebar-search">Localizar:</label>
@@ -3369,6 +3454,7 @@ function App() {
                     {inCall ? <button type="button" className="leave-button" onClick={leaveCall}><WinIcon name="phone" size={23} /> sair</button> : <button type="button" className="join-call-button" onClick={startCall}><WinIcon name="phone" size={23} /> entrar na chamada</button>}
                   </div>
                 </div>
+                {inCall && signalStatus === 'connected' && <MusicBot key={roomId} music={music?.roomId === roomId ? music : null} error={musicError} deafened={isDeafened} send={sendMusic} />}
                 {showDeviceSettings && (
                   <div className="device-settings-popover" role="dialog" aria-labelledby="device-settings-title">
                     <div className="device-settings-titlebar">
@@ -3400,7 +3486,13 @@ function App() {
 
               {callPanelOpen && chatVisible && <PaneResizeHandle value={callChatSplit} onChange={updateCallChatSplit} />}
 
-              {(permissionError || signalStatus !== 'connected') && <div className={`notice-bar ${permissionError ? 'is-warning' : ''}`}><span>{permissionError || 'Sinalização offline: peers conectados continuam conversando; novas entradas precisam do servidor.'}</span><IconButton label="Fechar aviso" className="notice-close-button win98-close-control" onClick={() => setPermissionError('')}><X size={15} /></IconButton></div>}
+              {(permissionError || signalStatus !== 'connected') && <div className={`notice-bar ${permissionError ? 'is-warning' : ''}`}><span>{permissionError || (SIGNAL_ORIGIN && signalStatus === 'offline'
+                ? `O servidor ${serverAddressLabel(SIGNAL_ORIGIN)} não responde. Se o IP do host mudou (Radmin novo, PC formatado), atualize o endereço.`
+                : 'Sinalização offline: peers conectados continuam conversando; novas entradas precisam do servidor.')}</span>
+              {!permissionError && SIGNAL_ORIGIN && signalStatus === 'offline' && <span className="notice-actions">
+                <button type="button" onClick={() => setServersDialog({ edit: { serverId: recentRoomSessions.find((session) => session.signal === SIGNAL_ORIGIN && session.serverId)?.serverId || '', serverName: recentRoomSessions.find((session) => session.signal === SIGNAL_ORIGIN)?.serverName || '', signal: SIGNAL_ORIGIN } })}>Alterar endereço…</button>
+                <button type="button" onClick={() => openServerSignal('')}>Usar este PC</button>
+              </span>}<IconButton label="Fechar aviso" className="notice-close-button win98-close-control" onClick={() => setPermissionError('')}><X size={15} /></IconButton></div>}
 
               {chatVisible && <section className="chat-card">
                 <div className="chat-head">
@@ -3417,7 +3509,7 @@ function App() {
                         <button type="button" className="win98-close-control" aria-label="Cancelar edição" title="Cancelar" onClick={cancelRoomNameEdit}><X size={13} /></button>
                       </form>
                     ) : (
-                      <div className="room-name-heading"><h3>{roomName}</h3><IconButton label="Editar nome da sala" className="room-edit-button" onClick={beginRoomNameEdit}><WinIcon name="pencil" size={25} /></IconButton></div>
+                      <div className="room-name-heading"><h3>{roomName}</h3>{roomCanManage && <IconButton label="Editar nome da sala" className="room-edit-button" onClick={beginRoomNameEdit}><WinIcon name="pencil" size={25} /></IconButton>}</div>
                     )}
                   </div>
                   <div className="chat-head-actions">
@@ -3426,7 +3518,7 @@ function App() {
                     ) : (
                       <>
                         <IconButton label="Informações da sala" className={roomInfoOpen ? 'is-active' : ''} active={roomInfoOpen} onClick={() => { setRoomInfoOpen((value) => !value); setEditingRoomName(false); }}><Info size={16} /></IconButton>
-                        <IconButton label="Excluir sala" className="room-delete-button win98-close-control win98-close-control--danger" onClick={deleteRoom}><X size={16} /></IconButton>
+                        {roomCanManage && <IconButton label="Excluir sala" className="room-delete-button win98-close-control win98-close-control--danger" onClick={deleteRoom}><X size={16} /></IconButton>}
                       </>
                     )}
                   </div>
@@ -3446,7 +3538,19 @@ function App() {
                             <div><dt>criada em</dt><dd>{infoCreatedLabel}</dd></div>
                             <div><dt>membros</dt><dd>{infoMemberCount}</dd></div>
                             <div><dt>mensagens</dt><dd>{infoMessageCount}</dd></div>
+                            <div><dt>dono</dt><dd>{roomOwnerName || 'host do servidor'}</dd></div>
+                            <div><dt>servidor</dt><dd>{currentServer?.name || 'desconhecido'} ({serverAddressLabel(SIGNAL_ORIGIN)})</dd></div>
+                            <div><dt>você</dt><dd>{isServerAdmin ? 'host (administra tudo)' : roomCanManage ? 'pode gerenciar' : 'participante'}</dd></div>
                           </dl>
+                          {roomCanManage && peers.length > 0 && (
+                            <label className="room-transfer">
+                              <span>Passar posse para:</span>
+                              <select value="" onChange={(event) => { if (event.target.value) transferRoom(event.target.value); }}>
+                                <option value="">escolha…</option>
+                                {peers.map((peer) => <option key={peer.peerId} value={peer.peerId}>{peer.name}</option>)}
+                              </select>
+                            </label>
+                          )}
                         </div>
                       </div>
                       <div className="room-info-actions"><button type="button" className="room-info-ok" onClick={() => setRoomInfoOpen(false)}>OK</button></div>
@@ -3574,6 +3678,18 @@ function App() {
         </div>
       )}
 
+      {serversDialog && (
+        <ServersDialog
+          sessions={recentRoomSessions}
+          currentSignal={SIGNAL_ORIGIN}
+          currentServer={currentServer}
+          isAdmin={isServerAdmin}
+          initialEdit={serversDialog.edit}
+          onNavigate={openServerSignal}
+          onClose={() => setServersDialog(null)}
+        />
+      )}
+
       {appSettingsOpen && (
         <div className="app-settings-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAppSettingsOpen(false); }}>
           <section className="app-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -3582,6 +3698,22 @@ function App() {
               <button type="button" className="win98-close-control" aria-label="Fechar configurações" onClick={() => setAppSettingsOpen(false)}>×</button>
             </div>
             <div className="app-settings-body">
+              <section className="field-diagnostics-settings screen-playback-settings mute-bind-settings" aria-labelledby="mute-bind-title">
+                <h3 id="mute-bind-title">Atalhos da chamada</h3>
+                <p>Funcionam durante a chamada. No desktop também com o JUMP em segundo plano; no navegador, com o JUMP em foco.</p>
+                {Object.entries(CALL_BIND_ACTIONS).map(([action, { label }]) => (
+                  <div className="call-bind-row" key={action}>
+                    <span className="call-bind-label">{label}</span>
+                    <div className="music-row">
+                      <button type="button" className="dialog-secondary call-bind-record" aria-label={`Gravar atalho: ${label}`} onClick={() => callBinds.setRecording(callBinds.recording === action ? '' : action)}>{callBinds.recording === action ? 'Pressione a combinação… (Esc cancela)' : bindLabel(callBinds.binds[action])}</button>
+                      <button type="button" className="dialog-secondary" onClick={() => callBinds.reset(action)}>Padrão</button>
+                      <button type="button" className="dialog-secondary" onClick={() => callBinds.disable(action)}>Desativar</button>
+                    </div>
+                    {callBinds.errors[action] && <p role="alert">{callBinds.errors[action]}</p>}
+                  </div>
+                ))}
+                <p>Use Ctrl, Alt ou Windows com uma letra/número, ou uma tecla F1–F24.</p>
+              </section>
               <section className="app-update-settings" aria-labelledby="app-update-settings-title">
                 <div><h3 id="app-update-settings-title">Atualizações</h3><p>Verifique e instale a versão oficial mais recente do JUMP.</p></div>
                 <button type="button" className="dialog-secondary" disabled={isDevelopmentDesktopBuild || updateBusy} onClick={() => { setAppSettingsOpen(false); void handleUpdate(); }}>Verificar atualização</button>

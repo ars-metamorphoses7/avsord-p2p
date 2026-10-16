@@ -37,6 +37,11 @@ function normalizeSignalOrigin(value) {
   }
 }
 
+function normalizeServerId(value) {
+  const clean = String(value || '').trim().toLowerCase();
+  return /^[a-z0-9-]{8,64}$/.test(clean) ? clean : '';
+}
+
 function normalizeRoomSession(value, now = Date.now()) {
   if (!value || typeof value !== 'object') return null;
   const rawSignal = String(value.signal ?? value.signalOrigin ?? '').trim();
@@ -44,11 +49,15 @@ function normalizeRoomSession(value, now = Date.now()) {
   if (rawSignal && !signal) return null;
   const roomId = normalizeRoomId(value.roomId ?? value.room);
   const lastVisitedAt = Number(value.lastVisitedAt);
+  const serverId = normalizeServerId(value.serverId);
+  const serverName = String(value.serverName || '').replace(/s+/g, ' ').trim().slice(0, 48);
   return {
     roomId,
     roomName: normalizeRoomName(value.roomName ?? value.name, roomId),
     signal,
     lastVisitedAt: Number.isFinite(lastVisitedAt) && lastVisitedAt > 0 ? lastVisitedAt : now,
+    ...(serverId ? { serverId } : {}),
+    ...(serverName ? { serverName } : {}),
   };
 }
 
@@ -131,7 +140,39 @@ function createRoomSessionStore({ filePath, maxRecent = DEFAULT_MAX_RECENT, now 
     return { ok: true, active: next.active, recent: next.recent };
   }
 
+  // A host whose address changed (new Radmin IP, reset PC) keeps its server
+  // id. Every saved room of that server moves to the new address at once.
+  function relocate(value) {
+    const serverId = normalizeServerId(value?.serverId);
+    const fromSignal = normalizeSignalOrigin(value?.fromSignal);
+    const rawSignal = String(value?.signal || '').trim();
+    const signal = normalizeSignalOrigin(rawSignal);
+    if ((!serverId && !fromSignal) || (rawSignal && !signal)) return { ok: false, recent: read().recent };
+    const state = read();
+    const matches = (entry) => (serverId && entry.serverId === serverId) || (fromSignal && entry.signal === fromSignal);
+    const move = (entry) => (entry && matches(entry) ? { ...entry, signal, serverId: entry.serverId || serverId } : entry);
+    const next = write({ version: STORE_VERSION, active: move(state.active), recent: state.recent.map(move) });
+    return { ok: true, active: next.active, recent: next.recent };
+  }
+
+  function forgetServer(value) {
+    const serverId = normalizeServerId(value?.serverId);
+    const rawSignal = String(value?.signal ?? '').trim();
+    const signal = normalizeSignalOrigin(rawSignal);
+    const state = read();
+    const matches = (entry) => (serverId ? entry.serverId === serverId : entry.signal === signal);
+    if (!serverId && rawSignal && !signal) return { ok: false, recent: state.recent };
+    const next = write({
+      version: STORE_VERSION,
+      active: state.active && matches(state.active) ? null : state.active,
+      recent: state.recent.filter((entry) => !matches(entry)),
+    });
+    return { ok: true, active: next.active, recent: next.recent };
+  }
+
   return {
+    relocate,
+    forgetServer,
     getActive: () => read().active,
     listRecent: () => read().recent,
     remember,

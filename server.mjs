@@ -1,15 +1,21 @@
 import http from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { hostname, networkInterfaces } from 'node:os';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { createScreenSfu } from './sfu-server.mjs';
+import { musicCommand } from './music-room.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const distRoot = join(root, 'dist');
 const roomDataRoot = process.env.JUMP_DATA_DIR || join(root, '.jump-data');
 const roomDataFile = join(roomDataRoot, 'rooms.json');
+const serverIdentityFile = join(roomDataRoot, 'server.json');
+// Conexões vindas do próprio PC que hospeda o servidor administram todas as
+// salas. JUMP_LOCAL_ADMIN=0 desliga isso (usado pelos testes).
+const localAdminEnabled = process.env.JUMP_LOCAL_ADMIN !== '0';
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || '0.0.0.0';
 const DEFAULT_ROOM_ID = 'jump-house';
@@ -49,6 +55,44 @@ function passwordMatches(expectedHash, value) {
   return candidate.length === expected.length && timingSafeEqual(candidate, expected);
 }
 
+function ownerHash(value) {
+  const key = String(value || '').trim();
+  return key.length >= 16 && key.length <= 128 ? createHash('sha256').update(`jump-owner:${key}`).digest('hex') : '';
+}
+
+function isLocalAddress(address) {
+  const clean = String(address || '').replace(/^::ffff:/, '');
+  if (!clean) return false;
+  if (clean === '::1' || clean.startsWith('127.')) return true;
+  return Object.values(networkInterfaces()).flat().some((entry) => entry?.address === clean);
+}
+
+// The server id survives IP changes (Radmin, Wi-Fi, reinstall of the VPN), so
+// clients can recognize the same host at a new address.
+function loadServerIdentity() {
+  const name = cleanText(hostname(), 48) || 'JUMP';
+  try {
+    const saved = JSON.parse(readFileSync(serverIdentityFile, 'utf8'));
+    if (typeof saved?.id === 'string' && /^[a-z0-9-]{8,64}$/.test(saved.id)) return { id: saved.id, name };
+  } catch { /* Generated below. */ }
+  const id = randomUUID();
+  try {
+    mkdirSync(roomDataRoot, { recursive: true });
+    writeFileSync(serverIdentityFile, JSON.stringify({ version: 1, id }, null, 2), 'utf8');
+  } catch (error) {
+    console.error(`JUMP could not persist server identity at ${serverIdentityFile}:`, error);
+  }
+  return { id, name };
+}
+
+function canManageRoom(socket, room) {
+  return Boolean(socket.isAdmin || (room?.ownerHash && room.ownerHash === socket.ownerHash));
+}
+
+function roomPermissions(socket, room) {
+  return { isAdmin: Boolean(socket.isAdmin), canManage: canManageRoom(socket, room), ownerName: room.ownerName || '' };
+}
+
 function cleanAvatar(value) {
   const avatar = String(value || '');
   return avatar.startsWith('data:image/') ? avatar.slice(0, 180000) : '';
@@ -75,6 +119,8 @@ function createDefaultRoom() {
     passwordHash: '',
     createdAt: Date.now(),
     createdBy: 'JUMP',
+    ownerHash: '',
+    ownerName: '',
   };
 }
 
@@ -92,6 +138,8 @@ function persistedRoom(value) {
     passwordHash: password,
     createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
     createdBy: cleanText(value?.createdBy, 32) || 'JUMP',
+    ownerHash: typeof value?.ownerHash === 'string' && /^[a-f0-9]{64}$/.test(value.ownerHash) ? value.ownerHash : '',
+    ownerName: cleanText(value?.ownerName, 32),
   };
 }
 
@@ -104,6 +152,8 @@ function roomPersistenceData() {
       passwordHash: room.passwordHash || '',
       createdAt: room.createdAt,
       createdBy: room.createdBy,
+      ownerHash: room.ownerHash || '',
+      ownerName: room.ownerName || '',
     })),
   };
 }
@@ -179,6 +229,7 @@ function leaveRoom(socket) {
   if (!room) return;
   screenSfu.closeSocket(socket);
   room.members.delete(socket.peerId);
+  if (!room.members.size) room.music = null;
   broadcast(room, { type: 'peer-left', roomId: room.id, peerId: socket.peerId, count: room.members.size });
   // Salas criadas continuam disponíveis no diretório mesmo quando ficam vazias.
   // Os membros são temporários, mas os metadados das salas ficam persistidos.
@@ -206,10 +257,12 @@ function serveStatic(request, response) {
   response.end(readFileSync(filePath));
 }
 
+const serverIdentity = loadServerIdentity();
+
 const server = http.createServer((request, response) => {
   if (request.url === '/health') {
-    response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    response.end(JSON.stringify({ ok: true, rooms: rooms.size, sockets: sockets.size }));
+    response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' });
+    response.end(JSON.stringify({ ok: true, serverId: serverIdentity.id, serverName: serverIdentity.name, rooms: rooms.size, sockets: sockets.size }));
     return;
   }
   serveStatic(request, response);
@@ -219,14 +272,16 @@ const wss = new WebSocketServer({ server, path: '/signal' });
 
 loadRooms();
 
-wss.on('connection', (socket) => {
+wss.on('connection', (socket, request) => {
   socket.peerId = randomUUID().slice(0, 8);
+  socket.isAdmin = localAdminEnabled && isLocalAddress(request?.socket?.remoteAddress);
+  socket.ownerHash = '';
   socket.clientId = '';
   socket.name = 'Você';
   socket.avatar = '';
   socket.status = 'online';
   sockets.add(socket);
-  send(socket, { type: 'hello', peerId: socket.peerId });
+  send(socket, { type: 'hello', peerId: socket.peerId, server: { id: serverIdentity.id, name: serverIdentity.name }, isAdmin: socket.isAdmin });
   send(socket, { type: 'rooms-state', rooms: roomList() });
 
   socket.on('message', (raw) => {
@@ -242,6 +297,16 @@ wss.on('connection', (socket) => {
       return;
     }
 
+    if (message.type === 'music-command' && socket.roomId) {
+      const room = rooms.get(socket.roomId);
+      if (!room || message.roomId !== room.id) return;
+      try {
+        room.music = musicCommand(room.music, message);
+        broadcast(room, { type: 'music-state', roomId: room.id, music: room.music, serverNow: Date.now() });
+      } catch (error) { send(socket, { type: 'music-error', roomId: room.id, message: error.message }); }
+      return;
+    }
+
     if (message.type === 'join') {
       const roomId = cleanText(message.roomId || 'jump-house', 64).toLowerCase().replace(/[^a-z0-9-_]/g, '-') || 'jump-house';
       const name = cleanText(message.name, 32) || 'Você';
@@ -251,6 +316,7 @@ wss.on('connection', (socket) => {
       const requestedLabel = cleanText(message.roomName, 48);
       const requestedPassword = cleanPassword(message.password);
       const existingRoom = rooms.get(roomId);
+      socket.ownerHash = ownerHash(message.ownerKey) || socket.ownerHash;
 
       if (existingRoom?.passwordHash && !passwordMatches(existingRoom.passwordHash, requestedPassword)) {
         send(socket, {
@@ -274,11 +340,14 @@ wss.on('connection', (socket) => {
         socket.joinedAt = socket.joinedAt || Date.now();
         send(socket, {
           type: 'room-state',
+          music: room.music || null,
+          serverNow: Date.now(),
           roomId,
           name: room.name,
           protected: Boolean(room.passwordHash),
           createdAt: room.createdAt,
           createdBy: room.createdBy,
+          ...roomPermissions(socket, room),
           joinedAt: socket.joinedAt,
           clientId: socket.clientId,
           peerId: socket.peerId,
@@ -299,6 +368,8 @@ wss.on('connection', (socket) => {
         passwordHash: requestedPassword ? passwordHash(requestedPassword) : '',
         createdAt: Date.now(),
         createdBy: name,
+        ownerHash: socket.ownerHash,
+        ownerName: socket.ownerHash ? name : '',
       };
       if (!existingRoom && requestedLabel) room.name = requestedLabel;
       if (!room.createdAt) room.createdAt = Date.now();
@@ -315,11 +386,14 @@ wss.on('connection', (socket) => {
 
       send(socket, {
         type: 'room-state',
+        music: room.music || null,
+        serverNow: Date.now(),
         roomId,
         name: room.name,
         protected: Boolean(room.passwordHash),
         createdAt: room.createdAt,
         createdBy: room.createdBy,
+        ...roomPermissions(socket, room),
         joinedAt: socket.joinedAt,
         clientId: socket.clientId,
         peerId: socket.peerId,
@@ -343,6 +417,10 @@ wss.on('connection', (socket) => {
       const room = rooms.get(socket.roomId);
       const name = cleanText(message.name, 48);
       if (!room || message.roomId !== room.id || !name) return;
+      if (!canManageRoom(socket, room)) {
+        send(socket, { type: 'room-forbidden', roomId: room.id, name: room.name, message: 'Só o dono da sala ou o host do servidor pode renomeá-la.' });
+        return;
+      }
       room.name = name;
       persistRooms();
       broadcast(room, { type: 'room-renamed', roomId: room.id, name: room.name });
@@ -354,6 +432,10 @@ wss.on('connection', (socket) => {
     if (message.type === 'delete-room' && socket.roomId) {
       const room = rooms.get(socket.roomId);
       if (!room || message.roomId !== room.id) return;
+      if (!canManageRoom(socket, room)) {
+        send(socket, { type: 'room-forbidden', roomId: room.id, name: room.name, message: 'Só o dono da sala ou o host do servidor pode excluí-la.' });
+        return;
+      }
       const roomId = room.id;
       const roomName = room.name;
       const members = [...room.members.values()];
@@ -373,6 +455,21 @@ wss.on('connection', (socket) => {
       });
       room.members.clear();
       broadcastRooms();
+      return;
+    }
+
+    if (message.type === 'transfer-room' && socket.roomId) {
+      const room = rooms.get(socket.roomId);
+      if (!room || message.roomId !== room.id) return;
+      const target = room.members.get(message.target);
+      if (!canManageRoom(socket, room) || !target?.ownerHash) {
+        send(socket, { type: 'room-forbidden', roomId: room.id, name: room.name, message: 'Não foi possível transferir a sala para esse participante.' });
+        return;
+      }
+      room.ownerHash = target.ownerHash;
+      room.ownerName = target.name;
+      persistRooms();
+      for (const member of room.members.values()) send(member, { type: 'room-permissions', roomId: room.id, ...roomPermissions(member, room) });
       return;
     }
 

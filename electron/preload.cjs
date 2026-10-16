@@ -22,6 +22,12 @@ if (nativeCaptureSupported) {
 
 contextBridge.exposeInMainWorld('jumpDesktop', {
   isDesktop: true,
+  setCallBind: (action, value) => ipcRenderer.invoke('bind:set', action, value),
+  onCallBind: (callback) => {
+    const listener = (_event, action) => callback(action);
+    ipcRenderer.on('bind:fired', listener);
+    return () => ipcRenderer.removeListener('bind:fired', listener);
+  },
   streamDiagnosticsEnabled: String(process.env.JUMP_STREAM_DIAGNOSTICS || '').trim() === '1',
   // electron . (desenvolvimento) define defaultApp; no pacote distribuído ele é falso.
   isPackaged: !process.defaultApp,
@@ -58,7 +64,10 @@ contextBridge.exposeInMainWorld('jumpDesktop', {
     ipcRenderer.on('window:state', listener);
     return () => ipcRenderer.removeListener('window:state', listener);
   },
-  getInviteUrl: (roomId, signalOrigin = '') => ipcRenderer.invoke('invite:url', roomId, signalOrigin),
+  getInviteUrl: (roomId, signalOrigin = '', preferredAddress = '') => ipcRenderer.invoke('invite:url', roomId, signalOrigin, preferredAddress),
+  getNetworkAddresses: () => ipcRenderer.invoke('network:addresses'),
+  relocateServer: (value) => ipcRenderer.invoke('room-session:relocate', value),
+  forgetServer: (value) => ipcRenderer.invoke('room-session:forget-server', value),
   rememberRoomSession: (session) => ipcRenderer.invoke('room-session:remember', session),
   forgetRoomSession: (session) => ipcRenderer.invoke('room-session:forget', session),
   getRecentRoomSessions: () => ipcRenderer.invoke('room-session:list'),
