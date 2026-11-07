@@ -1,17 +1,47 @@
 import { useEffect, useRef, useState } from 'react';
 
-let apiPromise;
-function loadYouTube() {
-  if (window.YT?.Player) return Promise.resolve(window.YT);
-  if (!apiPromise) apiPromise = new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    const timer = setTimeout(() => { script.remove(); apiPromise = null; reject(new Error('O YouTube não respondeu. Tente novamente.')); }, 15000);
-    window.onYouTubeIframeAPIReady = () => { clearTimeout(timer); resolve(window.YT); };
-    script.src = 'https://www.youtube.com/iframe_api';
-    script.onerror = () => { clearTimeout(timer); script.remove(); apiPromise = null; reject(new Error('Não foi possível carregar o YouTube.')); };
-    document.head.appendChild(script);
-  });
-  return apiPromise;
+// YouTube blocks most embeds (error 150) on pages served from an IP address,
+// and the JUMP window runs on 127.0.0.1. The player therefore lives in
+// public/youtube-player.html, framed from "localhost", and is driven over
+// postMessage through this small proxy with the YT.Player method names.
+function playerOrigin() {
+  const { protocol, hostname, port, origin } = window.location;
+  const ipHost = /^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.includes(':') || hostname.startsWith('[');
+  return ipHost ? `${protocol}//localhost${port ? `:${port}` : ''}` : origin;
+}
+
+function createPlayer(container, events) {
+  const origin = playerOrigin();
+  const frame = document.createElement('iframe');
+  frame.src = `${origin}/youtube-player.html`;
+  frame.title = 'Player do YouTube';
+  frame.allow = 'autoplay; encrypted-media; picture-in-picture';
+  frame.style.cssText = 'width:100%;height:200px;border:0;display:block';
+  let currentTime = 0;
+  let loaded = false;
+  const timer = setTimeout(() => { if (!loaded) events.onLoadError?.('O YouTube não respondeu. Tente novamente.'); }, 20000);
+  const onMessage = event => {
+    if (event.source !== frame.contentWindow || event.origin !== origin || !event.data?.jumpYouTube) return;
+    const { type, value } = event.data;
+    if (type === 'time') currentTime = Number(value) || 0;
+    else if (type === 'ready') { loaded = true; clearTimeout(timer); events.onReady?.(); }
+    else if (type === 'state') events.onStateChange?.({ data: value });
+    else if (type === 'error') events.onError?.({ data: value });
+    else if (type === 'autoplayBlocked') events.onAutoplayBlocked?.();
+    else if (type === 'loadError') { clearTimeout(timer); events.onLoadError?.('Não foi possível carregar o YouTube.'); }
+  };
+  window.addEventListener('message', onMessage);
+  container.appendChild(frame);
+  const call = method => (...args) => frame.contentWindow?.postMessage({ jumpYouTube: true, method, args }, origin);
+  return {
+    setVolume: call('setVolume'), mute: call('mute'), unMute: call('unMute'),
+    loadVideoById: (options) => { currentTime = options.startSeconds || 0; call('loadVideoById')(options); },
+    cueVideoById: (options) => { currentTime = options.startSeconds || 0; call('cueVideoById')(options); },
+    seekTo: (seconds, allowSeekAhead) => { currentTime = seconds; call('seekTo')(seconds, allowSeekAhead); },
+    playVideo: call('playVideo'), pauseVideo: call('pauseVideo'),
+    getCurrentTime: () => currentTime,
+    destroy: () => { clearTimeout(timer); window.removeEventListener('message', onMessage); frame.remove(); },
+  };
 }
 
 export function MusicBot({ music, deafened, send, error, withoutJukebox = [] }) {
@@ -50,25 +80,17 @@ export function MusicBot({ music, deafened, send, error, withoutJukebox = [] }) 
       if (state.playing) p.playVideo(); else p.pauseVideo();
     };
     syncNow.current = synchronize;
-    loadYouTube().then(YT => {
-      if (disposed) return;
-      const element = document.createElement('div');
-      host.current.appendChild(element);
-      player.current = new YT.Player(element, {
-        width: '100%', height: '200',
-        playerVars: { origin: window.location.origin, playsinline: 1 },
-        events: {
-          onReady: () => { ready = true; synchronize(); },
-          onAutoplayBlocked: () => setPlayerError('Clique no play do vídeo para ativar o áudio neste computador.'),
-          onError: event => setPlayerError(`YouTube indisponível para este vídeo (erro ${event.data}). Você pode pular para o próximo.`),
-          onStateChange: event => {
-            if (event.data === 0 && loadedKey === latest.current.music?.queue?.[0]?.key) latest.current.send({ action: 'ended', key: loadedKey });
-            setPlayerState(event.data);
-            if (event.data === 1) setPlayerError('');
-          },
-        },
-      });
-    }).catch(reason => { if (!disposed) setPlayerError(reason.message); });
+    player.current = createPlayer(host.current, {
+      onReady: () => { ready = true; synchronize(); },
+      onLoadError: message => { if (!disposed) setPlayerError(message); },
+      onAutoplayBlocked: () => setPlayerError('Clique no play do vídeo para ativar o áudio neste computador.'),
+      onError: event => setPlayerError(`YouTube indisponível para este vídeo (erro ${event.data}). Você pode pular para o próximo.`),
+      onStateChange: event => {
+        if (event.data === 0 && loadedKey === latest.current.music?.queue?.[0]?.key) latest.current.send({ action: 'ended', key: loadedKey });
+        setPlayerState(event.data);
+        if (event.data === 1) setPlayerError('');
+      },
+    });
     const timer = setInterval(synchronize, 2000);
     return () => { disposed = true; syncNow.current = () => {}; clearInterval(timer); player.current?.destroy(); player.current = null; };
   }, [Boolean(track), retry]);

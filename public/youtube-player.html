@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>JUMP Jukebox player</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#player{width:100%;height:100%}</style>
+</head>
+<body>
+<div id="player"></div>
+<script>
+// YouTube refuses to embed most videos (error 150) when the embedding page
+// is served from an IP address such as 127.0.0.1, which is where the JUMP
+// window lives. The app frames this page from "localhost" instead and drives
+// the player through postMessage.
+(() => {
+  const parentWindow = window.parent;
+  const post = message => parentWindow.postMessage({ jumpYouTube: true, ...message }, '*');
+  let player = null;
+  const queued = [];
+  const methods = new Set(['setVolume', 'mute', 'unMute', 'loadVideoById', 'cueVideoById', 'seekTo', 'playVideo', 'pauseVideo']);
+  const run = ({ method, args }) => { if (methods.has(method) && typeof player?.[method] === 'function') player[method](...(Array.isArray(args) ? args : [])); };
+  window.addEventListener('message', event => {
+    if (event.source !== parentWindow || !event.data?.jumpYouTube || typeof event.data.method !== 'string') return;
+    if (player) run(event.data); else queued.push(event.data);
+  });
+  const report = () => { if (typeof player?.getCurrentTime === 'function') post({ type: 'time', value: player.getCurrentTime() || 0 }); };
+  window.onYouTubeIframeAPIReady = () => {
+    const ready = new YT.Player('player', {
+      width: '100%', height: '100%',
+      playerVars: { origin: window.location.origin, playsinline: 1 },
+      events: {
+        onReady: () => { player = ready; queued.splice(0).forEach(run); setInterval(report, 500); post({ type: 'ready' }); },
+        onAutoplayBlocked: () => post({ type: 'autoplayBlocked' }),
+        onError: event => post({ type: 'error', value: event.data }),
+        onStateChange: event => { report(); post({ type: 'state', value: event.data }); },
+      },
+    });
+  };
+  const script = document.createElement('script');
+  script.src = 'https://www.youtube.com/iframe_api';
+  script.onerror = () => post({ type: 'loadError' });
+  document.head.appendChild(script);
+})();
+</script>
+</body>
+</html>
