@@ -1,5 +1,5 @@
-import { EyeOff, Play } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { PixelIcon } from './Win98Icons.jsx';
 import { startVideoFrameCollector } from '../media/videoFrameCollector.js';
 
 const MIN_STREAM_ZOOM = 1;
@@ -95,16 +95,67 @@ export function CallStreamCard({
   // their own 1080p60 feed on top of a game (one click enables it anytime).
   const [localPreviewEnabled, setLocalPreviewEnabled] = useState(false);
   const showPausedPreview = isSelf && isSharing && !localPreviewEnabled;
+  const showsLiveVideo = Boolean(hasVideo && !showPausedShare && !showPausedPreview);
   const [streamZoom, setStreamZoom] = useState({ scale: MIN_STREAM_ZOOM, originX: 50, originY: 50 });
+  const viewportRef = useRef(null);
+  const hudTimerRef = useRef(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [hudVisible, setHudVisible] = useState(true);
 
   useEffect(() => {
-    if (!isFocused || !isSharing || !hasVideo || showPausedShare) {
+    const syncFullscreen = () => {
+      const active = document.fullscreenElement === viewportRef.current;
+      setIsFullscreen(active);
+      if (active) setHudVisible(true);
+    };
+    document.addEventListener('fullscreenchange', syncFullscreen);
+    return () => document.removeEventListener('fullscreenchange', syncFullscreen);
+  }, []);
+
+  useEffect(() => {
+    if (isFullscreen && !showsLiveVideo) {
+      document.exitFullscreen?.().catch(() => {});
+    }
+  }, [isFullscreen, showsLiveVideo]);
+
+  useEffect(() => {
+    if (!isFullscreen) {
+      if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+      setHudVisible(true);
+      return undefined;
+    }
+    hudTimerRef.current = setTimeout(() => setHudVisible(false), 2200);
+    return () => {
+      if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+    };
+  }, [isFullscreen]);
+
+  const revealFullscreenHud = useCallback(() => {
+    if (!isFullscreen) return;
+    setHudVisible(true);
+    if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+    hudTimerRef.current = setTimeout(() => setHudVisible(false), 2200);
+  }, [isFullscreen]);
+
+  const toggleBorderlessFullscreen = useCallback((event) => {
+    event?.stopPropagation?.();
+    const target = viewportRef.current;
+    if (!target) return;
+    if (document.fullscreenElement === target) {
+      document.exitFullscreen?.().catch(() => {});
+      return;
+    }
+    target.requestFullscreen?.().catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if ((!isFocused && !isFullscreen) || !isSharing || !showsLiveVideo) {
       setStreamZoom({ scale: MIN_STREAM_ZOOM, originX: 50, originY: 50 });
     }
-  }, [hasVideo, isFocused, isSharing, showPausedShare]);
+  }, [isFocused, isFullscreen, isSharing, showsLiveVideo]);
 
   const changeStreamZoom = useCallback((event) => {
-    if (!isFocused || !isSharing || !hasVideo || showPausedShare || !event.deltaY) return;
+    if ((!isFocused && !isFullscreen) || !isSharing || !showsLiveVideo || !event.deltaY) return;
     event.preventDefault();
     const bounds = event.currentTarget.getBoundingClientRect();
     const originX = bounds.width > 0 ? Math.max(0, Math.min(100, ((event.clientX - bounds.left) / bounds.width) * 100)) : 50;
@@ -116,20 +167,35 @@ export function CallStreamCard({
         ? { scale, originX: 50, originY: 50 }
         : { scale, originX, originY };
     });
-  }, [hasVideo, isFocused, isSharing, showPausedShare]);
+  }, [isFocused, isFullscreen, isSharing, showsLiveVideo]);
+
+  const handleViewportDoubleClick = useCallback((event) => {
+    if (isFullscreen) {
+      event.stopPropagation();
+      document.exitFullscreen?.().catch(() => {});
+      return;
+    }
+    onDoubleClick?.(event);
+  }, [isFullscreen, onDoubleClick]);
 
   return (
     <article
-      className={`call-stream-card ${isSelf ? 'is-self' : ''} ${isFocused ? 'is-focused' : ''} ${showPausedShare ? 'is-paused' : ''}`}
+      className={`call-stream-card ${isSelf ? 'is-self' : ''} ${isFocused ? 'is-focused' : ''} ${showPausedShare ? 'is-paused' : ''} ${showsLiveVideo ? 'has-video' : 'is-audio-only'}`}
       onContextMenu={onContextMenu}
     >
       <div
-        className={`call-stream-viewport ${hasVideo && isSpeaking ? 'is-speaking' : ''}`}
-        onDoubleClick={onDoubleClick}
+        ref={viewportRef}
+        className={`call-stream-viewport ${hasVideo && isSpeaking ? 'is-speaking' : ''} ${isFullscreen ? 'is-borderless-fullscreen' : ''} ${isFullscreen && !hudVisible ? 'is-hud-idle' : ''}`}
+        onDoubleClick={handleViewportDoubleClick}
         onWheel={changeStreamZoom}
-        title={isFocused && isSharing ? 'use a roda do mouse para aplicar zoom · clique duas vezes para restaurar' : 'clique duas vezes para maximizar/restaurar'}
+        onMouseMove={revealFullscreenHud}
+        title={isFullscreen
+          ? 'use a roda do mouse para aplicar zoom · Esc ou clique duas vezes para sair da tela cheia'
+          : isFocused && isSharing
+            ? 'use a roda do mouse para aplicar zoom · clique duas vezes para restaurar'
+            : 'clique duas vezes para maximizar/restaurar'}
       >
-        {hasVideo && !showPausedShare && !showPausedPreview ? (
+        {showsLiveVideo ? (
           <div
             className="call-stream-media-frame"
             style={{
@@ -144,23 +210,61 @@ export function CallStreamCard({
           <div className="call-stream-paused">
             {avatar}
             <strong>Sua tela continua sendo transmitida</strong>
-            <button type="button" onClick={event => { event.stopPropagation(); setLocalPreviewEnabled(true); }}><Play size={14} /> mostrar prévia</button>
+            <button type="button" onClick={event => { event.stopPropagation(); setLocalPreviewEnabled(true); }}><PixelIcon name="play" size={14} /> mostrar prévia</button>
           </div>
         ) : showPausedShare ? (
           <div className="call-stream-paused">
             {avatar}
             <strong>transmissão pausada</strong>
-            <button type="button" onClick={(event) => { event.stopPropagation(); onWatchingChange?.(true); }}><Play size={14} fill="currentColor" /> assistir transmissão</button>
+            <button type="button" onClick={(event) => { event.stopPropagation(); onWatchingChange?.(true); }}><PixelIcon name="play" size={14} /> assistir transmissão</button>
           </div>
-        ) : avatar}
-
-        {!isSelf && isSharing && isWatching && (
-          <button type="button" className="call-stream-watch-toggle" onClick={(event) => { event.stopPropagation(); onWatchingChange?.(false); }} title="Parar de receber vídeo e áudio desta transmissão"><EyeOff size={13} /> parar de assistir</button>
+        ) : (
+          <div className="call-stream-audio-stage">
+            {avatar}
+            <strong className="call-stream-audio-name">{label}</strong>
+            <small className="call-stream-audio-state">{stateLabel}</small>
+          </div>
         )}
-        {isSelf && isSharing && localPreviewEnabled && (
-          <button type="button" className="call-stream-watch-toggle" onClick={event => {
-            event.stopPropagation(); setLocalPreviewEnabled(false);
-          }} title="Ocultar a prévia neste computador para reduzir trabalho de reprodução. A transmissão continua."><EyeOff size={13} /> ocultar prévia</button>
+
+        {(showsLiveVideo || (!isSelf && isSharing && isWatching) || (isSelf && isSharing && localPreviewEnabled)) && (
+          <div className={`call-stream-overlay-actions ${isFullscreen ? 'is-fullscreen-hud' : ''}`}>
+            {showsLiveVideo && (
+              <button
+                type="button"
+                className="call-stream-fullscreen-toggle"
+                onClick={toggleBorderlessFullscreen}
+                onDoubleClick={(event) => event.stopPropagation()}
+                title={isFullscreen ? 'Sair da tela cheia sem bordas (Esc)' : 'Tela cheia sem bordas'}
+              >
+                <PixelIcon name={isFullscreen ? 'fullscreen-exit' : 'fullscreen'} size={14} />
+                <span>{isFullscreen ? 'sair da tela cheia' : 'tela cheia'}</span>
+              </button>
+            )}
+            {!isSelf && isSharing && isWatching && (
+              <button
+                type="button"
+                className="call-stream-watch-toggle"
+                onClick={(event) => { event.stopPropagation(); onWatchingChange?.(false); }}
+                onDoubleClick={(event) => event.stopPropagation()}
+                title="Parar de receber vídeo e áudio desta transmissão"
+              >
+                <PixelIcon name="eye-off" size={14} /> parar de assistir
+              </button>
+            )}
+            {isSelf && isSharing && localPreviewEnabled && (
+              <button
+                type="button"
+                className="call-stream-watch-toggle"
+                onClick={event => {
+                  event.stopPropagation(); setLocalPreviewEnabled(false);
+                }}
+                onDoubleClick={(event) => event.stopPropagation()}
+                title="Ocultar a prévia neste computador para reduzir trabalho de reprodução. A transmissão continua."
+              >
+                <PixelIcon name="eye-off" size={14} /> ocultar prévia
+              </button>
+            )}
+          </div>
         )}
 
         {!isSelf && microphoneStream && (
@@ -169,8 +273,27 @@ export function CallStreamCard({
         {!isSelf && screenAudioStream && isSharingAudio && isWatching && (
           <MediaElement stream={screenAudioStream} muted={isDeafened} volume={streamVolume} sinkId={sinkId} className="call-stream-audio call-stream-share-audio" showVideo={false} />
         )}
-        {isFocused && isSharing && hasVideo && !showPausedShare && (
-          <div className="call-stream-zoom-indicator" aria-live="polite">zoom {Math.round(streamZoom.scale * 100)}%</div>
+        {(isFocused || isFullscreen) && isSharing && showsLiveVideo && (
+          <div className={`call-stream-zoom-indicator ${isFullscreen ? 'is-fullscreen-hud' : ''}`} aria-live="polite">
+            <span>zoom {Math.round(streamZoom.scale * 100)}%</span>
+            {streamZoom.scale > MIN_STREAM_ZOOM && (
+              <button
+                type="button"
+                className="call-stream-zoom-reset"
+                onClick={(event) => { event.stopPropagation(); setStreamZoom({ scale: MIN_STREAM_ZOOM, originX: 50, originY: 50 }); }}
+                onDoubleClick={(event) => event.stopPropagation()}
+                title="Restaurar zoom para 100%"
+              >
+                100%
+              </button>
+            )}
+          </div>
+        )}
+        {isFullscreen && (
+          <div className="call-stream-fullscreen-caption is-fullscreen-hud">
+            <strong>{label}</strong>
+            <small>{stateLabel} · Esc para sair</small>
+          </div>
         )}
       </div>
       <div className="call-stream-caption"><strong>{label}</strong><small>{stateLabel}</small></div>

@@ -11,7 +11,7 @@ export function youtubeId(value) {
 
 export function musicTitle(state, key, title) {
   const index = state?.queue?.findIndex((item) => item.key === key) ?? -1;
-  const clean = String(title || '').replace(/s+/g, ' ').trim().slice(0, 120);
+  const clean = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 120);
   if (index < 0 || !clean) return state;
   const queue = [...state.queue];
   queue[index] = { ...queue[index], title: clean };
@@ -30,19 +30,30 @@ export async function fetchYoutubeTitle(id, timeoutMs = 4000) {
 }
 
 export function musicCommand(state, command, now = Date.now()) {
-  const current = state || { queue: [], playing: false, position: 0, updatedAt: now, revision: 0 };
-  const next = { ...current, queue: [...current.queue], revision: current.revision + 1 };
+  const current = state || { queue: [], playing: false, position: 0, updatedAt: now, revision: 0, mode: 'music' };
+  const next = { mode: current.mode === 'video' ? 'video' : 'music', ...current, queue: [...current.queue], revision: current.revision + 1 };
   if (command.action === 'add') {
     const id = youtubeId(command.url);
     if (!id) throw new Error('Cole um link válido de vídeo do YouTube.');
     if (next.queue.length >= 30) throw new Error('A fila está cheia (30 vídeos).');
     next.queue.push({ id, key: `${now}-${next.revision}`, by: String(command.by || '').slice(0, 32), title: '' });
+    if (command.mode === 'video' || command.mode === 'music') next.mode = command.mode;
     if (next.queue.length === 1) { next.position = 0; next.updatedAt = now; next.playing = true; }
   } else if (command.action === 'pause' || command.action === 'play') {
     if (!next.queue.length) return current;
     next.position += next.playing ? Math.max(0, now - next.updatedAt) / 1000 : 0;
     next.updatedAt = now;
     next.playing = command.action === 'play';
+  } else if (command.action === 'seek') {
+    if (!next.queue.length) return current;
+    const position = Number(command.position);
+    if (!Number.isFinite(position) || position < 0) return current;
+    next.position = Math.min(24 * 3600, position);
+    next.updatedAt = now;
+  } else if (command.action === 'mode') {
+    const mode = command.mode === 'video' ? 'video' : 'music';
+    if (next.mode === mode) return current;
+    next.mode = mode;
   } else if (command.action === 'skip' || command.action === 'ended') {
     if (command.key !== next.queue[0]?.key) return current;
     next.queue.shift(); next.position = 0; next.updatedAt = now; next.playing = next.queue.length > 0;

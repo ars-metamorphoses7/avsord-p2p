@@ -468,11 +468,14 @@ if (!hasSingleInstanceLock) {
     setupMediaDiagnostics();
     desktopMedia = setupDesktopMedia({ desktopCapturer, ipcMain, session });
     nativeCapture = setupNativeCapture({ app, ipcMain, sharedTexture, screen });
-    setupStreamPriority({ app, ipcMain, getExtraPids: () => (nativeCapture.pid ? [nativeCapture.pid] : []) });
+    const streamPriority = setupStreamPriority({ app, ipcMain, getExtraPids: () => (nativeCapture.pid ? [nativeCapture.pid] : []) });
     streamLogWriter = setupStreamLog({ app, ipcMain });
     app.on('child-process-gone', (_event, details) => {
       if (details?.reason === 'clean-exit') return;
       logProcessGone(`${details?.type}${details?.serviceName ? `/${details.serviceName}` : ''} ${details?.reason} exit=${details?.exitCode}`);
+      if (details?.type === 'GPU' && streamPriority.active) {
+        setTimeout(() => { void streamPriority.refresh(); }, 1_000).unref?.();
+      }
     });
     await createWindow();
     app.on('activate', () => {

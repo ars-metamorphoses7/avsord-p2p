@@ -1,5 +1,5 @@
-import { MonitorUp, RotateCcw, Volume2, X } from 'lucide-react';
 import { useEffect, useRef } from 'react';
+import { PixelIcon } from './Win98Icons.jsx';
 
 export function ParticipantVolumePopover({ anchor, name, values, sharing, onChange, onClose }) {
   const popoverRef = useRef(null);
@@ -22,20 +22,22 @@ export function ParticipantVolumePopover({ anchor, name, values, sharing, onChan
   return (
     <div ref={popoverRef} className="participant-volume-popover" role="dialog" aria-labelledby="participant-volume-title" style={{ left, top }} onContextMenu={(event) => event.preventDefault()}>
       <div className="participant-volume-titlebar">
-        <strong id="participant-volume-title">volume — {name}</strong>
-        <button type="button" className="win98-close-control" onClick={onClose} aria-label="Fechar volumes"><X size={12} /></button>
+        <div className="participant-volume-titlebar-label"><PixelIcon name="volume" size={14} /><strong id="participant-volume-title">Volume — {name}</strong></div>
+        <button type="button" className="win98-close-control" onClick={onClose} aria-label="Fechar volumes">×</button>
       </div>
       <div className="participant-volume-body">
         <label>
-          <span><Volume2 size={14} /> microfone da pessoa <output>{values.voice}%</output></span>
+          <span><PixelIcon name="mic" size={14} /> Microfone <output>{values.voice}%</output></span>
           <input type="range" min="0" max="200" step="5" value={values.voice} onChange={(event) => onChange({ ...values, voice: Number(event.target.value) })} />
         </label>
         <label className={!sharing ? 'is-disabled' : ''}>
-          <span><MonitorUp size={14} /> áudio da transmissão <output>{values.stream}%</output></span>
+          <span><PixelIcon name="screen" size={14} /> Áudio da transmissão <output>{values.stream}%</output></span>
           <input type="range" min="0" max="200" step="5" disabled={!sharing} value={values.stream} onChange={(event) => onChange({ ...values, stream: Number(event.target.value) })} />
         </label>
-        <button type="button" className="participant-volume-reset" onClick={() => onChange({ voice: 100, stream: 100 })}><RotateCcw size={12} /> restaurar 100%</button>
-        <small>clique direito no participante para abrir novamente</small>
+        <div className="participant-volume-footer">
+          <button type="button" className="participant-volume-reset" onClick={() => onChange({ voice: 100, stream: 100 })}><PixelIcon name="reset" size={12} /> Restaurar 100%</button>
+        </div>
+        <small>Clique direito no participante para abrir novamente.</small>
       </div>
     </div>
   );

@@ -2,51 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import packageJson from '../package.json';
-import {
-  Circle,
-  CircleMinus,
-  CircleOff,
-  Camera,
-  Check,
-  CircleHelp,
-  Download,
-  Headphones,
-  Info,
-  Link2,
-  LockKeyhole,
-  MessageCircle,
-  Mic,
-  MicOff,
-  MonitorUp,
-  Paperclip,
-  PanelLeft,
-  Plus,
-  RefreshCw,
-  Search,
-  Settings2,
-  Video,
-  VideoOff,
-  Volume2,
-  VolumeX,
-  X,
-} from 'lucide-react';
 import './styles.css';
-import winComputer from './assets/win98/computer.png';
-import winPeople from './assets/win98/people.png';
-import winGlobe from './assets/win98/globe.png';
-import winPhone from './assets/win98/phone.png';
-import winUpdate from './assets/win98/update.png';
-import winBell from './assets/win98/bell.png';
-import winSend from './assets/win98/send.png';
-import winPencilEdit from './assets/win98/pencil-edit-64.png';
-import winAppIcon from './assets/win98/jump-app-icon.png';
-import winConnectionSprite from './assets/win98/connection-sprite.png';
 import { CallStreamCard } from './components/CallStreamCard.jsx';
 import { PaneResizeHandle } from './components/PaneResizeHandle.jsx';
 import { ParticipantVolumePopover } from './components/ParticipantVolumePopover.jsx';
 import { ScreenShareDialog } from './components/ScreenShareDialog.jsx';
 import { MusicBot } from './components/MusicBot.jsx';
 import { ServersDialog } from './components/ServersDialog.jsx';
+import { PixelIcon, Win98NetworkAnim } from './components/Win98Icons.jsx';
 import { useCallBinds } from './hooks/useCallBinds.js';
 import { bindLabel, CALL_BIND_ACTIONS } from './media/muteBind.js';
 import { INVITE_ADDRESS_KEY, serverAddressLabel } from './network/serverDirectory.js';
@@ -95,17 +58,6 @@ function screenShareRunCallState(streamRef, runRef) {
 const SCREEN_SHARE_PROFILE_KEY = 'jump-screen-share-profile';
 const MAX_CONTACTS = 100;
 const PRESENCE_STATUSES = ['online', 'dnd', 'offline'];
-const WIN_ICONS = {
-  computer: winComputer,
-  people: winPeople,
-  globe: winGlobe,
-  phone: winPhone,
-  update: winUpdate,
-  bell: winBell,
-  send: winSend,
-  pencil: winPencilEdit,
-  app: winAppIcon,
-};
 let messageDbPromise;
 // Identity of the signaling server this window is connected to (from hello).
 let connectedServer = null;
@@ -267,8 +219,8 @@ function getClientId() {
   }
 }
 
-function WinIcon({ name, size = 20, className = '' }) {
-  return <img className={`win-icon ${className}`} src={WIN_ICONS[name]} width={size} height={size} alt="" aria-hidden="true" draggable="false" />;
+function WinIcon({ name, size = 16, className = '' }) {
+  return <PixelIcon name={name} size={size} className={className} />;
 }
 
 function messageId() {
@@ -864,8 +816,7 @@ function mediaErrorMessage(error, fallback) {
 
 function PresenceIcon({ status = 'online', size = 14, className = '' }) {
   const normalized = normalizePresenceStatus(status);
-  const Icon = normalized === 'offline' ? CircleOff : normalized === 'dnd' ? CircleMinus : Circle;
-  return <Icon className={`presence-icon presence-icon-${normalized} ${className}`} size={size} strokeWidth={2.5} aria-hidden="true" />;
+  return <PixelIcon name={`status-${normalized}`} size={size} className={`presence-icon presence-icon-${normalized} ${className}`} />;
 }
 
 function PresenceDot({ status = 'online' }) {
@@ -930,7 +881,7 @@ function ExpandableChatImage({ alt, label = 'imagem', src }) {
         <div className="image-viewer-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setExpanded(false); }}>
           <section className="image-viewer-dialog" role="dialog" aria-modal="true" aria-label={`Imagem ampliada: ${label}`} onMouseDown={(event) => event.stopPropagation()}>
             <div className="image-viewer-titlebar">
-              <div className="image-viewer-titlebar-label"><img src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong>JUMP — {label}</strong></div>
+              <div className="image-viewer-titlebar-label"><PixelIcon name="app" size={16} /><strong>JUMP — {label}</strong></div>
               <button type="button" className="win98-close-control" aria-label="Fechar imagem ampliada" onClick={() => setExpanded(false)}>×</button>
             </div>
             <div className="image-viewer-canvas" onDoubleClick={toggleExpanded} title="clique duas vezes para restaurar">
@@ -995,7 +946,7 @@ function MessageAttachment({ message }) {
   if (!objectUrl) {
     return (
       <div className="message-attachment message-file-attachment is-pending">
-        <Paperclip size={17} />
+        <PixelIcon name="paperclip" size={16} />
         <span>{progress ? `recebendo ${progress}%` : 'aguardando arquivo...'}</span>
         <small>{label} · {formatFileSize(attachment.size)}</small>
       </div>
@@ -1003,8 +954,8 @@ function MessageAttachment({ message }) {
   }
   return (
     <div className={`message-attachment ${isImage ? 'message-image-attachment' : 'message-file-attachment'}`}>
-      {isImage ? <ExpandableChatImage src={objectUrl} alt={`Imagem enviada: ${label}`} label={label} /> : <a className="message-file-link" href={objectUrl} download={label}><Download size={17} /><strong>{label}</strong><small>{formatFileSize(attachment.size)}</small></a>}
-      {isImage && <a className="message-file-download" href={objectUrl} download={label}><Download size={13} /> baixar {label}</a>}
+      {isImage ? <ExpandableChatImage src={objectUrl} alt={`Imagem enviada: ${label}`} label={label} /> : <a className="message-file-link" href={objectUrl} download={label}><PixelIcon name="download" size={16} /><strong>{label}</strong><small>{formatFileSize(attachment.size)}</small></a>}
+      {isImage && <a className="message-file-download" href={objectUrl} download={label}><PixelIcon name="download" size={14} /> baixar {label}</a>}
     </div>
   );
 }
@@ -1013,7 +964,7 @@ function SignalBadge({ status, peerCount }) {
   const isConnected = status === 'connected';
   return (
     <div className={`signal-badge ${isConnected ? 'is-connected' : ''}`}>
-      <WinIcon name="globe" size={18} className={isConnected ? '' : 'is-offline'} />
+      <WinIcon name="globe" size={16} className={isConnected ? '' : 'is-offline'} />
       <span>{isConnected ? `${peerCount} conectado${peerCount === 1 ? '' : 's'}` : 'conectando'}</span>
     </div>
   );
@@ -1041,10 +992,10 @@ function DesktopTitleBar() {
 
   return (
     <div className="desktop-titlebar" onDoubleClick={toggleMaximize}>
-      <div className="desktop-titlebar-label"><img className="desktop-titlebar-icon" src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong>JUMP — make your jumps!</strong></div>
+      <div className="desktop-titlebar-label"><PixelIcon name="app" size={16} className="desktop-titlebar-icon" /><strong>JUMP — make your jumps!</strong></div>
       <div className="desktop-window-controls">
-        <button type="button" className="desktop-window-control" aria-label="Minimizar janela" onClick={() => desktop.minimizeWindow?.()}>_</button>
-        <button type="button" className="desktop-window-control" aria-label={maximized ? 'Restaurar janela' : 'Maximizar janela'} onClick={toggleMaximize}>{maximized ? '❐' : '□'}</button>
+        <button type="button" className="desktop-window-control desktop-window-control-min" aria-label="Minimizar janela" onClick={() => desktop.minimizeWindow?.()}>_</button>
+        <button type="button" className={`desktop-window-control ${maximized ? 'desktop-window-control-restore' : 'desktop-window-control-max'}`} aria-label={maximized ? 'Restaurar janela' : 'Maximizar janela'} onClick={toggleMaximize}>{maximized ? '❐' : '□'}</button>
         <button type="button" className="desktop-window-control desktop-window-control-close" aria-label="Fechar janela" onClick={() => desktop.closeWindow?.()}>×</button>
       </div>
     </div>
@@ -1069,6 +1020,7 @@ function App() {
   const [profileStatus, setProfileStatus] = useState(() => normalizePresenceStatus(localStorage.getItem(PROFILE_STATUS_KEY) || 'online'));
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
+  const [helpDialogOpen, setHelpDialogOpen] = useState(false);
   const [screenPlaybackPolicy, setScreenPlaybackPolicy] = useState(readScreenPlaybackPolicy);
   const [roomDraft, setRoomDraft] = useState('');
   const [roomPasswordDraft, setRoomPasswordDraft] = useState('');
@@ -1076,7 +1028,6 @@ function App() {
   const [roomAccess, setRoomAccess] = useState(null);
   const [roomSearch, setRoomSearch] = useState('');
   const [draft, setDraft] = useState('');
-  const [composerCursorLeft, setComposerCursorLeft] = useState(2);
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
@@ -1085,6 +1036,9 @@ function App() {
   const [inCall, setInCall] = useState(false);
   const [music, setMusic] = useState(null);
   const [musicError, setMusicError] = useState('');
+  const [jukeboxViewMode, setJukeboxViewMode] = useState('music');
+  const stageCardRef = useRef(null);
+  const jukeboxSlotRef = useRef(null);
   const [callDurationSeconds, setCallDurationSeconds] = useState(0);
   const [audioInputDevices, setAudioInputDevices] = useState([]);
   const [audioOutputDevices, setAudioOutputDevices] = useState([]);
@@ -1196,26 +1150,6 @@ function App() {
       }));
     }).catch(() => {});
     return () => { active = false; };
-  }, []);
-
-  const updateComposerCursor = useCallback(() => {
-    const input = composerInputRef.current;
-    const shell = input?.parentElement;
-    if (!input || !shell) return;
-    const style = window.getComputedStyle(input);
-    const context = document.createElement('canvas').getContext('2d');
-    if (!context) return;
-    context.font = style.font;
-    const selectionStart = typeof input.selectionStart === 'number' ? input.selectionStart : input.value.length;
-    const beforeCursor = input.value.slice(0, selectionStart);
-    const letterSpacing = Number.parseFloat(style.letterSpacing) || 0;
-    const textWidth = context.measureText(beforeCursor.replace(/ /g, '\u00a0')).width + (letterSpacing * beforeCursor.length);
-    const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
-    // O cursor é desenhado sobre o próprio campo: o início real da escrita é
-    // o padding interno do input, não a borda esquerda do shell.
-    const rawLeft = paddingLeft + textWidth - (input.scrollLeft || 0);
-    const maxLeft = Math.max(2, shell.clientWidth - 7);
-    setComposerCursorLeft(Math.max(2, Math.min(rawLeft, maxLeft)));
   }, []);
 
   const updateMessageListStickiness = useCallback(() => {
@@ -1340,10 +1274,13 @@ function App() {
     try { localStorage.setItem(PROFILE_STATUS_KEY, normalizePresenceStatus(profileStatus)); } catch { /* Ignore storage limits. */ }
   }, [profileStatus]);
   useEffect(() => {
-    updateComposerCursor();
-    window.addEventListener('resize', updateComposerCursor);
-    return () => window.removeEventListener('resize', updateComposerCursor);
-  }, [updateComposerCursor]);
+    if (!helpDialogOpen) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setHelpDialogOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [helpDialogOpen]);
   useEffect(() => {
     if (!roomInfoOpen) return undefined;
     const closeOnEscape = (event) => {
@@ -2621,11 +2558,19 @@ function App() {
 
   const callBinds = useCallBinds({ mute: toggleMute, deafen: toggleDeafen }, inCallRef);
   useEffect(() => { if (!appSettingsOpen) callBinds.setRecording(''); }, [appSettingsOpen]);
-  const sendMusic = command => {
+  const sendMusic = useCallback((command) => {
     const sent = sendSignal({ type: 'music-command', roomId: roomIdRef.current, ...command });
     if (!sent) setMusicError('Sem conexão com a sala. Aguarde reconectar.');
     return sent;
-  };
+  }, [sendSignal]);
+  const changeJukeboxViewMode = useCallback((nextMode) => {
+    const normalized = nextMode === 'video' ? 'video' : 'music';
+    setJukeboxViewMode(normalized);
+    if (normalized !== 'video') {
+      setFocusedCallPeerId((current) => (current === '__jukebox__' ? '' : current));
+    }
+    sendMusic({ action: 'mode', mode: normalized });
+  }, [sendMusic]);
 
   const handleAudioInputChange = useCallback(async (event) => {
     const nextId = event.target.value;
@@ -3199,9 +3144,22 @@ function App() {
   const fieldDiagnosticsForcedByEnvironment = fieldDiagnosticsConfig.activationSource === 'environment';
   const showFieldDiagnosticsIndicator = shouldShowFieldDiagnosticsIndicator({ enabled: fieldDiagnosticsEnabled, inCall: hasActiveCall });
   const chatVisible = !callPanelOpen || chatPanelOpen;
+  const activeRoomMusic = inCall && signalStatus === 'connected' && music?.roomId === roomId ? music : null;
+  const jukeboxTrack = activeRoomMusic?.queue?.[0] || null;
+  const showJukeboxOnStage = Boolean(jukeboxTrack && jukeboxViewMode === 'video');
   useEffect(() => {
-    if (focusedCallPeerId && !activeCallParticipants.some((person) => person.peerId === focusedCallPeerId)) setFocusedCallPeerId('');
-  }, [activeCallParticipants, focusedCallPeerId]);
+    if (music?.roomId === roomId && (music.mode === 'video' || music.mode === 'music')) {
+      setJukeboxViewMode(music.mode);
+    }
+  }, [music?.mode, music?.roomId, roomId]);
+  useEffect(() => {
+    if (!focusedCallPeerId) return;
+    if (focusedCallPeerId === '__jukebox__') {
+      if (!showJukeboxOnStage) setFocusedCallPeerId('');
+      return;
+    }
+    if (!activeCallParticipants.some((person) => person.peerId === focusedCallPeerId)) setFocusedCallPeerId('');
+  }, [activeCallParticipants, focusedCallPeerId, showJukeboxOnStage]);
   useEffect(() => {
     if (!hasActiveCall) {
       callStartedAtRef.current = 0;
@@ -3276,24 +3234,24 @@ function App() {
       <div className={`app-shell ${isDesktop ? 'has-desktop-titlebar' : ''}`}>
       <aside className={`workspace-sidebar ${mobileSidebarOpen ? 'is-mobile-open' : ''}`}>
         <div className="workspace-head">
-          <img src={winAppIcon} alt="JUMP" className="workspace-head-icon" draggable="false" />
+          <PixelIcon name="app" size={24} className="workspace-head-icon" />
           <div className="workspace-head-copy">
             <h1>JUMP NETWORK</h1>
-            <p className="eyebrow"><span className="network-status-light" /> {currentServer?.name || 'rede em tempo real'} · {serverAddressLabel(SIGNAL_ORIGIN)}</p>
+            <p className="eyebrow"><span className={`network-status-light ${signalStatus === 'connected' ? 'is-on' : ''}`} /> {currentServer?.name || 'rede local'} · {serverAddressLabel(SIGNAL_ORIGIN)}</p>
           </div>
-          <button type="button" className="servers-open-button" title="Servidores" aria-label="Servidores" onClick={() => setServersDialog({})}><WinIcon name="globe" size={20} /></button>
+          <button type="button" className="servers-open-button" title="Servidores" aria-label="Servidores" onClick={() => setServersDialog({})}><WinIcon name="globe" size={16} /></button>
         </div>
         <div className="search-box" role="search">
           <label htmlFor="sidebar-search">Localizar:</label>
           <span className="search-input-frame"><input id="sidebar-search" value={roomSearch} onChange={(event) => setRoomSearch(event.target.value)} placeholder="salas ou amigos" aria-label="Buscar salas e amigos" /></span>
-          <button type="button" aria-label="Localizar" onClick={() => document.getElementById('sidebar-search')?.focus()}><Search size={14} /></button>
+          <button type="button" aria-label="Localizar" onClick={() => document.getElementById('sidebar-search')?.focus()}><PixelIcon name="search" size={14} /></button>
         </div>
 
         <div className="side-scroll">
           <section className="directory-group unified-directory-section is-rooms" aria-labelledby="rooms-directory-title">
             <div className="section-label directory-caption">
-              <span className="directory-caption-title"><WinIcon name="computer" size={19} /><strong id="rooms-directory-title">salas</strong><small>· {directoryRooms.length}</small></span>
-              <button type="button" className="directory-header-button" aria-label={showRoomCreator ? 'Fechar criação de sala' : 'Criar sala'} onClick={() => setShowRoomCreator((value) => !value)}><Plus size={14} /></button>
+              <span className="directory-caption-title"><WinIcon name="computer" size={16} /><strong id="rooms-directory-title">Salas</strong><small>({directoryRooms.length})</small></span>
+              <button type="button" className="directory-header-button" aria-label={showRoomCreator ? 'Fechar criação de sala' : 'Criar sala'} title={showRoomCreator ? 'Fechar criação de sala' : 'Criar nova sala'} onClick={() => setShowRoomCreator((value) => !value)}><PixelIcon name="plus" size={12} /></button>
             </div>
             {showRoomCreator && (
               <form className="room-creator" onSubmit={createRoom}>
@@ -3310,13 +3268,13 @@ function App() {
               {filteredRooms.map((room) => (
                 <div className={`server-entry ${!isDirectChat && room.id === roomId ? 'is-current' : ''}`} key={room.id} role="listitem">
                   <button type="button" className={`directory-row room-list-row ${!isDirectChat && room.id === roomId ? 'is-current' : ''}`} onClick={() => openRoom(room)}>
-                    <span className="directory-item-icon room-item-icon"><WinIcon name="computer" size={25} />{room.protected && <LockKeyhole size={11} className="room-lock-badge" />}</span>
+                    <span className="directory-item-icon room-item-icon"><WinIcon name="computer" size={16} />{room.protected && <PixelIcon name="lock" size={10} className="room-lock-badge" />}</span>
                     <span className="directory-item-copy"><strong>{room.name}</strong><small>{room.protected ? 'sala protegida' : 'chat e chamada'}</small></span>
-                   {unreadCounts[roomUnreadKey(room.id)] > 0 && <span className="directory-item-badge unread-badge has-unread" aria-label={`${unreadCounts[roomUnreadKey(room.id)]} mensagens não lidas`}>{unreadCounts[roomUnreadKey(room.id)]}</span>}
+                    {unreadCounts[roomUnreadKey(room.id)] > 0 && <span className="directory-item-badge unread-badge has-unread" aria-label={`${unreadCounts[roomUnreadKey(room.id)]} mensagens não lidas`}>{unreadCounts[roomUnreadKey(room.id)]}</span>}
                   </button>
                   {!isDirectChat && room.id === roomId && activeCallParticipants.length > 0 && (
                     <div className="server-call-members" aria-label="Participantes em call nesta sala">
-                      <div className="server-call-label"><WinIcon name="phone" size={20} /><span>em chamada · {activeCallParticipants.length}</span></div>
+                      <div className="server-call-label"><WinIcon name="phone" size={13} /><span>Em chamada ({activeCallParticipants.length})</span></div>
                       <div className="voice-member-list">
                         {activeCallParticipants.map((person) => {
                           const callState = person.self ? { muted: isMuted, deafened: isDeafened, sharing: isSharing } : (remoteCallStates[person.peerId] || {});
@@ -3326,9 +3284,9 @@ function App() {
                               <Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xs" src={person.avatar} alt={person.name} live speaking={Boolean(speakingPeers[person.self ? 'self' : person.peerId])} />
                               <span><strong>{person.self ? `${person.name} (você)` : person.name}</strong><small>{muted ? 'mutado' : 'conectado'}</small></span>
                               <span className="voice-member-status" aria-label="Estados da chamada">
-                                {muted && <MicOff size={13} className="voice-member-mic is-muted" />}
-                                {callState.deafened && <VolumeX size={13} className="voice-member-mic is-deafened" />}
-                                {callState.sharing && <MonitorUp size={13} className="voice-member-mic is-sharing" />}
+                                {muted && <PixelIcon name="mic-off" size={13} className="voice-member-mic is-muted" />}
+                                {callState.deafened && <PixelIcon name="volume-off" size={13} className="voice-member-mic is-deafened" />}
+                                {callState.sharing && <PixelIcon name="screen" size={13} className="voice-member-mic is-sharing" />}
                               </span>
                             </div>
                           );
@@ -3338,158 +3296,217 @@ function App() {
                   )}
                 </div>
               ))}
+              {filteredRooms.length === 0 && <div className="directory-empty"><WinIcon name="computer" size={16} /><span><strong>{signalStatus === 'connected' ? 'Nenhuma sala encontrada' : 'Conectando à rede...'}</strong><small>{signalStatus === 'connected' ? 'Tente outro nome ou crie uma sala.' : 'Aguarde alguns instantes.'}</small></span></div>}
             </div>
-            {filteredRooms.length === 0 && <div className="directory-empty"><WinIcon name="computer" size={25} /><span><strong>{signalStatus === 'connected' ? 'Nenhuma sala encontrada' : 'Conectando à rede...'}</strong><small>{signalStatus === 'connected' ? 'Tente outro nome ou crie uma sala.' : 'Aguarde alguns instantes.'}</small></span></div>}
           </section>
 
           {recentRooms.length > 0 && <section className="directory-group unified-directory-section is-recent-rooms" aria-labelledby="recent-rooms-directory-title">
             <div className="section-label directory-caption">
-              <span className="directory-caption-title"><WinIcon name="globe" size={19} /><strong id="recent-rooms-directory-title">salas recentes</strong><small>· {recentRooms.length}</small></span>
+              <span className="directory-caption-title"><WinIcon name="globe" size={16} /><strong id="recent-rooms-directory-title">Salas recentes</strong><small>({recentRooms.length})</small></span>
               <span className="directory-presence">salvas</span>
             </div>
             <div className="directory-list" role="list" aria-label="Salas recentes">
               {filteredRecentRooms.map((session) => (
                 <button type="button" className="directory-row recent-room-list-row" key={`${session.signal || 'local'}:${session.roomId}`} onClick={() => openRecentRoom(session)}>
-                  <span className="directory-item-icon room-item-icon"><WinIcon name="globe" size={25} /></span>
+                  <span className="directory-item-icon room-item-icon"><WinIcon name="globe" size={16} /></span>
                   <span className="directory-item-copy"><strong>{session.roomName}</strong><small>{roomSessionNetworkLabel(session)}</small></span>
                 </button>
               ))}
+              {filteredRecentRooms.length === 0 && <div className="directory-empty"><WinIcon name="globe" size={16} /><span><strong>Nenhuma sala recente</strong><small>Tente buscar pelo nome ou endereço.</small></span></div>}
             </div>
-            {filteredRecentRooms.length === 0 && <div className="directory-empty"><WinIcon name="globe" size={25} /><span><strong>Nenhuma sala recente encontrada</strong><small>Tente buscar pelo nome ou endereço da rede.</small></span></div>}
           </section>}
 
           <section className="directory-group unified-directory-section is-friends" aria-labelledby="friends-directory-title">
             <div className="section-label directory-caption">
-              <span className="directory-caption-title"><WinIcon name="people" size={19} /><strong id="friends-directory-title">amigos</strong><small>· {directoryFriends.length}</small></span>
-              <span className="directory-presence">{directoryFriends.filter((person) => person.connected && person.status !== 'offline').length ? 'conectados' : 'vazio'}</span>
+              <span className="directory-caption-title"><WinIcon name="people" size={16} /><strong id="friends-directory-title">Amigos</strong><small>({directoryFriends.length})</small></span>
+              <span className="directory-presence">{directoryFriends.filter((person) => person.connected && person.status !== 'offline').length ? 'conectados' : 'offline'}</span>
             </div>
             <div className="directory-list" role="list" aria-label="Amigos">
               {filteredFriends.map((person) => (
                 <button type="button" className={`directory-row friend-list-row ${activeContactId === person.id ? 'is-current' : ''}`} key={person.id} onClick={() => openDirectChat(person)}>
-                  <span className="directory-item-icon"><Avatar initials={initialsFor(person.name)} tone={toneFor(person.id)} size="md" src={person.avatar} alt={person.name} presence={person.status} /></span>
+                  <span className="directory-item-icon"><Avatar initials={initialsFor(person.name)} tone={toneFor(person.id)} size="sm" src={person.avatar} alt={person.name} presence={person.status} /></span>
                   <span className="directory-item-copy"><strong>{person.name}</strong><small>{remoteStreams[person.peerId] ? 'em chamada' : presenceLabel(person.status)}</small></span>
                   {unreadCounts[directUnreadKey(person.id)] > 0 && <span className="directory-item-badge friend-state-badge has-unread" aria-label={`${unreadCounts[directUnreadKey(person.id)]} mensagens não lidas`}>{unreadCounts[directUnreadKey(person.id)]}</span>}
                 </button>
               ))}
+              {filteredFriends.length === 0 && <div className="directory-empty"><WinIcon name="people" size={16} /><span><strong>Nenhum amigo salvo</strong><small>Contatos aparecem aqui assim que você conversar com alguém.</small></span></div>}
             </div>
-            {filteredFriends.length === 0 && <div className="directory-empty"><WinIcon name="people" size={25} /><span><strong>Nenhum amigo salvo</strong><small>Quando você conversar com alguém, o contato ficará disponível aqui mesmo offline.</small></span></div>}
           </section>
         </div>
 
         <div className="profile-strip">
           <button type="button" className="profile-avatar-button" onClick={() => { setNameDraft(displayName); setProfileSettingsOpen(true); }} aria-label="Abrir configurações do perfil" title="Configurações do perfil">
-            <Avatar initials={initialsFor(displayName)} tone="yellow" size="md" src={profileAvatar} alt={displayName} presence={profileStatus} />
+            <Avatar initials={initialsFor(displayName)} tone="yellow" size="sm" src={profileAvatar} alt={displayName} presence={profileStatus} />
           </button>
-          <button type="button" className="profile-name" onClick={() => { setNameDraft(displayName); setProfileSettingsOpen(true); }}><strong>{displayName}</strong></button>
-          <div className="profile-actions"><IconButton label="Configurações do perfil" onClick={() => { setNameDraft(displayName); setProfileSettingsOpen(true); }}><Settings2 size={15} /></IconButton></div>
+          <button type="button" className="profile-name" onClick={() => { setNameDraft(displayName); setProfileSettingsOpen(true); }}>
+            <strong>{displayName}</strong>
+            <small>{presenceLabel(profileStatus)}</small>
+          </button>
+          <div className="profile-actions"><IconButton label="Configurações do perfil" onClick={() => { setNameDraft(displayName); setProfileSettingsOpen(true); }}><PixelIcon name="settings" size={16} /></IconButton></div>
         </div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
-          <button type="button" className="mobile-menu" onClick={() => setMobileSidebarOpen(true)} aria-label="Abrir menu"><PanelLeft size={17} /></button>
-          <div className="breadcrumb"><span>JUMP NETWORK</span><span className="slash">/</span><strong>{isDirectChat ? directPeer.name : roomName}</strong></div>
+          <button type="button" className="mobile-menu" onClick={() => setMobileSidebarOpen(true)} aria-label="Abrir menu"><PixelIcon name="menu" size={16} /></button>
+          <div className="breadcrumb" title={`JUMP NETWORK \\ ${isDirectChat ? directPeer.name : roomName}`}>
+            <span className="breadcrumb-label">Endereço</span>
+            <div className="breadcrumb-field">
+              <PixelIcon name={isDirectChat ? 'people' : 'computer'} size={14} />
+              <span className="breadcrumb-root">JUMP NETWORK</span>
+              <span className="slash">\</span>
+              <strong>{isDirectChat ? directPeer.name : roomName}</strong>
+            </div>
+          </div>
           <div className="topbar-actions">
-            {isDesktop && <button type="button" className={`update-button ${updateState.status === 'downloaded' ? 'is-ready' : ''} ${isDevelopmentDesktopBuild ? 'is-dev' : ''}`} onClick={isDevelopmentDesktopBuild ? undefined : handleUpdate} disabled={isDevelopmentDesktopBuild || updateBusy} aria-disabled={isDevelopmentDesktopBuild} title={isDevelopmentDesktopBuild ? 'Versão de desenvolvimento — atualizações desativadas' : 'Verificar atualizações'}><WinIcon name={isDevelopmentDesktopBuild ? 'app' : 'update'} size={20} /> {updateLabel}</button>}
             <SignalBadge status={signalStatus} peerCount={peerCount} />
-            <button type="button" className="invite-button" onClick={copyRoomInvite} disabled={!roomId} title="Copiar link da sala"><Link2 size={17} /> {inviteCopied ? 'copiado' : 'copiar link'}</button>
-            <IconButton label={callPanelOpen ? 'Fechar chamada' : 'Abrir chamada'} className={`call-header-button ${hasActiveCall ? 'has-call' : ''}`} active={callPanelOpen} onClick={() => setCallPanelOpen((value) => !value)}><WinIcon name="phone" size={22} />{hasActiveCall && <span className="call-header-dot" />}</IconButton>
-            <IconButton label={callPanelOpen ? (chatPanelOpen ? 'Ocultar chat' : 'Mostrar chat') : 'Chat da sala'} className="chat-toggle-button" active={callPanelOpen && chatPanelOpen} disabled={!callPanelOpen} onClick={() => setChatPanelOpen((value) => !value)}><MessageCircle size={20} /></IconButton>
-            <IconButton label="Notificações"><WinIcon name="bell" size={21} /></IconButton>
-            <IconButton label="Configurações" active={appSettingsOpen} onClick={openAppSettings}><Settings2 size={17} /></IconButton>
-            <IconButton label="Ajuda"><CircleHelp size={16} /></IconButton>
+            <span className="toolbar-sep" aria-hidden="true" />
+            {isDesktop && <button type="button" className={`update-button ${updateState.status === 'downloaded' ? 'is-ready' : ''} ${isDevelopmentDesktopBuild ? 'is-dev' : ''}`} onClick={isDevelopmentDesktopBuild ? undefined : handleUpdate} disabled={isDevelopmentDesktopBuild || updateBusy} aria-disabled={isDevelopmentDesktopBuild} title={isDevelopmentDesktopBuild ? 'Versão de desenvolvimento — atualizações desativadas' : 'Verificar atualizações'}><WinIcon name={isDevelopmentDesktopBuild ? 'app' : 'update'} size={16} /><span>{updateLabel}</span></button>}
+            <button type="button" className="invite-button" onClick={copyRoomInvite} disabled={!roomId} title="Copiar link da sala"><PixelIcon name="link" size={16} /><span>{inviteCopied ? 'copiado' : 'copiar link'}</span></button>
+            <span className="toolbar-sep" aria-hidden="true" />
+            <IconButton label={callPanelOpen ? 'Fechar chamada' : 'Abrir chamada'} className={`call-header-button ${hasActiveCall ? 'has-call' : ''}`} active={callPanelOpen} onClick={() => setCallPanelOpen((value) => !value)}><WinIcon name="phone" size={16} />{hasActiveCall && <span className="call-header-dot" />}</IconButton>
+            <IconButton label={callPanelOpen ? (chatPanelOpen ? 'Ocultar chat' : 'Mostrar chat') : 'Chat da sala'} className="chat-toggle-button" active={callPanelOpen && chatPanelOpen} disabled={!callPanelOpen} onClick={() => setChatPanelOpen((value) => !value)}><PixelIcon name="chat" size={16} /></IconButton>
+            <IconButton label="Notificações"><WinIcon name="bell" size={16} /></IconButton>
+            <IconButton label="Configurações" active={appSettingsOpen} onClick={openAppSettings}><PixelIcon name="settings" size={16} /></IconButton>
+            <IconButton label="Ajuda" active={helpDialogOpen} onClick={() => setHelpDialogOpen(true)}><PixelIcon name="help" size={16} /></IconButton>
           </div>
         </header>
 
         <div className="dashboard-scroll">
           <div className={`content-grid ${callPanelOpen ? 'is-call-open' : 'is-chat-only'} ${!chatVisible ? 'is-chat-hidden' : ''}`}>
             <div className={`content-column ${callPanelOpen ? 'is-call-visible' : 'is-chat-visible'} ${callPanelOpen && chatVisible ? 'has-call-chat-split' : ''} ${!chatVisible ? 'is-chat-hidden' : ''}`} style={callPanelOpen && chatVisible ? { '--call-pane-percent': `${callChatSplit}%` } : undefined}>
-              {callPanelOpen && <section className="stage-card">
+              {callPanelOpen && <section className="stage-card" ref={stageCardRef}>
                 <div className="stage-header">
-                  <div className="stage-title"><strong>{roomName} call {formatCallDuration(callDurationSeconds)}</strong></div>
+                  <div className="stage-title"><PixelIcon name="phone" size={16} /><strong>{roomName} — Chamada ({formatCallDuration(callDurationSeconds)})</strong></div>
                   <button type="button" className="stage-header-close win98-close-control" disabled aria-label="Janela da chamada fixa" title="Janela da chamada fixa">×</button>
                 </div>
                 <div className={`stage-body ${activeCallParticipants.length ? 'has-participants' : 'is-empty'} ${focusedCallPeerId ? 'has-focused-stream' : ''}`}>
                   <div className={`call-stream-grid ${focusedCallPeerId ? 'has-focused-stream' : ''}`}>
-                    {activeCallParticipants.length ? activeCallParticipants.map((person) => {
-                      const localVideoStream = person.self
-                        ? (isSharing ? screenStreamRef.current : isCameraOn ? cameraStreamRef.current : null)
-                        : null;
-                      const remoteBundle = person.self ? null : remoteStreams[person.peerId];
-                      const videoStream = localVideoStream || remoteBundle?.videoStream || null;
-                      const remoteCallState = remoteCallStates[person.peerId] || {};
-                      const expectsVideo = person.self ? (isSharing || isCameraOn) : (remoteCallState.sharing || remoteCallState.camera);
-                      const hasVideo = Boolean(expectsVideo && videoStream?.getVideoTracks?.().some((track) => track.readyState !== 'ended'));
-                      const personIsSpeaking = Boolean(speakingPeers[person.self ? 'self' : person.peerId]);
-                      const personLabel = person.self ? `${person.name} (você)` : person.name;
-                      const isWatching = person.self || streamWatching[person.peerId] !== false;
-                      const volumes = participantVolumes[person.peerId] || { voice: 100, stream: 100 };
-                      const stateLabel = person.self
-                        ? (isSharing ? `compartilhando a tela${screenAudioSessionRef.current ? ' + áudio' : ''}` : isCameraOn ? 'câmera ativa' : 'no palco')
-                        : (remoteCallState.sharing ? (isWatching ? `compartilhando a tela${remoteCallState.sharingAudio ? ' + áudio' : ''}` : 'transmissão pausada por você') : remoteCallState.camera ? 'câmera ativa' : 'em chamada');
-                      return (
-                        <CallStreamCard
-                          key={person.peerId}
-                          avatar={<Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xl" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} speaking={personIsSpeaking} />}
-                          diagnosticsSession={person.self ? null : remoteBundle?.screenShareDiagnosticsSession}
-                          hasVideo={hasVideo}
-                          isDeafened={isDeafened}
-                          isFocused={focusedCallPeerId === person.peerId}
-                          isSelf={person.self}
-                          isSharing={person.self ? isSharing : remoteCallState.sharing}
-                          isSharingAudio={person.self ? Boolean(screenAudioSessionRef.current) : remoteCallState.sharingAudio}
-                          isSpeaking={personIsSpeaking}
-                          isWatching={isWatching}
-                          label={personLabel}
-                          microphoneStream={remoteBundle?.microphoneStream}
-                          onContextMenu={person.self ? undefined : (event) => openParticipantVolumes(event, person)}
-                          onDoubleClick={() => setFocusedCallPeerId((current) => current === person.peerId ? '' : person.peerId)}
-                          onWatchingChange={(watching) => changeStreamWatching(person.peerId, watching)}
-                          screenAudioStream={remoteBundle?.screenAudioStream}
-                          sinkId={selectedAudioOutputId}
-                          stateLabel={stateLabel}
-                          streamVolume={volumes.stream / 100}
-                          videoStream={videoStream}
-                          voiceVolume={volumes.voice / 100}
-                        />
-                      );
-                    }) : (
+                    {activeCallParticipants.length ? (
+                      <>
+                        {showJukeboxOnStage && (
+                          <article
+                            key="__jukebox__"
+                            className={`call-stream-card is-jukebox has-video ${focusedCallPeerId === '__jukebox__' ? 'is-focused' : ''}`}
+                          >
+                            <div
+                              className="call-stream-viewport is-jukebox-viewport"
+                              onDoubleClick={() => setFocusedCallPeerId((current) => current === '__jukebox__' ? '' : '__jukebox__')}
+                            >
+                              <div className="jukebox-stage-slot" ref={jukeboxSlotRef} />
+                            </div>
+                            <div
+                              className="call-stream-caption"
+                              onDoubleClick={() => setFocusedCallPeerId((current) => current === '__jukebox__' ? '' : '__jukebox__')}
+                              title="Clique duas vezes para maximizar/restaurar o vídeo no palco"
+                            >
+                              <strong className="jukebox-stage-caption-title">
+                                <PixelIcon name="tv" size={14} />
+                                <span>{jukeboxTrack.title || jukeboxTrack.id}</span>
+                              </strong>
+                              <small>Jukebox{jukeboxTrack.by ? ` · por ${jukeboxTrack.by}` : ''} · {activeRoomMusic.playing ? 'assistindo juntos' : 'pausado'}</small>
+                            </div>
+                          </article>
+                        )}
+                        {activeCallParticipants.map((person) => {
+                          const localVideoStream = person.self
+                            ? (isSharing ? screenStreamRef.current : isCameraOn ? cameraStreamRef.current : null)
+                            : null;
+                          const remoteBundle = person.self ? null : remoteStreams[person.peerId];
+                          const videoStream = localVideoStream || remoteBundle?.videoStream || null;
+                          const remoteCallState = remoteCallStates[person.peerId] || {};
+                          const expectsVideo = person.self ? (isSharing || isCameraOn) : (remoteCallState.sharing || remoteCallState.camera);
+                          const hasVideo = Boolean(expectsVideo && videoStream?.getVideoTracks?.().some((track) => track.readyState !== 'ended'));
+                          const personIsSpeaking = Boolean(speakingPeers[person.self ? 'self' : person.peerId]);
+                          const personLabel = person.self ? `${person.name} (você)` : person.name;
+                          const isWatching = person.self || streamWatching[person.peerId] !== false;
+                          const volumes = participantVolumes[person.peerId] || { voice: 100, stream: 100 };
+                          const stateLabel = person.self
+                            ? (isSharing ? `compartilhando a tela${screenAudioSessionRef.current ? ' + áudio' : ''}` : isCameraOn ? 'câmera ativa' : 'no palco')
+                            : (remoteCallState.sharing ? (isWatching ? `compartilhando a tela${remoteCallState.sharingAudio ? ' + áudio' : ''}` : 'transmissão pausada por você') : remoteCallState.camera ? 'câmera ativa' : 'em chamada');
+                          return (
+                            <CallStreamCard
+                              key={person.peerId}
+                              avatar={<Avatar initials={initialsFor(person.name)} tone={person.self ? 'yellow' : toneFor(person.peerId)} size="xl" src={person.avatar} alt={person.name} live={person.self || Boolean(remoteStreams[person.peerId])} speaking={personIsSpeaking} />}
+                              diagnosticsSession={person.self ? null : remoteBundle?.screenShareDiagnosticsSession}
+                              hasVideo={hasVideo}
+                              isDeafened={isDeafened}
+                              isFocused={focusedCallPeerId === person.peerId}
+                              isSelf={person.self}
+                              isSharing={person.self ? isSharing : remoteCallState.sharing}
+                              isSharingAudio={person.self ? Boolean(screenAudioSessionRef.current) : remoteCallState.sharingAudio}
+                              isSpeaking={personIsSpeaking}
+                              isWatching={isWatching}
+                              label={personLabel}
+                              microphoneStream={remoteBundle?.microphoneStream}
+                              onContextMenu={person.self ? undefined : (event) => openParticipantVolumes(event, person)}
+                              onDoubleClick={() => setFocusedCallPeerId((current) => current === person.peerId ? '' : person.peerId)}
+                              onWatchingChange={(watching) => changeStreamWatching(person.peerId, watching)}
+                              screenAudioStream={remoteBundle?.screenAudioStream}
+                              sinkId={selectedAudioOutputId}
+                              stateLabel={stateLabel}
+                              streamVolume={volumes.stream / 100}
+                              videoStream={videoStream}
+                              voiceVolume={volumes.voice / 100}
+                            />
+                          );
+                        })}
+                      </>
+                    ) : (
                       <div className="call-empty-card">
                         <div className={`call-empty-state dialup-state ${signalStatus === 'connected' ? 'is-ready' : 'is-connecting'}`}>
-                          <div className="dialup-titlebar"><strong>Conexão de rede</strong><button type="button" className="win98-close-control" disabled aria-label="Aviso fixo">×</button></div>
-                          <div className="dialup-visual"><span className="connection-animation" aria-hidden="true" style={{ '--connection-sprite': `url(${winConnectionSprite})` }} /></div>
-                          <strong>{signalStatus === 'connected' ? 'linha P2P pronta' : 'conectando à rede...'}</strong>
-                          <small>{signalStatus === 'connected' ? 'aguardando outro participante' : 'discando para o servidor de sinalização'}</small>
+                          <div className="dialup-titlebar"><div className="dialup-titlebar-label"><PixelIcon name="globe" size={14} /><strong>Conexão de rede</strong></div><button type="button" className="win98-close-control" disabled aria-label="Aviso fixo">×</button></div>
+                          <div className="dialup-body">
+                            <div className="dialup-visual"><Win98NetworkAnim active={signalStatus === 'connected'} /></div>
+                            <strong>{signalStatus === 'connected' ? 'Linha P2P pronta' : 'Conectando à rede...'}</strong>
+                            <small>{signalStatus === 'connected' ? 'Clique em "Entrar na chamada" ou aguarde outro participante.' : 'Discando para o servidor de sinalização...'}</small>
+                          </div>
                         </div>
                       </div>
                     )}
                   </div>
                 </div>
                 <div className="stage-controls">
-                  <div className="stage-control-hint"><span>{inCall ? 'mídia P2P ativa' : 'entre na sala para habilitar áudio e tela'}</span>{showFieldDiagnosticsIndicator && <span className="field-diagnostics-indicator" role="status">FIELD DIAGNOSTICS ON</span>}</div>
+                  <div className="stage-control-hint"><span className={`stage-status-led ${inCall ? 'is-live' : ''}`} aria-hidden="true" /><span>{inCall ? 'Mídia P2P ativa' : 'Entre na chamada para habilitar áudio e tela'}</span>{showFieldDiagnosticsIndicator && <span className="field-diagnostics-indicator" role="status">FIELD DIAGNOSTICS ON</span>}</div>
                   <div className="call-controls">
-                    <IconButton label={isMuted ? 'Ativar microfone' : 'Silenciar microfone'} className={isMuted ? 'control-off' : ''} active={inCall && !isMuted} onClick={toggleMute}>{isMuted ? <MicOff size={18} /> : <Mic size={18} />}</IconButton>
-                    <IconButton label={isDeafened ? 'Ativar áudio' : 'Desativar áudio'} className={isDeafened ? 'control-off' : ''} active={inCall && !isDeafened} onClick={toggleDeafen}>{isDeafened ? <VolumeX size={18} /> : <Headphones size={18} />}</IconButton>
-                    <IconButton label={isCameraOn ? 'Desligar câmera' : 'Ligar câmera'} className={isCameraOn ? 'control-on' : ''} active={isCameraOn} onClick={toggleCamera}>{isCameraOn ? <Video size={18} /> : <VideoOff size={18} />}</IconButton>
-                    <IconButton label={isSharing ? 'Parar compartilhamento' : 'Compartilhar tela'} className={isSharing ? 'control-on' : ''} active={isSharing} onClick={toggleScreenShare}><MonitorUp size={18} /></IconButton>
-                    <IconButton label="Configurar dispositivos de áudio" className={showDeviceSettings ? 'control-on' : ''} active={showDeviceSettings} onClick={() => setShowDeviceSettings((value) => !value)}><Settings2 size={17} /></IconButton>
+                    <IconButton label={isMuted ? 'Ativar microfone' : 'Silenciar microfone'} className={isMuted ? 'control-off' : ''} active={inCall && !isMuted} onClick={toggleMute}><PixelIcon name={isMuted ? 'mic-off' : 'mic'} size={18} /></IconButton>
+                    <IconButton label={isDeafened ? 'Ativar áudio' : 'Desativar áudio'} className={isDeafened ? 'control-off' : ''} active={inCall && !isDeafened} onClick={toggleDeafen}><PixelIcon name={isDeafened ? 'volume-off' : 'headphones'} size={18} /></IconButton>
+                    <IconButton label={isCameraOn ? 'Desligar câmera' : 'Ligar câmera'} className={isCameraOn ? 'control-on' : ''} active={isCameraOn} onClick={toggleCamera}><PixelIcon name={isCameraOn ? 'video' : 'video-off'} size={18} /></IconButton>
+                    <IconButton label={isSharing ? 'Parar compartilhamento' : 'Compartilhar tela'} className={isSharing ? 'control-on' : ''} active={isSharing} onClick={toggleScreenShare}><PixelIcon name="screen" size={18} /></IconButton>
+                    <IconButton label="Configurar dispositivos de áudio" className={showDeviceSettings ? 'control-on' : ''} active={showDeviceSettings} onClick={() => setShowDeviceSettings((value) => !value)}><PixelIcon name="settings" size={18} /></IconButton>
                     <span className="controls-divider" />
-                    {inCall ? <button type="button" className="leave-button" onClick={leaveCall}><WinIcon name="phone" size={23} /> sair</button> : <button type="button" className="join-call-button" onClick={startCall}><WinIcon name="phone" size={23} /> entrar na chamada</button>}
+                    {inCall ? <button type="button" className="leave-button" onClick={leaveCall}><PixelIcon name="phone-off" size={16} /><span>Sair</span></button> : <button type="button" className="join-call-button" onClick={startCall}><PixelIcon name="phone" size={16} /><span>Entrar na chamada</span></button>}
                   </div>
                 </div>
-                {inCall && signalStatus === 'connected' && <MusicBot key={roomId} music={music?.roomId === roomId ? music : null} withoutJukebox={activeCallParticipants.filter((person) => !person.self && !remoteCallStates[person.peerId]?.jukebox).map((person) => person.name)} error={musicError} deafened={isDeafened} send={sendMusic} />}
+                {inCall && signalStatus === 'connected' && (
+                  <MusicBot
+                    key={roomId}
+                    music={activeRoomMusic}
+                    withoutJukebox={activeCallParticipants.filter((person) => !person.self && !remoteCallStates[person.peerId]?.jukebox).map((person) => person.name)}
+                    error={musicError}
+                    deafened={isDeafened}
+                    send={sendMusic}
+                    viewMode={jukeboxViewMode}
+                    onViewModeChange={changeJukeboxViewMode}
+                    stageCardRef={stageCardRef}
+                    stageSlotRef={jukeboxSlotRef}
+                    isStageFocused={focusedCallPeerId === '__jukebox__'}
+                    onToggleStageFocus={() => setFocusedCallPeerId((current) => current === '__jukebox__' ? '' : '__jukebox__')}
+                    layoutKey={`${focusedCallPeerId}|${chatVisible}|${callChatSplit}|${activeCallParticipants.length}|${showJukeboxOnStage}`}
+                  />
+                )}
                 {showDeviceSettings && (
                   <div className="device-settings-popover" role="dialog" aria-labelledby="device-settings-title">
                     <div className="device-settings-titlebar">
-                      <div className="device-settings-titlebar-label"><img className="room-info-titlebar-icon" src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong id="device-settings-title">JUMP — dispositivos de áudio</strong></div>
+                      <div className="device-settings-titlebar-label"><PixelIcon name="volume" size={16} /><strong id="device-settings-title">JUMP — dispositivos de áudio</strong></div>
                       <div className="device-settings-title-actions">
-                        <button type="button" className="device-refresh-button" onClick={refreshAudioDevices} aria-label="Atualizar dispositivos" title="Atualizar dispositivos"><RefreshCw size={13} /></button>
+                        <button type="button" className="device-refresh-button" onClick={refreshAudioDevices} aria-label="Atualizar dispositivos" title="Atualizar dispositivos"><PixelIcon name="refresh" size={14} /></button>
                         <button type="button" className="device-close-button win98-close-control" onClick={() => setShowDeviceSettings(false)} aria-label="Fechar configurações de áudio" title="Fechar">×</button>
                       </div>
                     </div>
                     <div className="device-settings-body">
-                      <label className="device-field"><span><Mic size={14} /> microfone</span><select value={selectedAudioInputId} onChange={handleAudioInputChange}><option value="">microfone padrão</option>{audioInputDevices.map((device, index) => <option key={device.deviceId || `input-${index}`} value={device.deviceId}>{device.label || `microfone ${index + 1}`}</option>)}</select></label>
-                      <label className="device-field"><span><Volume2 size={14} /> saída</span><select value={selectedAudioOutputId} onChange={handleAudioOutputChange}><option value="">saída padrão do sistema</option>{audioOutputDevices.map((device, index) => <option key={device.deviceId || `output-${index}`} value={device.deviceId}>{device.label || `saída ${index + 1}`}</option>)}</select></label>
+                      <label className="device-field"><span><PixelIcon name="mic" size={14} /> Microfone</span><select value={selectedAudioInputId} onChange={handleAudioInputChange}><option value="">microfone padrão</option>{audioInputDevices.map((device, index) => <option key={device.deviceId || `input-${index}`} value={device.deviceId}>{device.label || `microfone ${index + 1}`}</option>)}</select></label>
+                      <label className="device-field"><span><PixelIcon name="volume" size={14} /> Saída</span><select value={selectedAudioOutputId} onChange={handleAudioOutputChange}><option value="">saída padrão do sistema</option>{audioOutputDevices.map((device, index) => <option key={device.deviceId || `output-${index}`} value={device.deviceId}>{device.label || `saída ${index + 1}`}</option>)}</select></label>
                       <small className="device-settings-hint">A troca do microfone vale imediatamente. A saída usa o seletor do sistema quando o navegador oferece suporte.</small>
                     </div>
                   </div>
@@ -3509,39 +3526,39 @@ function App() {
 
               {callPanelOpen && chatVisible && <PaneResizeHandle value={callChatSplit} onChange={updateCallChatSplit} />}
 
-              {(permissionError || signalStatus !== 'connected') && <div className={`notice-bar ${permissionError ? 'is-warning' : ''}`}><span>{permissionError || (SIGNAL_ORIGIN && signalStatus === 'offline'
+              {(permissionError || signalStatus !== 'connected') && <div className={`notice-bar ${permissionError ? 'is-warning' : ''}`}><PixelIcon name="info" size={16} /><span>{permissionError || (SIGNAL_ORIGIN && signalStatus === 'offline'
                 ? `O servidor ${serverAddressLabel(SIGNAL_ORIGIN)} não responde. Se o IP do host mudou (Radmin novo, PC formatado), atualize o endereço.`
                 : 'Sinalização offline: peers conectados continuam conversando; novas entradas precisam do servidor.')}</span>
               {!permissionError && SIGNAL_ORIGIN && signalStatus === 'offline' && <span className="notice-actions">
                 <button type="button" onClick={() => setServersDialog({ edit: { serverId: recentRoomSessions.find((session) => session.signal === SIGNAL_ORIGIN && session.serverId)?.serverId || '', serverName: recentRoomSessions.find((session) => session.signal === SIGNAL_ORIGIN)?.serverName || '', signal: SIGNAL_ORIGIN } })}>Alterar endereço…</button>
                 <button type="button" onClick={() => openServerSignal('')}>Usar este PC</button>
-              </span>}<IconButton label="Fechar aviso" className="notice-close-button win98-close-control" onClick={() => setPermissionError('')}><X size={15} /></IconButton></div>}
+              </span>}<IconButton label="Fechar aviso" className="notice-close-button win98-close-control" onClick={() => setPermissionError('')}>×</IconButton></div>}
 
               {chatVisible && <section className="chat-card">
                 <div className="chat-head">
                   <div className="chat-head-title">
                     {isDirectChat ? (
                       <div className="direct-chat-heading">
-                        <Avatar initials={initialsFor(directPeer.name)} tone={toneFor(directPeer.id)} size="md" src={directPeer.avatar} alt={directPeer.name} presence={directPeer.status} />
-                        <div><h3>{directPeer.name}</h3></div>
+                        <PixelIcon name="people" size={16} />
+                        <h3>{directPeer.name}</h3>
                       </div>
                     ) : editingRoomName ? (
                       <form className="room-name-editor" onSubmit={saveRoomName}>
                         <input autoFocus value={roomNameDraft} onChange={(event) => setRoomNameDraft(event.target.value)} aria-label="Nome da sala" maxLength={48} />
-                        <button type="submit" aria-label="Salvar nome da sala" title="Salvar"><Check size={13} /></button>
-                        <button type="button" className="win98-close-control" aria-label="Cancelar edição" title="Cancelar" onClick={cancelRoomNameEdit}><X size={13} /></button>
+                        <button type="submit" aria-label="Salvar nome da sala" title="Salvar"><PixelIcon name="check" size={14} /></button>
+                        <button type="button" className="win98-close-control" aria-label="Cancelar edição" title="Cancelar" onClick={cancelRoomNameEdit}>×</button>
                       </form>
                     ) : (
-                      <div className="room-name-heading"><h3>{roomName}</h3>{roomCanManage && <IconButton label="Editar nome da sala" className="room-edit-button" onClick={beginRoomNameEdit}><WinIcon name="pencil" size={25} /></IconButton>}</div>
+                      <div className="room-name-heading"><PixelIcon name="chat" size={16} /><h3>{roomName}</h3>{roomCanManage && <IconButton label="Editar nome da sala" className="room-edit-button" onClick={beginRoomNameEdit}><PixelIcon name="pencil" size={14} /></IconButton>}</div>
                     )}
                   </div>
                   <div className="chat-head-actions">
                     {isDirectChat ? (
-                      <IconButton label="Voltar para a sala" onClick={closeDirectChat}><WinIcon name="computer" size={19} /></IconButton>
+                      <IconButton label="Voltar para a sala" onClick={closeDirectChat}><WinIcon name="computer" size={14} /></IconButton>
                     ) : (
                       <>
-                        <IconButton label="Informações da sala" className={roomInfoOpen ? 'is-active' : ''} active={roomInfoOpen} onClick={() => { setRoomInfoOpen((value) => !value); setEditingRoomName(false); }}><Info size={16} /></IconButton>
-                        {roomCanManage && <IconButton label="Excluir sala" className="room-delete-button win98-close-control win98-close-control--danger" onClick={deleteRoom}><X size={16} /></IconButton>}
+                        <IconButton label="Informações da sala" className={roomInfoOpen ? 'is-active' : ''} active={roomInfoOpen} onClick={() => { setRoomInfoOpen((value) => !value); setEditingRoomName(false); }}><PixelIcon name="info" size={14} /></IconButton>
+                        {roomCanManage && <IconButton label="Excluir sala" className="room-delete-button win98-close-control win98-close-control--danger" onClick={deleteRoom}>×</IconButton>}
                       </>
                     )}
                   </div>
@@ -3550,20 +3567,20 @@ function App() {
                   <div className="room-info-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRoomInfoOpen(false); }}>
                     <div className="room-info-dialog" role="dialog" aria-modal="true" aria-labelledby="room-info-title" onMouseDown={(event) => event.stopPropagation()}>
                       <div className="room-info-titlebar">
-                        <div className="room-info-titlebar-label"><img className="room-info-titlebar-icon" src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong id="room-info-title">JUMP — informações da sala</strong></div>
+                        <div className="room-info-titlebar-label"><PixelIcon name="info" size={16} /><strong id="room-info-title">JUMP — informações da sala</strong></div>
                         <button type="button" className="win98-close-control" aria-label="Fechar informações" onClick={() => setRoomInfoOpen(false)}>×</button>
                       </div>
                       <div className="room-info-body">
-                        <div className="room-info-symbol" aria-hidden="true"><Info size={25} /></div>
+                        <div className="room-info-symbol" aria-hidden="true"><PixelIcon name="info" size={32} /></div>
                         <div className="room-info-data">
                           <strong className="room-info-room-name">{roomName}</strong>
                           <dl>
-                            <div><dt>criada em</dt><dd>{infoCreatedLabel}</dd></div>
-                            <div><dt>membros</dt><dd>{infoMemberCount}</dd></div>
-                            <div><dt>mensagens</dt><dd>{infoMessageCount}</dd></div>
-                            <div><dt>dono</dt><dd>{roomOwnerName || 'host do servidor'}</dd></div>
-                            <div><dt>servidor</dt><dd>{currentServer?.name || 'desconhecido'} ({serverAddressLabel(SIGNAL_ORIGIN)})</dd></div>
-                            <div><dt>você</dt><dd>{isServerAdmin ? 'host (administra tudo)' : roomCanManage ? 'pode gerenciar' : 'participante'}</dd></div>
+                            <div><dt>Criada em</dt><dd>{infoCreatedLabel}</dd></div>
+                            <div><dt>Membros</dt><dd>{infoMemberCount}</dd></div>
+                            <div><dt>Mensagens</dt><dd>{infoMessageCount}</dd></div>
+                            <div><dt>Dono</dt><dd>{roomOwnerName || 'host do servidor'}</dd></div>
+                            <div><dt>Servidor</dt><dd>{currentServer?.name || 'desconhecido'} ({serverAddressLabel(SIGNAL_ORIGIN)})</dd></div>
+                            <div><dt>Você</dt><dd>{isServerAdmin ? 'host (administra tudo)' : roomCanManage ? 'pode gerenciar' : 'participante'}</dd></div>
                           </dl>
                           {roomCanManage && peers.length > 0 && (
                             <label className="room-transfer">
@@ -3581,7 +3598,7 @@ function App() {
                   </div>
                 )}
                 <div className="message-list" ref={messageListRef} onScroll={updateMessageListStickiness}>
-                  {visibleMessages.length === 0 ? (isDirectChat ? <div className="empty-chat direct-empty-chat"><MessageCircle size={18} /><strong>Nenhuma mensagem ainda.</strong></div> : <div className="empty-chat"><MessageCircle size={18} /><strong>Nenhuma mensagem ainda.</strong><span>Seja a primeira pessoa a escrever nesta sala.</span></div>) : visibleMessages.map((message, index) => {
+                  {visibleMessages.length === 0 ? (isDirectChat ? <div className="empty-chat direct-empty-chat"><PixelIcon name="chat" size={24} /><strong>Nenhuma mensagem ainda.</strong></div> : <div className="empty-chat"><PixelIcon name="chat" size={24} /><strong>Nenhuma mensagem ainda.</strong><span>Seja a primeira pessoa a escrever nesta sala.</span></div>) : visibleMessages.map((message, index) => {
                     const previousMessage = visibleMessages[index - 1];
                     const currentSender = message.senderId || message.senderName;
                     const previousSender = previousMessage?.senderId || previousMessage?.senderName;
@@ -3601,14 +3618,20 @@ function App() {
 
                     return (
                       <article className={`message${senderChanged ? ' is-sender-change' : ''}`} key={message.id}>
-                        <Avatar initials={message.initials} tone={message.tone} size="md" src={message.avatar} alt={message.senderName} />
-                        <div className="message-content"><div className="message-meta"><strong>{message.senderName}</strong><time>{message.time}</time></div>{message.text && <p>{message.text}</p>}{(message.image || message.attachment) && <MessageAttachment message={message} />}</div>
+                        <Avatar initials={message.initials} tone={message.tone} size="sm" src={message.avatar} alt={message.senderName} />
+                        <div className="message-content"><div className="message-meta"><strong className={`sender-tone-${message.tone || 'blue'}`}>{message.senderName}</strong><time>{message.time}</time></div>{message.text && <p>{message.text}</p>}{(message.image || message.attachment) && <MessageAttachment message={message} />}</div>
                       </article>
                     );
                   })}
                 </div>
                 <input ref={imageInputRef} className="hidden-file-input" type="file" accept="*/*" onChange={handleAttachmentFile} />
-                <form className="message-composer" onSubmit={sendMessage}><button type="button" className="composer-add" aria-label="Enviar arquivo" title="Enviar arquivo" disabled={!hasActiveRoom && !isDirectChat} onClick={() => imageInputRef.current?.click()}><Paperclip size={18} /></button><span className="composer-prompt" aria-hidden="true">$</span><div className="composer-input-shell"><input ref={composerInputRef} value={draft} disabled={!hasActiveRoom && !isDirectChat} onChange={(event) => { setDraft(event.target.value); window.requestAnimationFrame(updateComposerCursor); }} onSelect={updateComposerCursor} onClick={updateComposerCursor} onKeyUp={updateComposerCursor} placeholder={isDirectChat ? `escreva para ${directPeer.name}` : hasActiveRoom ? 'escreva para esta sala' : 'crie ou selecione uma sala'} /> <span className="composer-cursor" aria-hidden="true" style={{ left: `${composerCursorLeft}px` }} /></div><button type="submit" className="composer-send" aria-label="Enviar mensagem" disabled={!hasActiveRoom && !isDirectChat}><WinIcon name="send" size={25} /></button></form>
+                <form className="message-composer" onSubmit={sendMessage}>
+                  <button type="button" className="composer-add" aria-label="Enviar arquivo" title="Anexar arquivo" disabled={!hasActiveRoom && !isDirectChat} onClick={() => imageInputRef.current?.click()}><PixelIcon name="paperclip" size={16} /></button>
+                  <div className="composer-input-shell">
+                    <input ref={composerInputRef} value={draft} disabled={!hasActiveRoom && !isDirectChat} onChange={(event) => setDraft(event.target.value)} placeholder={isDirectChat ? `Escreva para ${directPeer.name}...` : hasActiveRoom ? 'Escreva para esta sala...' : 'Crie ou selecione uma sala'} />
+                  </div>
+                  <button type="submit" className="composer-send" aria-label="Enviar mensagem" disabled={!hasActiveRoom && !isDirectChat}><PixelIcon name="send" size={16} /><span>Enviar</span></button>
+                </form>
               </section>}
             </div>
 
@@ -3622,12 +3645,12 @@ function App() {
         }}>
           <section className="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
             <div className="update-titlebar">
-              <div className="update-titlebar-label"><img className="room-info-titlebar-icon" src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong id="update-dialog-title">JUMP — atualização</strong></div>
+              <div className="update-titlebar-label"><PixelIcon name="update" size={16} /><strong id="update-dialog-title">JUMP — atualização</strong></div>
               <button type="button" className="win98-close-control" aria-label="Fechar atualização" onClick={() => setUpdateDialogOpen(false)}>×</button>
             </div>
             <div className={`update-body ${updateBusy ? 'is-busy' : ''}`}>
               <div className="update-search-visual" aria-hidden="true">
-                <WinIcon name="update" size={44} />
+                <WinIcon name="update" size={32} />
                 {updateBusy && <span className="update-search-dots"><i /><i /><i /></span>}
               </div>
               <strong className="update-heading">{updateDialogHeading}</strong>
@@ -3635,17 +3658,16 @@ function App() {
               {updateBusy && <div className="update-progress" role="progressbar" aria-label="Progresso da atualização" aria-valuemin="0" aria-valuemax="100" aria-valuenow={updateState.status === 'downloading' ? updateProgress : undefined}><span style={{ width: `${updateProgress}%` }} /></div>}
             </div>
             <div className="update-actions">
-              {updateState.status === 'available' && <button type="button" className="dialog-primary" onClick={handleUpdate}>baixar</button>}
-              {updateState.status === 'downloaded' && <button type="button" className="dialog-primary" onClick={handleUpdate}>reiniciar e atualizar</button>}
-              {updateState.status === 'error' && <button type="button" className="dialog-primary" onClick={handleUpdate}>tentar novamente</button>}
-              <button type="button" className="dialog-secondary" onClick={() => setUpdateDialogOpen(false)}>{updateBusy ? 'ocultar' : 'OK'}</button>
+              {updateState.status === 'available' && <button type="button" className="dialog-primary" onClick={handleUpdate}>Baixar</button>}
+              {updateState.status === 'downloaded' && <button type="button" className="dialog-primary" onClick={handleUpdate}>Reiniciar e atualizar</button>}
+              {updateState.status === 'error' && <button type="button" className="dialog-primary" onClick={handleUpdate}>Tentar novamente</button>}
+              <button type="button" className="dialog-secondary" onClick={() => setUpdateDialogOpen(false)}>{updateBusy ? 'Ocultar' : 'OK'}</button>
             </div>
           </section>
         </div>
       )}
 
       {screenSharePickerOpen && <ScreenShareDialog
-        appIcon={winAppIcon}
         sources={screenShareSources}
         loading={screenShareSourcesLoading}
         mediaCapabilities={screenShareMediaCapabilities}
@@ -3669,7 +3691,7 @@ function App() {
         <div className="profile-settings-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setProfileSettingsOpen(false); }}>
           <form className="profile-settings-dialog" onSubmit={saveProfile} role="dialog" aria-modal="true" aria-labelledby="profile-settings-title" onMouseDown={(event) => event.stopPropagation()}>
             <div className="profile-settings-titlebar">
-              <div className="profile-settings-titlebar-label"><img className="room-info-titlebar-icon" src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong id="profile-settings-title">JUMP — configurações do perfil</strong></div>
+              <div className="profile-settings-titlebar-label"><PixelIcon name="people" size={16} /><strong id="profile-settings-title">JUMP — configurações do perfil</strong></div>
               <button type="button" className="win98-close-control" aria-label="Fechar configurações do perfil" onClick={() => setProfileSettingsOpen(false)}>×</button>
             </div>
             <div className="profile-settings-body">
@@ -3678,25 +3700,25 @@ function App() {
                 <button type="button" className="profile-settings-avatar-button" onClick={() => profilePhotoInputRef.current?.click()} aria-label="Mudar imagem do perfil">
                   <Avatar initials={initialsFor(displayName)} tone="yellow" size="lg" src={profileAvatar} alt={displayName} presence={profileStatus} />
                 </button>
-                <div><strong>{displayName}</strong><small>identidade deste computador</small><button type="button" className="profile-change-photo" onClick={() => profilePhotoInputRef.current?.click()}><Camera size={13} /> mudar imagem</button></div>
+                <div><strong>{displayName}</strong><small>Identidade deste computador</small><button type="button" className="profile-change-photo" onClick={() => profilePhotoInputRef.current?.click()}><PixelIcon name="camera" size={14} /> Mudar imagem</button></div>
               </div>
-              <label className="profile-settings-field"><span>nome</span><input autoFocus value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} maxLength={32} aria-label="Nome do perfil" /></label>
+              <label className="profile-settings-field"><span>Nome</span><input autoFocus value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} maxLength={32} aria-label="Nome do perfil" /></label>
               <fieldset className="profile-status-fieldset">
-                <legend>status</legend>
+                <legend>Status</legend>
                 <div className="profile-status-options" role="radiogroup" aria-label="Status do perfil">
                   {[
-                    ['online', 'online'],
-                    ['dnd', 'não perturbe'],
-                    ['offline', 'offline'],
+                    ['online', 'Online'],
+                    ['dnd', 'Não perturbe'],
+                    ['offline', 'Offline'],
                   ].map(([value, label]) => (
                     <button type="button" key={value} className={`profile-status-option ${profileStatus === value ? 'is-selected' : ''}`} aria-pressed={profileStatus === value} onClick={() => updateProfileStatus(value)}>
-                      <PresenceIcon status={value} size={19} /><strong>{label}</strong>
+                      <PresenceIcon status={value} size={16} /><strong>{label}</strong>
                     </button>
                   ))}
                 </div>
               </fieldset>
             </div>
-            <div className="profile-settings-actions"><button type="button" className="dialog-secondary" onClick={() => setProfileSettingsOpen(false)}>cancelar</button><button type="submit" className="dialog-primary"><Check size={14} /> salvar</button></div>
+            <div className="profile-settings-actions"><button type="submit" className="dialog-primary"><PixelIcon name="check" size={14} /> Salvar</button><button type="button" className="dialog-secondary" onClick={() => setProfileSettingsOpen(false)}>Cancelar</button></div>
           </form>
         </div>
       )}
@@ -3717,7 +3739,7 @@ function App() {
         <div className="app-settings-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAppSettingsOpen(false); }}>
           <section className="app-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" onMouseDown={(event) => event.stopPropagation()}>
             <div className="app-settings-titlebar">
-              <div className="app-settings-titlebar-label"><img className="room-info-titlebar-icon" src={winAppIcon} alt="" aria-hidden="true" draggable="false" /><strong id="app-settings-title">JUMP — configurações</strong></div>
+              <div className="app-settings-titlebar-label"><PixelIcon name="settings" size={16} /><strong id="app-settings-title">JUMP — configurações</strong></div>
               <button type="button" className="win98-close-control" aria-label="Fechar configurações" onClick={() => setAppSettingsOpen(false)}>×</button>
             </div>
             <div className="app-settings-body">
@@ -3777,15 +3799,44 @@ function App() {
         </div>
       )}
 
+      {helpDialogOpen && (
+        <div className="room-info-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpDialogOpen(false); }}>
+          <section className="room-info-dialog" role="dialog" aria-modal="true" aria-labelledby="help-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="room-info-titlebar">
+              <div className="room-info-titlebar-label"><PixelIcon name="help" size={16} /><strong id="help-dialog-title">JUMP — ajuda</strong></div>
+              <button type="button" className="win98-close-control" aria-label="Fechar ajuda" onClick={() => setHelpDialogOpen(false)}>×</button>
+            </div>
+            <div className="room-info-body">
+              <div className="room-info-symbol" aria-hidden="true"><PixelIcon name="app" size={32} /></div>
+              <div className="room-info-data">
+                <strong className="room-info-room-name">JUMP v{APP_VERSION}</strong>
+                <dl>
+                  <div><dt>Maximizar tela</dt><dd>Duplo clique na transmissão ou vídeo</dd></div>
+                  <div><dt>Tela cheia</dt><dd>Botão "tela cheia" para modo borderless real (Esc sai)</dd></div>
+                  <div><dt>Zoom na tela</dt><dd>Roda do mouse com a tela maximizada ou em tela cheia</dd></div>
+                  <div><dt>Volume individual</dt><dd>Clique direito no card da pessoa</dd></div>
+                  <div><dt>Atalhos globais</dt><dd>Botão Configurações na barra superior</dd></div>
+                  <div><dt>Jukebox</dt><dd>Alterne entre Música e Vídeo (assistir juntos no palco)</dd></div>
+                </dl>
+              </div>
+            </div>
+            <div className="room-info-actions"><button type="button" className="room-info-ok" onClick={() => setHelpDialogOpen(false)}>OK</button></div>
+          </section>
+        </div>
+      )}
+
       {roomAccess && (
         <div className="room-dialog-backdrop" role="presentation">
           <form className="room-dialog" onSubmit={submitRoomAccess} role="dialog" aria-modal="true" aria-labelledby="room-dialog-title">
-            <button type="button" className="room-dialog-close win98-close-control" onClick={() => { setRoomAccess(null); setPermissionError(''); }} aria-label="Fechar"><X size={16} /></button>
-            <span className="card-kicker">acesso à sala</span>
-            <h2 id="room-dialog-title">{roomAccess.name}</h2>
-            <p>Esta sala é protegida. Digite a senha uma vez; ela será lembrada neste dispositivo.</p>
-            <label className="room-dialog-field"><span>senha</span><input autoFocus type="password" value={roomAccess.password} onChange={(event) => setRoomAccess((current) => current ? { ...current, password: event.target.value } : current)} placeholder="senha da sala" /></label>
-            <div className="room-dialog-actions"><button type="button" className="dialog-secondary" onClick={() => { setRoomAccess(null); setPermissionError(''); }}>cancelar</button><button type="submit" className="dialog-primary"><LockKeyhole size={14} /> entrar</button></div>
+            <div className="room-dialog-titlebar">
+              <div className="room-info-titlebar-label"><PixelIcon name="lock" size={16} /><strong id="room-dialog-title">Acesso à sala — {roomAccess.name}</strong></div>
+              <button type="button" className="room-dialog-close win98-close-control" onClick={() => { setRoomAccess(null); setPermissionError(''); }} aria-label="Fechar">×</button>
+            </div>
+            <div className="room-dialog-body">
+              <p>Esta sala é protegida. Digite a senha uma vez; ela será lembrada neste dispositivo.</p>
+              <label className="room-dialog-field"><span>Senha:</span><input autoFocus type="password" value={roomAccess.password} onChange={(event) => setRoomAccess((current) => current ? { ...current, password: event.target.value } : current)} placeholder="Senha da sala" /></label>
+            </div>
+            <div className="room-dialog-actions"><button type="submit" className="dialog-primary"><PixelIcon name="lock" size={14} /> Entrar</button><button type="button" className="dialog-secondary" onClick={() => { setRoomAccess(null); setPermissionError(''); }}>Cancelar</button></div>
           </form>
         </div>
       )}

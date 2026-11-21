@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { musicCommand, youtubeId } from '../music-room.mjs';
+import { musicCommand, musicTitle, youtubeId } from '../music-room.mjs';
 import { eventBind } from '../src/media/muteBind.js';
 
 test('accepts YouTube links and rejects unrelated hosts and malformed IDs', () => {
@@ -28,6 +28,19 @@ test('queue is bounded and bad input leaves state unchanged', () => {
   assert.throws(() => musicCommand(state, { action: 'add', url: 'https://youtu.be/dQw4w9WgXcQ' }));
   assert.throws(() => musicCommand(state, { action: 'add', url: 'bad' }));
   assert.equal(state.queue.length, 30);
+});
+test('supports video/music mode toggle, seek, and title whitespace normalization', () => {
+  let state = musicCommand(null, { action: 'add', url: 'https://youtu.be/dQw4w9WgXcQ', mode: 'video' }, 1000);
+  assert.equal(state.mode, 'video');
+  state = musicTitle(state, state.queue[0].key, '  Synthwave   Sessions  ');
+  assert.equal(state.queue[0].title, 'Synthwave Sessions');
+  state = musicCommand(state, { action: 'seek', position: 42.5 }, 2000);
+  assert.equal(state.position, 42.5);
+  assert.equal(state.updatedAt, 2000);
+  state = musicCommand(state, { action: 'mode', mode: 'music' }, 3000);
+  assert.equal(state.mode, 'music');
+  assert.equal(musicCommand(state, { action: 'mode', mode: 'music' }, 4000), state);
+  assert.equal(musicCommand(state, { action: 'seek', position: -5 }, 4000), state);
 });
 test('binds use physical keys, modifiers and function keys', () => {
   assert.equal(eventBind({ code: 'KeyM', ctrlKey: true, shiftKey: true }), 'Control+Shift+M');

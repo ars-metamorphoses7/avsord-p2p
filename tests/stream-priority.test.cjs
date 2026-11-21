@@ -30,8 +30,12 @@ test('raises CPU and GPU priority while sharing/watching (including extra helper
   await priority.set(true);
   assert.equal(priority.active, true);
   await priority.set(false);
-  assert.deepEqual(gpu, [[[10, 11, 12, 13, 15, 99], 4], [[10, 11, 12, 13, 15, 99], 2]]);
+  assert.deepEqual(gpu, [[[10, 11, 12, 13, 15, 99], 5], [[10, 11, 12, 13, 15, 99], 2]]);
   assert.deepEqual(cpu.filter(([pid]) => pid === 11).map(([, value]) => value), [
+    os.constants.priority.PRIORITY_HIGH,
+    os.constants.priority.PRIORITY_NORMAL,
+  ]);
+  assert.deepEqual(cpu.filter(([pid]) => pid === 12).map(([, value]) => value), [
     os.constants.priority.PRIORITY_ABOVE_NORMAL,
     os.constants.priority.PRIORITY_NORMAL,
   ]);

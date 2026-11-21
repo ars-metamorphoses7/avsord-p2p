@@ -309,6 +309,7 @@ async function run() {
     if (!grid || !card || !viewport || !video || !caption) return null;
     const cardRect = card.getBoundingClientRect();
     const viewportRect = viewport.getBoundingClientRect();
+    const videoRect = video.getBoundingClientRect();
     const captionRect = caption.getBoundingClientRect();
     const visibleCards = [...grid.querySelectorAll('.call-stream-card')]
       .filter((entry) => getComputedStyle(entry).display !== 'none').length;
@@ -316,12 +317,16 @@ async function run() {
       visibleCards,
       objectFit: getComputedStyle(video).objectFit,
       viewportInsideCard: viewportRect.top >= cardRect.top - 1 && viewportRect.bottom <= captionRect.top + 1,
+      videoInsideViewport: videoRect.top >= viewportRect.top - 1 && videoRect.bottom <= viewportRect.bottom + 1
+        && videoRect.left >= viewportRect.left - 1 && videoRect.right <= viewportRect.right + 1
+        && videoRect.height <= viewportRect.height + 1 && videoRect.width <= viewportRect.width + 1,
       captionInsideCard: captionRect.bottom <= cardRect.bottom + 1,
       fillsStage: cardRect.height > 600 && viewportRect.width > 1000,
     };
   })()`);
   if (!focusedLayout || focusedLayout.visibleCards !== 1 || focusedLayout.objectFit !== 'contain'
-    || !focusedLayout.viewportInsideCard || !focusedLayout.captionInsideCard || !focusedLayout.fillsStage) {
+    || !focusedLayout.viewportInsideCard || !focusedLayout.videoInsideViewport
+    || !focusedLayout.captionInsideCard || !focusedLayout.fillsStage) {
     throw new Error(`Layout focado cortado ou com participantes duplicados: ${JSON.stringify(focusedLayout)}`);
   }
   await windows[1].webContents.executeJavaScript(`(() => {

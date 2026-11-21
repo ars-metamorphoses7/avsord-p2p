@@ -18,16 +18,28 @@
   let player = null;
   const queued = [];
   const methods = new Set(['setVolume', 'mute', 'unMute', 'loadVideoById', 'cueVideoById', 'seekTo', 'playVideo', 'pauseVideo']);
-  const run = ({ method, args }) => { if (methods.has(method) && typeof player?.[method] === 'function') player[method](...(Array.isArray(args) ? args : [])); };
+  const run = ({ method, args }) => {
+    if (!methods.has(method) || typeof player?.[method] !== 'function') return;
+    const params = Array.isArray(args) ? args : [];
+    player[method](...params);
+    if (method === 'setVolume' && Number(params[0]) <= 0 && typeof player.mute === 'function') {
+      player.mute();
+    }
+  };
   window.addEventListener('message', event => {
     if (event.source !== parentWindow || !event.data?.jumpYouTube || typeof event.data.method !== 'string') return;
     if (player) run(event.data); else queued.push(event.data);
   });
-  const report = () => { if (typeof player?.getCurrentTime === 'function') post({ type: 'time', value: player.getCurrentTime() || 0 }); };
+  const report = () => {
+    if (typeof player?.getCurrentTime === 'function') {
+      const duration = typeof player.getDuration === 'function' ? Number(player.getDuration()) || 0 : 0;
+      post({ type: 'time', value: player.getCurrentTime() || 0, duration });
+    }
+  };
   window.onYouTubeIframeAPIReady = () => {
     const ready = new YT.Player('player', {
       width: '100%', height: '100%',
-      playerVars: { origin: window.location.origin, playsinline: 1 },
+      playerVars: { origin: window.location.origin, playsinline: 1, rel: 0, fs: 0 },
       events: {
         onReady: () => { player = ready; queued.splice(0).forEach(run); setInterval(report, 500); post({ type: 'ready' }); },
         onAutoplayBlocked: () => post({ type: 'autoplayBlocked' }),
