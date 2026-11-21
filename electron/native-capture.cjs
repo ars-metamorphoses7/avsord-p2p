@@ -209,7 +209,15 @@ function createNativeCapture({
     stop(`desativada: ${disabledReason}`);
   }
 
-  return { available, start, stop, disable, get active() { return Boolean(session); }, get disabledReason() { return disabledReason; } };
+  return {
+    available,
+    start,
+    stop,
+    disable,
+    get active() { return Boolean(session); },
+    get disabledReason() { return disabledReason; },
+    get pid() { return Number(session?.child?.pid) || 0; },
+  };
 }
 
 function setupNativeCapture({ app, ipcMain, sharedTexture, screen }) {

@@ -160,7 +160,7 @@ export function createScreenSfu({ send, broadcast, roomForSocket }) {
       initialAvailableOutgoingBitrate: 4_000_000,
       appData: { direction },
     });
-    if (direction === 'send') await transport.setMaxIncomingBitrate(16_000_000);
+    if (direction === 'send') await transport.setMaxIncomingBitrate(12_000_000);
     return transport;
   }
 

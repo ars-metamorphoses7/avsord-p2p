@@ -103,7 +103,11 @@ Options ParseOptions(int argc, wchar_t** argv) {
 }
 
 HMONITOR PickMonitor(const Options& options) {
-  if (options.hasPoint) return MonitorFromPoint(options.point, MONITOR_DEFAULTTOPRIMARY);
+  if (options.hasPoint) {
+    HMONITOR nearest = MonitorFromPoint(options.point, MONITOR_DEFAULTTONEAREST);
+    if (nearest) return nearest;
+    return MonitorFromPoint(options.point, MONITOR_DEFAULTTOPRIMARY);
+  }
   std::vector<HMONITOR> monitors;
   EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
     reinterpret_cast<std::vector<HMONITOR>*>(data)->push_back(monitor);
@@ -113,9 +117,46 @@ HMONITOR PickMonitor(const Options& options) {
   return MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
 }
 
+// Keep capture GPU copies ahead of uncapped games, matching OBS and Electron's
+// stream-priority boost without waiting for an external PowerShell call.
+void BoostCapturePriority() {
+  SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+  if (HMODULE gdi32 = LoadLibraryW(L"gdi32.dll")) {
+    using SetGpuPriorityFn = LONG(WINAPI*)(HANDLE, int);
+    if (auto setGpuPriority = reinterpret_cast<SetGpuPriorityFn>(GetProcAddress(gdi32, "D3DKMTSetProcessSchedulingPriorityClass"))) {
+      setGpuPriority(GetCurrentProcess(), 4);  // D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH
+    }
+    FreeLibrary(gdi32);
+  }
+}
+
+struct ScopedTimerResolution {
+  HMODULE winmm = nullptr;
+  UINT periodMs = 0;
+  explicit ScopedTimerResolution(UINT ms) {
+    winmm = LoadLibraryW(L"winmm.dll");
+    if (!winmm) return;
+    using TimePeriodFn = UINT(WINAPI*)(UINT);
+    if (auto begin = reinterpret_cast<TimePeriodFn>(GetProcAddress(winmm, "timeBeginPeriod"))) {
+      if (begin(ms) == 0) periodMs = ms;
+    }
+  }
+  ~ScopedTimerResolution() {
+    if (winmm && periodMs) {
+      using TimePeriodFn = UINT(WINAPI*)(UINT);
+      if (auto end = reinterpret_cast<TimePeriodFn>(GetProcAddress(winmm, "timeEndPeriod"))) end(periodMs);
+    }
+    if (winmm) FreeLibrary(winmm);
+  }
+};
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+  // Match Electron's physical screen coordinates on scaled displays (125/150%).
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  BoostCapturePriority();
+  ScopedTimerResolution timerResolution(1);
   // Every message is flushed explicitly; buffer the rest of a line.
   setvbuf(stdout, nullptr, _IOFBF, 1 << 14);
   init_apartment(apartment_type::multi_threaded);
@@ -137,8 +178,19 @@ int wmain(int argc, wchar_t** argv) {
   wgc::GraphicsCaptureItem item{nullptr};
   try {
     const auto interop = get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-    if (options.window) check_hresult(interop->CreateForWindow(options.window, guid_of<wgc::GraphicsCaptureItem>(), put_abi(item)));
-    else check_hresult(interop->CreateForMonitor(PickMonitor(options), guid_of<wgc::GraphicsCaptureItem>(), put_abi(item)));
+    if (options.window) {
+      check_hresult(interop->CreateForWindow(options.window, guid_of<wgc::GraphicsCaptureItem>(), put_abi(item)));
+    } else {
+      HMONITOR chosen = PickMonitor(options);
+      HRESULT monitorHr = interop->CreateForMonitor(chosen, guid_of<wgc::GraphicsCaptureItem>(), put_abi(item));
+      if (FAILED(monitorHr)) {
+        HMONITOR primary = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        if (primary && primary != chosen) {
+          monitorHr = interop->CreateForMonitor(primary, guid_of<wgc::GraphicsCaptureItem>(), put_abi(item));
+        }
+      }
+      check_hresult(monitorHr);
+    }
   } catch (hresult_error const& error) {
     Emit("ERROR capture-item %ld\n", static_cast<long>(error.code()));
     return 2;
@@ -179,6 +231,10 @@ int wmain(int argc, wchar_t** argv) {
   };
 
   auto size = item.Size();
+  if (size.Width < 2 || size.Height < 2) {
+    Emit("ERROR empty-source %dx%d\n", size.Width, size.Height);
+    return 2;
+  }
   // H.264 needs even dimensions; an odd last row/column is dropped.
   try {
     generations.push_back(createGeneration(static_cast<UINT>(size.Width) & ~1u, static_cast<UINT>(size.Height) & ~1u));
@@ -263,8 +319,10 @@ int wmain(int argc, wchar_t** argv) {
   // Announce a frame only after its copy finished on the GPU: the importer
   // reads the texture from another device without a keyed mutex.
   std::thread completion([&] {
+    int pendingSpins = 0;
     while (running) {
       bool pending = false;
+      bool completedAny = false;
       {
         std::lock_guard<std::mutex> guard(generationLock);
         for (auto& generation : generations) {
@@ -274,6 +332,7 @@ int wmain(int argc, wchar_t** argv) {
             pending = true;
             if (context->GetData(slot.query.get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
               slot.state = kSent;
+              completedAny = true;
               Emit("FRAME %d %d %lld\n", generation->id, i, slot.timestampUs);
             }
           }
@@ -287,8 +346,16 @@ int wmain(int argc, wchar_t** argv) {
           generations.erase(generations.begin());
         }
       }
-      if (pending) SwitchToThread();
-      else Sleep(1);
+      if (!pending || completedAny) {
+        pendingSpins = 0;
+        if (!pending) Sleep(1);
+      } else if (pendingSpins < 4) {
+        pendingSpins += 1;
+        SwitchToThread();
+      } else {
+        // Avoid spinning 100% of a CPU core while a heavy game occupies the GPU.
+        Sleep(1);
+      }
     }
   });
 

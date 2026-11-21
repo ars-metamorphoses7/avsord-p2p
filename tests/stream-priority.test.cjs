@@ -16,12 +16,13 @@ test('boosts capture, compositor/encoder and renderer processes only', () => {
   assert.deepEqual(streamProcessIds(METRICS), [10, 11, 12, 13, 15]);
 });
 
-test('raises CPU and GPU priority while sharing and restores it afterwards', async () => {
+test('raises CPU and GPU priority while sharing/watching (including extra helper pids) and restores afterwards', async () => {
   const cpu = [];
   const gpu = [];
   const priority = createStreamPriority({
     platform: 'win32',
     getAppMetrics: () => METRICS,
+    getExtraPids: () => [99, 11, 0],
     setPriority: (pid, value) => cpu.push([pid, value]),
     applyGpuPriority: async (pids, value) => { gpu.push([pids, value]); return 'ok'; },
   });
@@ -29,7 +30,7 @@ test('raises CPU and GPU priority while sharing and restores it afterwards', asy
   await priority.set(true);
   assert.equal(priority.active, true);
   await priority.set(false);
-  assert.deepEqual(gpu, [[[10, 11, 12, 13, 15], 4], [[10, 11, 12, 13, 15], 2]]);
+  assert.deepEqual(gpu, [[[10, 11, 12, 13, 15, 99], 4], [[10, 11, 12, 13, 15, 99], 2]]);
   assert.deepEqual(cpu.filter(([pid]) => pid === 11).map(([, value]) => value), [
     os.constants.priority.PRIORITY_ABOVE_NORMAL,
     os.constants.priority.PRIORITY_NORMAL,

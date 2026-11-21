@@ -467,9 +467,9 @@ if (!hasSingleInstanceLock) {
     setupClipboard();
     setupMediaDiagnostics();
     desktopMedia = setupDesktopMedia({ desktopCapturer, ipcMain, session });
-    setupStreamPriority({ app, ipcMain });
-    streamLogWriter = setupStreamLog({ app, ipcMain });
     nativeCapture = setupNativeCapture({ app, ipcMain, sharedTexture, screen });
+    setupStreamPriority({ app, ipcMain, getExtraPids: () => (nativeCapture.pid ? [nativeCapture.pid] : []) });
+    streamLogWriter = setupStreamLog({ app, ipcMain });
     app.on('child-process-gone', (_event, details) => {
       if (details?.reason === 'clean-exit') return;
       logProcessGone(`${details?.type}${details?.serviceName ? `/${details.serviceName}` : ''} ${details?.reason} exit=${details?.exitCode}`);

@@ -108,15 +108,24 @@ test('isolated estimate dips stay at the current resolution', () => {
 test('a sustained low estimate steps down one level at a time with a hold between steps', () => {
   const { state, changes } = run([
     ...repeat(10, HEALTHY),
-    ...repeat(30, { ...HEALTHY, availableOutgoingBitrate: 1_500_000 }),
+    ...repeat(30, { ...HEALTHY, availableOutgoingBitrate: 1_200_000 }),
   ]);
   assert.deepEqual(changes.map((change) => [change.level, change.reason]), [[1, 'bandwidth'], [2, 'bandwidth']]);
   assert.ok(changes[1].sample - changes[0].sample >= 6);
   assert.equal(state.level, STREAM_LEVELS.length - 1);
 });
 
-test('recovery waits, then restores one level; a failed retry doubles the wait', () => {
-  const low = { ...HEALTHY, availableOutgoingBitrate: 3_000_000 };
+test('calm/static scenes with application-limited BWE do not drop resolution', () => {
+  const { state, changes } = run([
+    ...repeat(10, HEALTHY),
+    ...repeat(40, { ...HEALTHY, availableOutgoingBitrate: 2_600_000, sendBitrateBps: 700_000, packetLossRatio: 0 }),
+  ]);
+  assert.deepEqual(changes, []);
+  assert.equal(state.level, 0);
+});
+
+test('recovery waits, then restores one level; a failed retry doubles the wait and eventually resets', () => {
+  const low = { ...HEALTHY, availableOutgoingBitrate: 2_200_000 };
   let { state, changes } = run([...repeat(10, HEALTHY), ...repeat(8, low)]);
   assert.equal(state.level, 1);
   const downAt = changes[0].sample;
@@ -137,14 +146,18 @@ test('recovery waits, then restores one level; a failed retry doubles the wait',
   ({ state, changes } = run(repeat(1, HEALTHY), state));
   assert.equal(state.level, 0);
   assert.equal(changes[0].sample - failedAt, 40);
+
+  // Staying stable after recovery resets backoff back to baseline.
+  ({ state } = run(repeat(45, HEALTHY), state));
+  assert.equal(state.upgradeWaitSamples, 20);
 });
 
 test('recovery needs estimate headroom for the richer level', () => {
-  const low = { ...HEALTHY, availableOutgoingBitrate: 3_000_000 };
+  const low = { ...HEALTHY, availableOutgoingBitrate: 2_200_000 };
   let { state } = run([...repeat(10, HEALTHY), ...repeat(8, low)]);
   assert.equal(state.level, 1);
-  // Above the 720p floor but below 1.5x the 1080p floor.
-  ({ state } = run(repeat(100, { ...HEALTHY, availableOutgoingBitrate: 5_000_000 }), state));
+  // Above the 720p floor but below 1.35x the 1080p floor (4.32 Mb/s).
+  ({ state } = run(repeat(100, { ...HEALTHY, availableOutgoingBitrate: 3_800_000 }), state));
   assert.equal(state.level, 1);
 });
 
@@ -176,13 +189,13 @@ test('a software encoder starts at 720p30', () => {
 test('sender gets a fixed 1080p60 ceiling that never follows the estimate', async () => {
   const sender = fakeSender();
   const state = initialStreamState();
-  assert.equal(await applyStreamSender(sender, state, { peerCount: 2 }), true);
+  assert.equal(await applyStreamSender(sender, state, { peerCount: 1 }), true);
   assert.deepEqual(
     [sender.parameters.encodings[0].maxBitrate, sender.parameters.encodings[0].maxFramerate, sender.parameters.encodings[0].scaleResolutionDownBy],
-    [20_000_000, 60, 1],
+    [10_000_000, 60, 1],
   );
   assert.equal(sender.parameters.degradationPreference, 'maintain-resolution');
-  await applyStreamSender(sender, evaluateStream(state, { ...HEALTHY, availableOutgoingBitrate: 2_000_000 }), { peerCount: 2 });
+  await applyStreamSender(sender, evaluateStream(state, { ...HEALTHY, availableOutgoingBitrate: 2_000_000 }), { peerCount: 1 });
   assert.equal(sender.calls, 1, 'an unchanged operating point must not reconfigure the encoder');
 });
 
@@ -190,7 +203,7 @@ test('lower levels scale the real source and keep even dimensions', async () => 
   const sender = fakeSender();
   await applyStreamSender(sender, { ...initialStreamState(), level: 1 }, { sourceWidth: 1920, sourceHeight: 1080 });
   assert.equal(Math.round(1080 / sender.parameters.encodings[0].scaleResolutionDownBy), 720);
-  assert.equal(sender.parameters.encodings[0].maxBitrate, 10_000_000);
+  assert.equal(sender.parameters.encodings[0].maxBitrate, 6_000_000);
 
   const ultrawide = streamEncodingParameters({ level: 2, temporalLevel: 1 }, { sourceWidth: 1920, sourceHeight: 804 });
   const height = Math.round(804 / ultrawide.scaleResolutionDownBy);
@@ -199,9 +212,10 @@ test('lower levels scale the real source and keep even dimensions', async () => 
   assert.equal(ultrawide.maxFramerate, 30);
 });
 
-test('large meshes share the uplink ceiling', () => {
-  assert.equal(streamEncodingParameters(initialStreamState(), {}, 2).maxBitrate, 20_000_000);
-  assert.equal(streamEncodingParameters(initialStreamState(), {}, 3).maxBitrate, 15_000_000);
+test('multi-viewer meshes share the uplink ceiling progressively', () => {
+  assert.equal(streamEncodingParameters(initialStreamState(), {}, 1).maxBitrate, 10_000_000);
+  assert.equal(streamEncodingParameters(initialStreamState(), {}, 2).maxBitrate, 7_500_000);
+  assert.equal(streamEncodingParameters(initialStreamState(), {}, 3).maxBitrate, 6_000_000);
 });
 
 test('configuring a reused sender clears an old adaptive screen scale', async () => {
