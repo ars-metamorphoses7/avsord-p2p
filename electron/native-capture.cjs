@@ -14,6 +14,11 @@ const MAX_FRAMES_IN_FLIGHT = 3;
 const MAX_FAILED_SENDS = 30;
 const STATS_INTERVAL_MS = 10_000;
 
+// The renderer that asked for the frames crashed or navigated away.
+function frameGone(frame) {
+  try { return Boolean(frame?.isDestroyed?.() || frame?.detached); } catch { return true; }
+}
+
 function parseCaptureLine(line) {
   const [type, ...fields] = String(line || '').trim().split(/\s+/);
   const numbers = fields.map(Number);
@@ -67,8 +72,9 @@ function createNativeCapture({
   log = (message) => console.info(`[native-capture] ${message}`),
 } = {}) {
   let session = null;
+  let disabledReason = disabled ? 'disabled' : '';
 
-  const available = () => !disabled && platform === 'win32' && Boolean(sharedTexture?.importSharedTexture) && exists(helperPath);
+  const available = () => !disabledReason && platform === 'win32' && Boolean(sharedTexture?.importSharedTexture) && exists(helperPath);
 
   function stop(reason = 'stopped') {
     const current = session;
@@ -120,6 +126,11 @@ function createNativeCapture({
       };
 
       const onFrame = ({ generation, slot, timestampUs }) => {
+        if (frameGone(frame)) {
+          release(generation, slot);
+          end('renderer-gone');
+          return;
+        }
         const texture = current.textures.get(`${generation}:${slot}`);
         // The encoder is behind: return the slot instead of queueing frames.
         if (!texture || current.inFlight >= MAX_FRAMES_IN_FLIGHT) {
@@ -150,7 +161,8 @@ function createNativeCapture({
           .then(() => { current.failedSends = 0; })
           .catch(() => {
             current.failedSends += 1;
-            if (current.failedSends >= MAX_FAILED_SENDS) end('renderer-unreachable');
+            if (frameGone(frame)) end('renderer-gone');
+            else if (current.failedSends >= MAX_FAILED_SENDS) end('renderer-unreachable');
           })
           .finally(() => {
             current.inFlight -= 1;
@@ -191,7 +203,21 @@ function createNativeCapture({
     });
   }
 
-  return { available, start, stop, get active() { return Boolean(session); } };
+  /** Turns the native path off until restart; shares fall back to Chromium. */
+  function disable(reason = 'disabled') {
+    disabledReason = String(reason);
+    stop(`desativada: ${disabledReason}`);
+  }
+
+  return {
+    available,
+    start,
+    stop,
+    disable,
+    get active() { return Boolean(session); },
+    get disabledReason() { return disabledReason; },
+    get pid() { return Number(session?.child?.pid) || 0; },
+  };
 }
 
 function setupNativeCapture({ app, ipcMain, sharedTexture, screen }) {

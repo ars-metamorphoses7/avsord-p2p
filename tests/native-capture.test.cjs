@@ -114,3 +114,40 @@ test('the source closing ends the capture and notifies the renderer', async () =
   assert.deepEqual(ended, ['closed']);
   assert.equal(capture.active, false);
 });
+
+test('a dead renderer ends the capture instead of sending to a disposed frame', async () => {
+  const child = fakeHelper();
+  const sharedTexture = fakeSharedTexture();
+  const frame = { destroyed: false, isDestroyed() { return this.destroyed; } };
+  const ended = [];
+  const capture = createNativeCapture({
+    helperPath: 'jump-capture.exe', sharedTexture, platform: 'win32', exists: () => true, log: () => {},
+    spawnProcess: () => child,
+  });
+  const started = capture.start({ sourceId: 'window:99:0', frame, onEnded: (reason) => ended.push(reason) });
+  child.say('TEX 1 0 4096 1280 720');
+  child.say('READY 1280 720');
+  await started;
+  frame.destroyed = true;
+  child.say('FRAME 1 0 5000');
+  await tick();
+  assert.equal(sharedTexture.imports.length, 0);
+  assert.deepEqual(ended, ['renderer-gone']);
+  assert.deepEqual(child.stdin.lines, ['REL 1 0', 'STOP']);
+  assert.equal(capture.active, false);
+});
+
+test('disable stops the session and makes the native path unavailable', async () => {
+  const child = fakeHelper();
+  const capture = createNativeCapture({
+    helperPath: 'jump-capture.exe', sharedTexture: fakeSharedTexture(), platform: 'win32', exists: () => true, log: () => {},
+    spawnProcess: () => child,
+  });
+  const started = capture.start({ sourceId: 'window:99:0', frame: {} });
+  child.say('READY 1280 720');
+  await started;
+  capture.disable('renderer crashed');
+  assert.equal(capture.active, false);
+  assert.equal(capture.available(), false);
+  assert.deepEqual(await capture.start({ sourceId: 'window:99:0', frame: {} }), { ok: false, reason: 'unavailable' });
+});

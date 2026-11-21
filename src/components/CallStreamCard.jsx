@@ -91,7 +91,9 @@ export function CallStreamCard({
   voiceVolume = 1,
 }) {
   const showPausedShare = !isSelf && isSharing && !isWatching;
-  const [localPreviewEnabled, setLocalPreviewEnabled] = useState(true);
+  // Default local preview off so the streamer does not spend GPU compositing
+  // their own 1080p60 feed on top of a game (one click enables it anytime).
+  const [localPreviewEnabled, setLocalPreviewEnabled] = useState(false);
   const showPausedPreview = isSelf && isSharing && !localPreviewEnabled;
   const [streamZoom, setStreamZoom] = useState({ scale: MIN_STREAM_ZOOM, originX: 50, originY: 50 });
 

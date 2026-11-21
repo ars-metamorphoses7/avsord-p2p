@@ -3,6 +3,7 @@
 // MediaStreamTrackGenerator, which then goes through the same WebRTC senders
 // as a Chromium capture track.
 const FIRST_FRAME_TIMEOUT_MS = 3_000;
+const MAX_PENDING_WRITES = 2;
 
 export function canUseNativeCapture(desktop, source) {
   return Boolean(desktop?.nativeCaptureSupported
@@ -22,6 +23,7 @@ export async function startNativeScreenCapture(desktop, source, { firstFrameTime
   const channel = new MessageChannel();
   const size = { width: 0, height: 0 };
   let stopped = false;
+  let pendingWrites = 0;
   let receivedFirstFrame;
   const firstFrame = new Promise((resolve) => { receivedFirstFrame = resolve; });
   let removeEndedListener = () => {};
@@ -43,7 +45,16 @@ export async function startNativeScreenCapture(desktop, source, { firstFrameTime
     size.width = frame.displayWidth;
     size.height = frame.displayHeight;
     receivedFirstFrame();
-    writer.write(frame).catch(() => frame.close());
+    if (pendingWrites >= MAX_PENDING_WRITES) {
+      // Encoder/WebRTC is momentarily behind: drop and release the GPU slot
+      // immediately instead of queueing stale frames and adding latency.
+      frame?.close?.();
+      return;
+    }
+    pendingWrites += 1;
+    writer.write(frame)
+      .catch(() => frame.close())
+      .finally(() => { pendingWrites -= 1; });
   };
   window.postMessage('jump-native-capture-port', '*', [channel.port2]);
 

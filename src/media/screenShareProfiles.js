@@ -24,25 +24,26 @@ export const SCREEN_SHARE_ADAPT_INTERVAL_MS = 1_500;
 
 /**
  * Operating points of the automatic stream. GCC owns the bitrate inside a
- * level; `maxBitrate` is only a ceiling and is never derived from the
- * bandwidth estimate. `floorBitrate` is the estimate below which the level
- * looks worse than the next one down.
+ * level; `maxBitrate` is a realistic ceiling (10 Mb/s in 1080p60 avoids
+ * overshooting residential routers/Wi-Fi the way 20+ Mb/s bursts did in field
+ * logs) and is never derived from the bandwidth estimate. `floorBitrate` is
+ * the estimate below which the level looks worse than the next one down.
  */
 export const STREAM_LEVELS = [
-  { height: 1080, maxBitrate: 20_000_000, floorBitrate: 4_500_000 },
-  { height: 720, maxBitrate: 10_000_000, floorBitrate: 2_200_000 },
-  { height: 540, maxBitrate: 4_000_000, floorBitrate: 0 },
+  { height: 1080, maxBitrate: 10_000_000, floorBitrate: 3_200_000 },
+  { height: 720, maxBitrate: 6_000_000, floorBitrate: 1_600_000 },
+  { height: 540, maxBitrate: 3_000_000, floorBitrate: 0 },
 ];
 export const STREAM_FRAME_RATES = [60, 30];
 
 const STREAM_WINDOW = 8;
 const STREAM_PRESSURE_VOTES = 6;
-const STREAM_HEADROOM_RATIO = 1.5;
+const STREAM_HEADROOM_RATIO = 1.35;
 // GCC needs a few seconds to ramp after start; never judge it earlier.
 const STREAM_STARTUP_SAMPLES = 8;
 const STREAM_MIN_HOLD_SAMPLES = 6;
 const STREAM_UPGRADE_WAIT_SAMPLES = 20;
-const STREAM_MAX_UPGRADE_WAIT_SAMPLES = 160;
+const STREAM_MAX_UPGRADE_WAIT_SAMPLES = 60;
 
 // Older builds and saved settings used performance/quality (and earlier
 // aliases). There is a single automatic mode now; every id maps to it.
@@ -231,10 +232,11 @@ export function safeVideoSenderScale(requestedScale, dimensions = {}, minimumHei
 
 function streamBitrate(level, peerCount = 1) {
   // A mesh uploads one encoded stream per peer and every peer connection runs
-  // its own GCC. Share the ceiling only for larger meshes; two viewers at full
-  // budget fit typical uplinks and GCC still backs off on a real bottleneck.
+  // its own GCC. Share the uplink budget starting at 2 viewers so two 1080p60
+  // streams do not saturate residential uplinks or VPN tunnels together.
   const peers = Math.max(1, Number(peerCount) || 1);
-  return Math.round(STREAM_LEVELS[level].maxBitrate * (peers >= 3 ? 0.75 : 1));
+  const factor = peers >= 3 ? 0.6 : peers === 2 ? 0.75 : 1;
+  return Math.round(STREAM_LEVELS[level].maxBitrate * factor);
 }
 
 function streamScale(level, dimensions = {}, minimumHeight = 360) {
@@ -309,16 +311,32 @@ export function evaluateStream(previous, diagnostics = {}) {
     || !Number.isFinite(Number(value)) ? null : Number(value));
   const estimate = finite(diagnostics.availableOutgoingBitrate);
   const bwe = estimate !== null && estimate > 0 ? estimate : null;
+  const sendBps = finite(diagnostics.sendBitrateBps);
+  const lossRatio = finite(diagnostics.packetLossRatio);
   const captureFps = finite(diagnostics.captureFps);
   const encodeFps = finite(diagnostics.framesPerSecond);
   const expectedFps = captureFps === null ? null : Math.min(captureFps, state.frameRate);
   const encoderBehind = expectedFps !== null && expectedFps >= 10 && encodeFps !== null
     && encodeFps < expectedFps * 0.75;
   const encoder = encoderBehind || diagnostics.qualityLimitationReason === 'cpu';
-  const bandwidth = bwe !== null && bwe < STREAM_LEVELS[state.level].floorBitrate;
+  // On calm/menu screens GCC lets BWE drift down because the encoder only sends
+  // ~0.2-1 Mb/s (application-limited). Do not drop resolution unless the stream
+  // is actually pressing against BWE, losing packets, or bandwidth-limited.
+  const networkStarved = diagnostics.qualityLimitationReason === 'bandwidth'
+    || (lossRatio !== null && lossRatio >= 0.015)
+    || sendBps === null
+    || (bwe !== null && sendBps >= bwe * 0.6);
+  const bandwidth = bwe !== null && bwe < STREAM_LEVELS[state.level].floorBitrate && networkStarved;
   const headroom = !encoder && bwe !== null && state.level > 0
     && bwe >= STREAM_LEVELS[state.level - 1].floorBitrate * STREAM_HEADROOM_RATIO;
   state.votes = [...state.votes, { bandwidth, encoder, headroom }].slice(-STREAM_WINDOW);
+
+  if (state.lastUpgradeSample !== null
+      && state.lastUpgradeSample === state.lastChangeSample
+      && state.upgradeWaitSamples > STREAM_UPGRADE_WAIT_SAMPLES
+      && state.sampleCount - state.lastUpgradeSample >= STREAM_UPGRADE_WAIT_SAMPLES * 2) {
+    state.upgradeWaitSamples = STREAM_UPGRADE_WAIT_SAMPLES;
+  }
 
   if (state.sampleCount <= STREAM_STARTUP_SAMPLES
       || state.sampleCount - state.lastChangeSample < STREAM_MIN_HOLD_SAMPLES

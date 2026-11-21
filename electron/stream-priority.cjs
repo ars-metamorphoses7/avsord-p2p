@@ -42,13 +42,20 @@ function setGpuPriority(pids, priorityClass) {
   });
 }
 
-function createStreamPriority({ getAppMetrics, platform = process.platform, setPriority = os.setPriority, applyGpuPriority = setGpuPriority } = {}) {
+function createStreamPriority({
+  getAppMetrics,
+  getExtraPids = () => [],
+  platform = process.platform,
+  setPriority = os.setPriority,
+  applyGpuPriority = setGpuPriority,
+} = {}) {
   let active = false;
   let pending = Promise.resolve();
   const apply = async (nextActive) => {
     if (platform !== 'win32' || nextActive === active) return { applied: false, active };
     active = nextActive;
-    const pids = streamProcessIds(getAppMetrics());
+    const extraPids = (getExtraPids() || []).filter((pid) => Number.isInteger(pid) && pid > 0);
+    const pids = [...new Set([...streamProcessIds(getAppMetrics()), ...extraPids])];
     const cpuPriority = nextActive ? os.constants.priority.PRIORITY_ABOVE_NORMAL : os.constants.priority.PRIORITY_NORMAL;
     for (const pid of pids) {
       try { setPriority(pid, cpuPriority); } catch { /* sandboxed or exited process */ }
@@ -66,8 +73,8 @@ function createStreamPriority({ getAppMetrics, platform = process.platform, setP
   };
 }
 
-function setupStreamPriority({ app, ipcMain }) {
-  const priority = createStreamPriority({ getAppMetrics: () => app.getAppMetrics() });
+function setupStreamPriority({ app, ipcMain, getExtraPids = () => [] }) {
+  const priority = createStreamPriority({ getAppMetrics: () => app.getAppMetrics(), getExtraPids });
   ipcMain.handle('stream:priority', (_event, active) => priority.set(active));
   return priority;
 }
