@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, desktopCapturer, globalShortcut, ipcMain, screen, session, sharedTexture, shell } = require('electron');
+const { app, BrowserWindow, clipboard, crashReporter, desktopCapturer, globalShortcut, ipcMain, screen, session, sharedTexture, shell } = require('electron');
 const os = require('node:os');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -45,6 +45,15 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 // an invisible renderer's priority, which can starve desktop capture even when
 // the network and hardware encoder still have capacity.
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
+
+// Local minidumps only (userData/Crashpad/reports); nothing is uploaded.
+try { crashReporter.start({ uploadToServer: false }); } catch { /* unsupported */ }
+let nativeCapture = null;
+let streamLogWriter = null;
+const logProcessGone = (line) => {
+  console.error(`[process-gone] ${line}`);
+  void streamLogWriter?.append?.([`processo encerrado: ${line}`]);
+};
 
 // Linux VA-API remains an unsupported/driver-dependent Chromium path. Keep it
 // opt-in until the release matrix proves Intel and AMD configurations, and do
@@ -372,6 +381,19 @@ async function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
+  // A dead renderer used to leave a black window while the native capture kept
+  // sending frames to it. Stop the capture, fall back to Chromium capture for
+  // the rest of the run if it was streaming natively, and reload the UI.
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    const wasNative = Boolean(nativeCapture?.active);
+    logProcessGone(`renderer ${details?.reason} exit=${details?.exitCode}${wasNative ? ' (captura nativa ativa)' : ''}`);
+    if (wasNative) nativeCapture.disable(`renderer ${details?.reason}`);
+    else nativeCapture?.stop('renderer-gone');
+    if (details?.reason === 'clean-exit') return;
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+    }, 500);
+  });
   mainWindow.on('maximize', publishWindowState);
   mainWindow.on('unmaximize', publishWindowState);
   const explicitInvite = parseDeepLink(pendingDeepLink);
@@ -446,8 +468,12 @@ if (!hasSingleInstanceLock) {
     setupMediaDiagnostics();
     desktopMedia = setupDesktopMedia({ desktopCapturer, ipcMain, session });
     setupStreamPriority({ app, ipcMain });
-    setupStreamLog({ app, ipcMain });
-    setupNativeCapture({ app, ipcMain, sharedTexture, screen });
+    streamLogWriter = setupStreamLog({ app, ipcMain });
+    nativeCapture = setupNativeCapture({ app, ipcMain, sharedTexture, screen });
+    app.on('child-process-gone', (_event, details) => {
+      if (details?.reason === 'clean-exit') return;
+      logProcessGone(`${details?.type}${details?.serviceName ? `/${details.serviceName}` : ''} ${details?.reason} exit=${details?.exitCode}`);
+    });
     await createWindow();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
