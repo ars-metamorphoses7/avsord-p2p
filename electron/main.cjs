@@ -445,9 +445,9 @@ if (!hasSingleInstanceLock) {
     setupClipboard();
     setupMediaDiagnostics();
     desktopMedia = setupDesktopMedia({ desktopCapturer, ipcMain, session });
-    setupStreamPriority({ app, ipcMain });
+    const nativeCapture = setupNativeCapture({ app, ipcMain, sharedTexture, screen });
+    setupStreamPriority({ app, ipcMain, getExtraPids: () => (nativeCapture.pid ? [nativeCapture.pid] : []) });
     setupStreamLog({ app, ipcMain });
-    setupNativeCapture({ app, ipcMain, sharedTexture, screen });
     await createWindow();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -2739,6 +2739,25 @@ function App() {
     void setSfuConsumerWatching(peerId, nextWatching);
   }, [remoteStreams, setSfuConsumerWatching]);
 
+  // Raise Windows CPU/GPU priority while either sending OR watching a screen
+  // share. Viewers running a heavy game otherwise starve D3D11VideoDecoder,
+  // drop dozens of frames, and flood the sender with PLI/keyframe requests.
+  const streamPriorityNeeded = Boolean(isSharing || (inCall && Object.entries(remoteCallStates).some(([peerId, state]) => (
+    state?.sharing === true && streamWatching[peerId] !== false
+  ))));
+  const streamPriorityRequestedRef = useRef(false);
+  useEffect(() => {
+    if (!streamPriorityNeeded && !streamPriorityRequestedRef.current) return;
+    streamPriorityRequestedRef.current = streamPriorityNeeded;
+    void globalThis.jumpDesktop?.setStreamPriority?.(streamPriorityNeeded)?.catch?.(() => {});
+  }, [streamPriorityNeeded]);
+  useEffect(() => () => {
+    if (streamPriorityRequestedRef.current) {
+      streamPriorityRequestedRef.current = false;
+      void globalThis.jumpDesktop?.setStreamPriority?.(false)?.catch?.(() => {});
+    }
+  }, []);
+
   const openParticipantVolumes = useCallback((event, person) => {
     if (person.self) return;
     event.preventDefault();

@@ -27,7 +27,7 @@ import {
 import {
   meshCodecPolicyForLocalCapabilities,
 } from './meshCodecPolicy.js';
-import { signaledCandidate } from './icePolicy.js';
+import { deprioritizeVpnSdp, signaledCandidate } from './icePolicy.js';
 
 const ICE_RESTART_DELAY_MS = 4_000;
 const ICE_RESTART_RETRY_MS = 10_000;
@@ -259,8 +259,19 @@ function publishRemoteTrack(slot, peerId, event, remoteStreamsRef, setRemoteStre
   };
   slot.remoteBundle.stream = incoming;
   const role = remoteTrackRole(slot.pc, event.transceiver, event.track);
-  const roleStream = streamForTrack(event.track);
+  const existingRoleStream = role === 'video' ? slot.p2pVideoStream : slot.remoteBundle[`${role}Stream`];
+  const sameTrack = Boolean(
+    event.track
+    && existingRoleStream?.getTracks?.().length === 1
+    && existingRoleStream.getTracks()[0] === event.track,
+  );
+  const roleStream = sameTrack ? existingRoleStream : streamForTrack(event.track);
   if (role === 'video') slot.p2pVideoStream = roleStream;
+  if (role === 'video' && slot.screenSfuConsumerId) {
+    // Keep the active SFU video stream attached while only updating p2pVideoStream fallback.
+    return;
+  }
+  if (sameTrack && slot.remoteBundle[`${role}Stream`] === roleStream) return;
   slot.remoteBundle[`${role}Stream`] = roleStream;
   if (mountedRef.current) setRemoteStreams((current) => ({ ...current, [peerId]: { ...slot.remoteBundle } }));
 }
@@ -695,7 +706,10 @@ export function usePeerMesh({
           target: peerId,
           data: {
             type: 'offer',
-            sdp: slot.pc.localDescription,
+            sdp: {
+              type: slot.pc.localDescription.type,
+              sdp: deprioritizeVpnSdp(slot.pc.localDescription.sdp),
+            },
           },
         });
         return true;
@@ -1042,13 +1056,17 @@ export function usePeerMesh({
       await slot.mediaReady;
       if (data.type === 'candidate') {
         if (slot.ignoreOffer) return false;
-        if (slot.pc.remoteDescription) await slot.pc.addIceCandidate(data.candidate);
-        else pendingCandidatesRef.current.set(from, [...(pendingCandidatesRef.current.get(from) || []), data.candidate]);
+        const normalizedCandidate = signaledCandidate(data.candidate);
+        if (slot.pc.remoteDescription) await slot.pc.addIceCandidate(normalizedCandidate);
+        else pendingCandidatesRef.current.set(from, [...(pendingCandidatesRef.current.get(from) || []), normalizedCandidate]);
         return true;
       }
 
       if (data.type !== 'offer' && data.type !== 'answer') return false;
-      const description = new RTCSessionDescription(data.sdp);
+      const description = new RTCSessionDescription({
+        type: data.sdp.type,
+        sdp: deprioritizeVpnSdp(data.sdp.sdp),
+      });
       const readyForOffer = !slot.makingOffer
         && (slot.pc.signalingState === 'stable' || slot.isSettingRemoteAnswerPending);
       const offerCollision = description.type === 'offer' && !readyForOffer;
@@ -1148,7 +1166,17 @@ export function usePeerMesh({
         if (slot.videoSender.track) slot.videoTransceiver.direction = 'sendrecv';
         if (slot.screenAudioSender?.track) slot.screenAudioTransceiver.direction = 'sendrecv';
         await slot.pc.setLocalDescription(await slot.pc.createAnswer());
-        sendSignal({ type: 'signal', target: from, data: { type: 'answer', sdp: slot.pc.localDescription } });
+        sendSignal({
+          type: 'signal',
+          target: from,
+          data: {
+            type: 'answer',
+            sdp: {
+              type: slot.pc.localDescription.type,
+              sdp: deprioritizeVpnSdp(slot.pc.localDescription.sdp),
+            },
+          },
+        });
       }
       return true;
     }, () => onPeerError?.('A conexão com este participante foi interrompida.'));

@@ -191,7 +191,7 @@ function createNativeCapture({
     });
   }
 
-  return { available, start, stop, get active() { return Boolean(session); } };
+  return { available, start, stop, get active() { return Boolean(session); }, get pid() { return Number(session?.child?.pid) || 0; } };
 }
 
 function setupNativeCapture({ app, ipcMain, sharedTexture, screen }) {
