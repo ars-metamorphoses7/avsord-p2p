@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { groupServers, INVITE_ADDRESS_KEY, parseServerAddress, probeSignalServer, serverAddressLabel } from '../network/serverDirectory.js';
+import { PixelIcon } from './Win98Icons.jsx';
 
 function readInviteAddress() {
   try { return localStorage.getItem(INVITE_ADDRESS_KEY) || ''; } catch { return ''; }
@@ -97,7 +98,7 @@ export function ServersDialog({ sessions, currentSignal, currentServer, isAdmin,
     <div className="app-settings-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="app-settings-dialog servers-dialog" role="dialog" aria-modal="true" aria-labelledby="servers-title" onMouseDown={(event) => event.stopPropagation()}>
         <div className="app-settings-titlebar">
-          <div className="app-settings-titlebar-label"><strong id="servers-title">JUMP — servidores</strong></div>
+          <div className="app-settings-titlebar-label"><PixelIcon name="globe" size={16} /><strong id="servers-title">JUMP — servidores</strong></div>
           <button type="button" className="win98-close-control" aria-label="Fechar servidores" onClick={onClose}>×</button>
         </div>
         <div className="app-settings-body">

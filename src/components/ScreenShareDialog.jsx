@@ -1,5 +1,5 @@
-import { Check, Gauge, Link2, Monitor, Volume2 } from 'lucide-react';
 import { SCREEN_SHARE_PROFILES } from '../media/screenShareProfiles.js';
+import { PixelIcon } from './Win98Icons.jsx';
 
 function SourceCard({ source, selected, onSelect, audio = false }) {
   return (
@@ -10,19 +10,18 @@ function SourceCard({ source, selected, onSelect, audio = false }) {
       aria-pressed={selected}
     >
       <span className="screen-share-thumbnail">
-        {source.thumbnail ? <img src={source.thumbnail} alt="" draggable="false" /> : source.appIcon ? <img src={source.appIcon} alt="" draggable="false" /> : <span className="screen-share-thumbnail-placeholder">J</span>}
+        {source.thumbnail ? <img src={source.thumbnail} alt="" draggable="false" /> : source.appIcon ? <img src={source.appIcon} alt="" draggable="false" /> : <span className="screen-share-thumbnail-placeholder"><PixelIcon name="computer" size={24} /></span>}
       </span>
       <span className="screen-share-source-copy">
         <strong>{source.name || (source.type === 'screen' ? 'tela inteira' : 'janela')}</strong>
         <small>{audio ? (source.audioLabel || (source.type === 'screen' ? 'todo o áudio da tela' : source.processName || 'áudio deste aplicativo')) : (source.type === 'screen' ? 'tela inteira' : 'janela')}</small>
       </span>
-      {selected && <Check className="screen-share-selected-check" size={15} aria-hidden="true" />}
+      {selected && <PixelIcon name="check" className="screen-share-selected-check" size={14} />}
     </button>
   );
 }
 
 export function ScreenShareDialog({
-  appIcon,
   sources,
   loading,
   mediaCapabilities,
@@ -52,13 +51,13 @@ export function ScreenShareDialog({
     <div className="screen-share-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
       <div className="screen-share-dialog" role="dialog" aria-modal="true" aria-labelledby="screen-share-title" onMouseDown={(event) => event.stopPropagation()}>
         <div className="screen-share-titlebar">
-          <div className="screen-share-titlebar-label"><img className="room-info-titlebar-icon" src={appIcon} alt="" aria-hidden="true" draggable="false" /><strong id="screen-share-title">JUMP — compartilhar tela</strong></div>
+          <div className="screen-share-titlebar-label"><PixelIcon name="screen" size={16} /><strong id="screen-share-title">JUMP — compartilhar tela</strong></div>
           <button type="button" className="win98-close-control" aria-label="Cancelar compartilhamento" title="Cancelar" onClick={onCancel}>×</button>
         </div>
 
         <div className="screen-share-tabs" role="tablist" aria-label="Tipo de fonte">
-          <button type="button" role="tab" aria-selected={tab === 'video'} className={tab === 'video' ? 'is-active' : ''} onClick={() => onTabChange('video')}><Monitor size={14} /> janela de vídeo</button>
-          <button type="button" role="tab" aria-selected={tab === 'audio'} disabled={!includeAudio || syncAudio} className={tab === 'audio' ? 'is-active' : ''} onClick={() => onTabChange('audio')}><Volume2 size={14} /> janela de áudio</button>
+          <button type="button" role="tab" aria-selected={tab === 'video'} className={tab === 'video' ? 'is-active' : ''} onClick={() => onTabChange('video')}><PixelIcon name="computer" size={14} /> janela de vídeo</button>
+          <button type="button" role="tab" aria-selected={tab === 'audio'} disabled={!includeAudio || syncAudio} className={tab === 'audio' ? 'is-active' : ''} onClick={() => onTabChange('audio')}><PixelIcon name="volume" size={14} /> janela de áudio</button>
         </div>
 
         <div className="screen-share-body">
@@ -89,7 +88,7 @@ export function ScreenShareDialog({
           </div>
 
           <fieldset className="screen-share-quality">
-            <legend><Gauge size={13} /> modo automático <span className={mediaCapabilities?.hardwareVideoEncoding ? 'is-accelerated' : ''}>{mediaCapabilities?.hardwareVideoEncoding ? 'GPU candidata' : mediaCapabilities ? 'encoder por software' : ''}</span></legend>
+            <legend><PixelIcon name="gauge" size={14} /> modo automático <span className={mediaCapabilities?.hardwareVideoEncoding ? 'is-accelerated' : ''}>{mediaCapabilities?.hardwareVideoEncoding ? 'GPU candidata' : mediaCapabilities ? 'encoder por software' : ''}</span></legend>
             <div>
               {Object.values(SCREEN_SHARE_PROFILES).map((profile) => (
                 <button type="button" key={profile.id} className={profileId === profile.id ? 'is-selected' : ''} aria-pressed={profileId === profile.id} onClick={() => onProfile(profile.id)}><strong>{profile.label}</strong><small>{profile.description}</small></button>
@@ -99,14 +98,14 @@ export function ScreenShareDialog({
 
           <div className="screen-share-audio-options">
             <label><input type="checkbox" checked={includeAudio} onChange={(event) => onIncludeAudio(event.target.checked)} /><span>incluir áudio</span></label>
-            <label className={!includeAudio || !canSyncAudio ? 'is-disabled' : ''}><input type="checkbox" checked={syncAudio} disabled={!includeAudio || !canSyncAudio} onChange={(event) => onSyncAudio(event.target.checked)} /><Link2 size={13} /><span>vincular áudio à janela</span></label>
-            {includeAudio && <small>{syncAudio ? 'a fonte de áudio acompanha o vídeo automaticamente' : 'escolha a fonte no botão “janela de áudio”'}</small>}
+            <label className={!includeAudio || !canSyncAudio ? 'is-disabled' : ''}><input type="checkbox" checked={syncAudio} disabled={!includeAudio || !canSyncAudio} onChange={(event) => onSyncAudio(event.target.checked)} /><PixelIcon name="link" size={13} /><span>vincular áudio à janela</span></label>
+            {includeAudio && <small>{syncAudio ? 'a fonte de áudio acompanha o vídeo automaticamente' : 'escolha a fonte na aba "janela de áudio"'}</small>}
           </div>
         </div>
 
         <div className="screen-share-actions">
-          <button type="button" className="dialog-primary" disabled={!canConfirm} onClick={() => onConfirm({ videoSource, audioSource: resolvedAudio, includeAudio, profileId })}>compartilhar</button>
-          <button type="button" className="dialog-secondary" onClick={onCancel}>cancelar</button>
+          <button type="button" className="dialog-primary" disabled={!canConfirm} onClick={() => onConfirm({ videoSource, audioSource: resolvedAudio, includeAudio, profileId })}>Compartilhar</button>
+          <button type="button" className="dialog-secondary" onClick={onCancel}>Cancelar</button>
         </div>
       </div>
     </div>

@@ -10,25 +10,28 @@
 // stream follows the game's frame rate.
 //
 // Usage: jump-capture.exe --pid <electron main pid> [--fps 60]
+//          [--max-width 1920] [--max-height 1080]
 //          (--monitor-point <x>,<y> | --monitor <index> | --window <hwnd>)
 // stdout (one message per line):
 //   READY <width> <height>
 //   TEX <generation> <slot> <handle> <width> <height>   handle valid in --pid
-//   FRAME <generation> <slot> <timestampUs>             copy into slot finished
+//   FRAME <generation> <slot> <timestampUs>             copy/scale finished
 //   ENDED <reason>                                      the source went away
 //   ERROR <step> <code>
 // stdin: "REL <generation> <slot>" returns a slot, "STOP" (or EOF) exits.
 #include <windows.h>
 #include <d3d11_4.h>
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -54,6 +57,7 @@ enum SlotState { kFree = 0, kCopying = 1, kSent = 2 };
 
 struct Slot {
   com_ptr<ID3D11Texture2D> texture;
+  com_ptr<ID3D11VideoProcessorOutputView> outputView;
   com_ptr<ID3D11Query> query;
   std::atomic<int> state{kFree};
   long long timestampUs = 0;
@@ -63,8 +67,13 @@ struct Slot {
 // generation; slots of an older generation stay alive until released.
 struct Generation {
   int id = 0;
+  UINT srcWidth = 0;
+  UINT srcHeight = 0;
   UINT width = 0;
   UINT height = 0;
+  bool scaled = false;
+  com_ptr<ID3D11VideoProcessorEnumerator> vpEnum;
+  com_ptr<ID3D11VideoProcessor> videoProcessor;
   Slot slots[kSlotCount];
 };
 
@@ -85,6 +94,8 @@ struct Options {
   POINT point{0, 0};
   int monitorIndex = 0;
   int maxFps = 60;
+  UINT maxWidth = 1920;
+  UINT maxHeight = 1080;
 };
 
 Options ParseOptions(int argc, wchar_t** argv) {
@@ -95,11 +106,28 @@ Options ParseOptions(int argc, wchar_t** argv) {
     else if (!wcscmp(argv[i], L"--window")) options.window = reinterpret_cast<HWND>(static_cast<uintptr_t>(_wcstoui64(value, nullptr, 10)));
     else if (!wcscmp(argv[i], L"--monitor")) options.monitorIndex = _wtoi(value);
     else if (!wcscmp(argv[i], L"--fps")) options.maxFps = _wtoi(value);
+    else if (!wcscmp(argv[i], L"--max-width")) options.maxWidth = static_cast<UINT>(std::max(0, _wtoi(value)));
+    else if (!wcscmp(argv[i], L"--max-height")) options.maxHeight = static_cast<UINT>(std::max(0, _wtoi(value)));
     else if (!wcscmp(argv[i], L"--monitor-point")) {
       options.hasPoint = swscanf_s(value, L"%ld,%ld", &options.point.x, &options.point.y) == 2;
     }
   }
   return options;
+}
+
+void ComputeOutputSize(UINT srcW, UINT srcH, UINT maxW, UINT maxH, UINT& outW, UINT& outH) {
+  const UINT evenSrcW = std::max(2u, srcW & ~1u);
+  const UINT evenSrcH = std::max(2u, srcH & ~1u);
+  if ((!maxW || evenSrcW <= maxW) && (!maxH || evenSrcH <= maxH)) {
+    outW = evenSrcW;
+    outH = evenSrcH;
+    return;
+  }
+  double scale = 1.0;
+  if (maxW && evenSrcW > maxW) scale = std::min(scale, static_cast<double>(maxW) / evenSrcW);
+  if (maxH && evenSrcH > maxH) scale = std::min(scale, static_cast<double>(maxH) / evenSrcH);
+  outW = std::max(2u, static_cast<UINT>(std::lround(evenSrcW * scale)) & ~1u);
+  outH = std::max(2u, static_cast<UINT>(std::lround(evenSrcH * scale)) & ~1u);
 }
 
 HMONITOR PickMonitor(const Options& options) {
@@ -117,18 +145,71 @@ HMONITOR PickMonitor(const Options& options) {
   return MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
 }
 
-// Keep capture GPU copies ahead of uncapped games, matching OBS and Electron's
-// stream-priority boost without waiting for an external PowerShell call.
+// Keep capture GPU work ahead of uncapped DX12 games: disable Windows 11
+// EcoQoS/Power Throttling for this windowless helper, raise CPU priority, and
+// request REALTIME GPU scheduling (falling back to HIGH/ABOVE_NORMAL).
 void BoostCapturePriority() {
-  SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+  SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+  if (HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll")) {
+    struct PowerThrottlingState {
+      ULONG Version;
+      ULONG ControlMask;
+      ULONG StateMask;
+    };
+    using SetProcInfoFn = BOOL(WINAPI*)(HANDLE, int, void*, DWORD);
+    if (auto setProcInfo = reinterpret_cast<SetProcInfoFn>(GetProcAddress(kernel32, "SetProcessInformation"))) {
+      // ProcessPowerThrottling (4): disable EXECUTION_SPEED (1) and IGNORE_TIMER_RESOLUTION (4).
+      PowerThrottlingState state{1, 0x1u | 0x4u, 0};
+      setProcInfo(GetCurrentProcess(), 4, &state, sizeof(state));
+    }
+  }
   if (HMODULE gdi32 = LoadLibraryW(L"gdi32.dll")) {
     using SetGpuPriorityFn = LONG(WINAPI*)(HANDLE, int);
     if (auto setGpuPriority = reinterpret_cast<SetGpuPriorityFn>(GetProcAddress(gdi32, "D3DKMTSetProcessSchedulingPriorityClass"))) {
-      setGpuPriority(GetCurrentProcess(), 4);  // D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH
+      for (int cls : {5, 4, 3}) {  // REALTIME -> HIGH -> ABOVE_NORMAL
+        if (setGpuPriority(GetCurrentProcess(), cls) == 0) break;
+      }
     }
     FreeLibrary(gdi32);
   }
 }
+
+void BoostDxgiDevicePriority(ID3D11Device* device) {
+  com_ptr<IDXGIDevice> dxgi;
+  if (!device || FAILED(device->QueryInterface(guid_of<IDXGIDevice>(), dxgi.put_void())) || !dxgi) return;
+  for (INT prio : {7, 5, 1}) {
+    if (SUCCEEDED(dxgi->SetGPUThreadPriority(prio))) break;
+  }
+}
+
+// Registers the current thread with Windows MMCSS ("Capture") so the kernel
+// schedules capture callbacks and completion checks like OBS/Discord.
+struct ScopedMmcssThread {
+  HMODULE avrt = nullptr;
+  HANDLE task = nullptr;
+  ScopedMmcssThread() {
+    avrt = LoadLibraryW(L"avrt.dll");
+    if (!avrt) return;
+    using SetCharsFn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+    using SetPrioFn = BOOL(WINAPI*)(HANDLE, int);
+    auto setChars = reinterpret_cast<SetCharsFn>(GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW"));
+    auto setPrio = reinterpret_cast<SetPrioFn>(GetProcAddress(avrt, "AvSetMmThreadPriority"));
+    if (!setChars) return;
+    DWORD taskIndex = 0;
+    task = setChars(L"Capture", &taskIndex);
+    if (!task) task = setChars(L"Pro Audio", &taskIndex);
+    if (task && setPrio) {
+      if (!setPrio(task, 2)) setPrio(task, 1);  // AVRT_PRIORITY_CRITICAL -> HIGH
+    }
+  }
+  ~ScopedMmcssThread() {
+    if (avrt && task) {
+      using RevertFn = BOOL(WINAPI*)(HANDLE);
+      if (auto revert = reinterpret_cast<RevertFn>(GetProcAddress(avrt, "AvRevertMmThreadCharacteristics"))) revert(task);
+    }
+    if (avrt) FreeLibrary(avrt);
+  }
+};
 
 struct ScopedTimerResolution {
   HMODULE winmm = nullptr;
@@ -167,10 +248,20 @@ int wmain(int argc, wchar_t** argv) {
 
   com_ptr<ID3D11Device> device;
   com_ptr<ID3D11DeviceContext> context;
-  HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+  HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                                  nullptr, 0, D3D11_SDK_VERSION, device.put(), nullptr, context.put());
+  if (FAILED(hr)) {
+    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                           nullptr, 0, D3D11_SDK_VERSION, device.put(), nullptr, context.put());
+  }
   if (FAILED(hr)) { Emit("ERROR d3d11 %ld\n", hr); return 2; }
   device.as<ID3D10Multithread>()->SetMultithreadProtected(TRUE);
+  BoostDxgiDevicePriority(device.get());
+  com_ptr<ID3D11VideoDevice> videoDevice;
+  com_ptr<ID3D11VideoContext> videoContext;
+  device->QueryInterface(guid_of<ID3D11VideoDevice>(), videoDevice.put_void());
+  context->QueryInterface(guid_of<ID3D11VideoContext>(), videoContext.put_void());
   com_ptr<::IInspectable> inspectable;
   check_hresult(CreateDirect3D11DeviceFromDXGIDevice(device.as<IDXGIDevice>().get(), inspectable.put()));
   const auto winrtDevice = inspectable.as<d3d::IDirect3DDevice>();
@@ -199,35 +290,103 @@ int wmain(int argc, wchar_t** argv) {
   std::mutex generationLock;
   std::vector<std::shared_ptr<Generation>> generations;  // current is back()
   int nextGenerationId = 1;
-  auto createGeneration = [&](UINT width, UINT height) -> std::shared_ptr<Generation> {
-    auto generation = std::make_shared<Generation>();
-    generation->id = nextGenerationId++;
-    generation->width = width;
-    generation->height = height;
-    for (int i = 0; i < kSlotCount; i++) {
-      Slot& slot = generation->slots[i];
-      D3D11_TEXTURE2D_DESC desc{};
-      desc.Width = width;
-      desc.Height = height;
-      desc.MipLevels = 1;
-      desc.ArraySize = 1;
-      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-      desc.SampleDesc.Count = 1;
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-      desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-      check_hresult(device->CreateTexture2D(&desc, nullptr, slot.texture.put()));
-      HANDLE local = nullptr;
-      check_hresult(slot.texture.as<IDXGIResource1>()->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &local));
-      HANDLE remote = nullptr;
-      const BOOL duplicated = DuplicateHandle(GetCurrentProcess(), local, target, &remote, 0, FALSE, DUPLICATE_SAME_ACCESS);
-      CloseHandle(local);
-      if (!duplicated) throw hresult_error(HRESULT_FROM_WIN32(GetLastError()));
-      D3D11_QUERY_DESC queryDesc{D3D11_QUERY_EVENT, 0};
-      check_hresult(device->CreateQuery(&queryDesc, slot.query.put()));
-      Emit("TEX %d %d %llu %u %u\n", generation->id, i, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(remote)), width, height);
+  auto createGeneration = [&](UINT rawWidth, UINT rawHeight) -> std::shared_ptr<Generation> {
+    const UINT srcW = std::max(2u, rawWidth & ~1u);
+    const UINT srcH = std::max(2u, rawHeight & ~1u);
+    UINT outW = srcW;
+    UINT outH = srcH;
+    ComputeOutputSize(srcW, srcH, options.maxWidth, options.maxHeight, outW, outH);
+    const bool needsScale = (outW != srcW || outH != srcH);
+
+    // Note: Electron 43's sharedTexture -> MediaStreamTrackGenerator -> WebRTC
+    // pipeline crashes (0xC0000005) on multi-planar NV12 shared textures, so
+    // shared output stays BGRA. When capturing >1080p (1440p/4K), downscale to
+    // <=1080p on the GPU Video Engine here to avoid shipping 2-4x extra pixels.
+    auto initGeneration = [&](bool useVideoScale) -> std::shared_ptr<Generation> {
+      auto generation = std::make_shared<Generation>();
+      generation->id = nextGenerationId;
+      generation->srcWidth = srcW;
+      generation->srcHeight = srcH;
+      generation->width = useVideoScale ? outW : srcW;
+      generation->height = useVideoScale ? outH : srcH;
+      generation->scaled = useVideoScale;
+
+      if (useVideoScale) {
+        if (!videoDevice || !videoContext) throw hresult_error(E_NOINTERFACE);
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDesc{};
+        contentDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        contentDesc.InputFrameRate = {static_cast<UINT>(std::max(1, options.maxFps)), 1};
+        contentDesc.InputWidth = srcW;
+        contentDesc.InputHeight = srcH;
+        contentDesc.OutputFrameRate = {static_cast<UINT>(std::max(1, options.maxFps)), 1};
+        contentDesc.OutputWidth = generation->width;
+        contentDesc.OutputHeight = generation->height;
+        contentDesc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+        check_hresult(videoDevice->CreateVideoProcessorEnumerator(&contentDesc, generation->vpEnum.put()));
+        check_hresult(videoDevice->CreateVideoProcessor(generation->vpEnum.get(), 0, generation->videoProcessor.put()));
+        videoContext->VideoProcessorSetStreamAutoProcessingMode(generation->videoProcessor.get(), 0, FALSE);
+        RECT srcRect{0, 0, static_cast<LONG>(srcW), static_cast<LONG>(srcH)};
+        RECT dstRect{0, 0, static_cast<LONG>(generation->width), static_cast<LONG>(generation->height)};
+        videoContext->VideoProcessorSetStreamSourceRect(generation->videoProcessor.get(), 0, TRUE, &srcRect);
+        videoContext->VideoProcessorSetStreamDestRect(generation->videoProcessor.get(), 0, TRUE, &dstRect);
+        videoContext->VideoProcessorSetOutputTargetRect(generation->videoProcessor.get(), TRUE, &dstRect);
+      }
+
+      HANDLE duplicatedHandles[kSlotCount]{};
+      try {
+        for (int i = 0; i < kSlotCount; i++) {
+          Slot& slot = generation->slots[i];
+          D3D11_TEXTURE2D_DESC desc{};
+          desc.Width = generation->width;
+          desc.Height = generation->height;
+          desc.MipLevels = 1;
+          desc.ArraySize = 1;
+          desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+          desc.SampleDesc.Count = 1;
+          desc.Usage = D3D11_USAGE_DEFAULT;
+          desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+          desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+          check_hresult(device->CreateTexture2D(&desc, nullptr, slot.texture.put()));
+          if (useVideoScale) {
+            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ovDesc{};
+            ovDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+            ovDesc.Texture2D.MipSlice = 0;
+            check_hresult(videoDevice->CreateVideoProcessorOutputView(slot.texture.get(), generation->vpEnum.get(), &ovDesc, slot.outputView.put()));
+          }
+          HANDLE local = nullptr;
+          check_hresult(slot.texture.as<IDXGIResource1>()->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &local));
+          HANDLE remote = nullptr;
+          const BOOL duplicated = DuplicateHandle(GetCurrentProcess(), local, target, &remote, 0, FALSE, DUPLICATE_SAME_ACCESS);
+          CloseHandle(local);
+          if (!duplicated) throw hresult_error(HRESULT_FROM_WIN32(GetLastError()));
+          duplicatedHandles[i] = remote;
+          D3D11_QUERY_DESC queryDesc{D3D11_QUERY_EVENT, 0};
+          check_hresult(device->CreateQuery(&queryDesc, slot.query.put()));
+        }
+      } catch (...) {
+        for (HANDLE remote : duplicatedHandles) {
+          if (remote) DuplicateHandle(target, remote, nullptr, nullptr, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
+        }
+        throw;
+      }
+
+      nextGenerationId += 1;
+      for (int i = 0; i < kSlotCount; i++) {
+        Emit("TEX %d %d %llu %u %u\n", generation->id, i,
+             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(duplicatedHandles[i])),
+             generation->width, generation->height);
+      }
+      return generation;
+    };
+
+    if (needsScale && videoDevice && videoContext) {
+      try {
+        return initGeneration(true);
+      } catch (...) {
+        // Adapter rejected BGRA VideoProcessor scaling: keep full-size copy.
+      }
     }
-    return generation;
+    return initGeneration(false);
   };
 
   auto size = item.Size();
@@ -237,13 +396,13 @@ int wmain(int argc, wchar_t** argv) {
   }
   // H.264 needs even dimensions; an odd last row/column is dropped.
   try {
-    generations.push_back(createGeneration(static_cast<UINT>(size.Width) & ~1u, static_cast<UINT>(size.Height) & ~1u));
+    generations.push_back(createGeneration(static_cast<UINT>(size.Width), static_cast<UINT>(size.Height)));
   } catch (hresult_error const& error) {
     Emit("ERROR textures %ld\n", static_cast<long>(error.code()));
     return 2;
   }
 
-  auto pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+  auto pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, size);
   auto session = pool.CreateCaptureSession(item);
   try { session.IsCursorCaptureEnabled(true); } catch (...) {}
   try {
@@ -270,15 +429,16 @@ int wmain(int argc, wchar_t** argv) {
   });
 
   pool.FrameArrived([&](wgc::Direct3D11CaptureFramePool const& sender, auto&&) {
+    thread_local ScopedMmcssThread mmcss;
     auto frame = sender.TryGetNextFrame();
     if (!frame || !running) return;
     const auto contentSize = frame.ContentSize();
     if (contentSize.Width != poolSize.Width || contentSize.Height != poolSize.Height) {
       if (contentSize.Width < 2 || contentSize.Height < 2) return;  // minimized window
       poolSize = contentSize;
-      sender.Recreate(winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, contentSize);
+      sender.Recreate(winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, contentSize);
       try {
-        auto next = createGeneration(static_cast<UINT>(contentSize.Width) & ~1u, static_cast<UINT>(contentSize.Height) & ~1u);
+        auto next = createGeneration(static_cast<UINT>(contentSize.Width), static_cast<UINT>(contentSize.Height));
         std::lock_guard<std::mutex> guard(generationLock);
         generations.push_back(next);
       } catch (hresult_error const& error) {
@@ -310,8 +470,25 @@ int wmain(int argc, wchar_t** argv) {
     frame.Surface().as<IDirect3DDxgiInterfaceAccess>()->GetInterface(guid_of<ID3D11Texture2D>(), source.put_void());
     Slot& slot = generation->slots[chosen];
     slot.timestampUs = nowUs;
-    const D3D11_BOX box{0, 0, 0, generation->width, generation->height, 1};
-    context->CopySubresourceRegion(slot.texture.get(), 0, 0, 0, 0, source.get(), 0, &box);
+    if (generation->scaled && videoDevice && videoContext && generation->videoProcessor && slot.outputView) {
+      D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC ivDesc{};
+      ivDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+      com_ptr<ID3D11VideoProcessorInputView> inputView;
+      HRESULT vpHr = videoDevice->CreateVideoProcessorInputView(source.get(), generation->vpEnum.get(), &ivDesc, inputView.put());
+      if (SUCCEEDED(vpHr)) {
+        D3D11_VIDEO_PROCESSOR_STREAM stream{};
+        stream.Enable = TRUE;
+        stream.pInputSurface = inputView.get();
+        vpHr = videoContext->VideoProcessorBlt(generation->videoProcessor.get(), slot.outputView.get(), 0, 1, &stream);
+      }
+      if (FAILED(vpHr)) {
+        slot.state = kFree;
+        return;
+      }
+    } else {
+      const D3D11_BOX box{0, 0, 0, generation->width, generation->height, 1};
+      context->CopySubresourceRegion(slot.texture.get(), 0, 0, 0, 0, source.get(), 0, &box);
+    }
     context->End(slot.query.get());
     context->Flush();
   });
@@ -319,6 +496,7 @@ int wmain(int argc, wchar_t** argv) {
   // Announce a frame only after its copy finished on the GPU: the importer
   // reads the texture from another device without a keyed mutex.
   std::thread completion([&] {
+    ScopedMmcssThread mmcss;
     int pendingSpins = 0;
     while (running) {
       bool pending = false;
